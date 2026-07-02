@@ -2,7 +2,10 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>Swing City — low-poly Blade Runner, webs included</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="Web-sling across a procedurally generated neon city at night. Free to play in your browser.">
+<title>Swing City</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' fill='%23090014'/%3E%3Crect x='3' y='11' width='6' height='19' fill='%23ff2fa0'/%3E%3Crect x='13' y='4' width='7' height='26' fill='%2300e5ff'/%3E%3Crect x='23' y='15' width='6' height='15' fill='%23ff2fa0'/%3E%3Crect x='5' y='14' width='2' height='2' fill='%23fff'/%3E%3Crect x='15' y='8' width='2' height='2' fill='%23fff'/%3E%3Crect x='15' y='15' width='2' height='2' fill='%23fff'/%3E%3Crect x='18' y='11' width='2' height='2' fill='%23fff'/%3E%3Crect x='25' y='18' width='2' height='2' fill='%23fff'/%3E%3C/svg%3E">
 <style>
   html, body { margin: 0; height: 100%; overflow: hidden; background: #010208; }
   #hud {
@@ -34,16 +37,26 @@
   #score { position: fixed; right: 14px; top: 12px; color: #ffe27a; z-index: 10;
     font: 13px/1.5 ui-monospace, Menlo, monospace; text-shadow: 0 0 6px #a80;
     user-select: none; pointer-events: none; text-align: right; }
+  #powerups { position: fixed; right: 14px; top: 76px; z-index: 10; text-align: right;
+    font: 12px/1.6 ui-monospace, Menlo, monospace; user-select: none; pointer-events: none; }
+  #powerups div { text-shadow: 0 0 6px currentColor; }
+  #zombiewarn { position: fixed; left: 50%; top: 14%; transform: translateX(-50%);
+    color: #ff3355; font: 22px/1.4 ui-monospace, Menlo, monospace; text-shadow: 0 0 14px #ff3355;
+    z-index: 10; display: none; user-select: none; pointer-events: none; text-align: center;
+    letter-spacing: 3px; }
 </style>
 </head>
 <body>
 <div id="start"><div>
   <h1>SWING CITY</h1>
-  same procedural city as the Blender scene — seed 7, live traffic, rain, neon<br><br>
-  <b>click to enter</b> (pointer lock)<br><br>
-  mouse — look &nbsp;·&nbsp; <b>hold LMB or SPACE</b> — shoot web &amp; swing (release to let go)<br>
-  WASD — run / air control &nbsp;·&nbsp; shift — sprint &nbsp;·&nbsp; R — respawn on a rooftop<br><br>
-  swing into cars to knock them over &nbsp;·&nbsp; collect the glowing orbs &nbsp;·&nbsp; don't fly past the city edge
+  A living neon city at night. Sling a web, swing between skyscrapers, and see how much
+  trouble you can cause before the night's over.<br><br>
+  <b>click to enter</b><br><br>
+  mouse — look &nbsp;·&nbsp; <b>hold LMB or SPACE</b> — shoot a web and swing (let go to release)<br>
+  WASD — run / steer in the air &nbsp;·&nbsp; shift — sprint &nbsp;·&nbsp; R — respawn<br><br>
+  <b>HOW TO WIN:</b> there's no ending — just a high score. Smash into cars while swinging to send
+  them flying (+25), grab the glowing orbs for points (+10) — a few unusual-looking ones do
+  something other than add points. Stay over the city. The streets below do not forgive.
 </div></div>
 <div id="gameover"><div>
   <h1>SWING&hellip; SWANG&hellip; SWUNG</h1>
@@ -52,7 +65,9 @@
 </div></div>
 <div id="flash"></div>
 <div id="hud">web: <b id="webstate">ready</b> · speed: <b id="speed">0</b></div>
-<div id="score">cars knocked: <b id="knocked">0</b><br>orbs: <b id="orbs">0</b>/<b id="orbstotal">0</b></div>
+<div id="score">score: <b id="scoretotal">0</b><br>cars knocked: <b id="knocked">0</b><br>orbs: <b id="orbs">0</b>/<b id="orbstotal">0</b></div>
+<div id="powerups"></div>
+<div id="zombiewarn">ZOMBIES INBOUND</div>
 <div id="center"></div>
 
 <script>
@@ -89,6 +104,7 @@ import * as THREE from 'three';
 import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
 
 // ---------------------------------------------------------------- CONFIG --
 // Mirrors city_generator.py CONFIG. Change dials here, logic stays put.
@@ -105,13 +121,27 @@ const LIGHT_GREEN = 4.2, LIGHT_ALLRED = 0.9;
 const RAIN_COUNT = 900;
 const PALETTE = [[0.0, 0.85, 1.0], [1.0, 0.10, 0.6], [0.6, 0.20, 1.0], [0.1, 1.0, 0.7]];
 // gameplay
-const OUT_OF_BOUNDS_MARGIN = 14;        // how far past the city edge before you explode
+// OUT_OF_BOUNDS_MARGIN (real bug fix): this used to be 14, and the ground
+// plane extended CITY_EXTENT*2 beyond that -- so you could walk ~90 EXTRA
+// units past the visible last building, still standing on lit "city ground"
+// the whole way, before the invisible wall ever caught you. Alex: "I've
+// walked very far... and I haven't exploded" -- correct, the ground was
+// lying to him about where the world actually ended. Tightened margin +
+// ground plane now sized to just past it (see ground mesh below) + an
+// actual visible boundary wall, so the edge is something you SEE coming.
+const OUT_OF_BOUNDS_MARGIN = 5;
 const KNOCK_SPEED = 6.0, KNOCK_RADIUS = 1.5;   // min player speed / range to knock a car over
 const PICKUP_PER_BLOCK = 1, PICKUP_SCORE = 10, KNOCK_SCORE = 25;
+const JUMP_VEL_NORMAL = 12, JUMP_VEL_BOOSTED = 20, JUMP_BOOST_DURATION = 9;
+const NOIR_DURATION = 10;
+const SLOWTIME_DURATION = 6, SLOWTIME_WORLD_SCALE = 0.32, SLOWTIME_PLAYER_SCALE = 0.8;
+const ZOMBIE_SPEED = 3.0, ZOMBIE_WAVE_DURATION = 26, ZOMBIE_COUNT = 12, ZOMBIE_KILL_TIME = 0.5;
+const FALL_SPAWN_Y = 240;   // "battle bus" drop height, above city center
 
 const PITCH = BLOCK_SIZE + STREET_W;
 const HALF = (GRID_N - 1) / 2 * PITCH;
 const CITY_EXTENT = GRID_N * PITCH, EDGE = CITY_EXTENT / 2;
+const WORLD_BOUND = EDGE + OUT_OF_BOUNDS_MARGIN;   // exact radius the OOB check fires at
 const blockCenter = i => i * PITCH - HALF;
 const roadPos = k => (k - 0.5) * PITCH - HALF;
 const ROADS = Array.from({ length: GRID_N + 1 }, (_, k) => roadPos(k));
@@ -146,6 +176,21 @@ const composer = new EffectComposer(renderer);
 composer.addPass(new RenderPass(scene, camera));
 const bloom = new UnrealBloomPass(new THREE.Vector2(innerWidth, innerHeight), 0.75, 0.55, 0.55);
 composer.addPass(bloom);
+
+// NOIR pickup: full desaturation, driven by uSat (1 = normal, 0 = grayscale).
+// Lerped toward its target each frame in the main loop -- see noirTimer.
+const noirPass = new ShaderPass({
+  uniforms: { tDiffuse: { value: null }, uSat: { value: 1.0 } },
+  vertexShader: `varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+  fragmentShader: `
+    uniform sampler2D tDiffuse; uniform float uSat; varying vec2 vUv;
+    void main() {
+      vec4 c = texture2D(tDiffuse, vUv);
+      float g = dot(c.rgb, vec3(0.299, 0.587, 0.114));
+      gl_FragColor = vec4(mix(vec3(g), c.rgb, uSat), c.a);
+    }`,
+});
+composer.addPass(noirPass);
 
 addEventListener('resize', () => {
   camera.aspect = innerWidth / innerHeight;
@@ -257,11 +302,36 @@ instancedBoxes(crowns, crownMat, 2.2);
 instancedBoxes(antennas.map(a => ({ ...a, sx: 0.12, sz: 0.12 })), crownMat, 3.0);
 
 // Ground, roads, sidewalks, dashes
+// Ground now sized to just past WORLD_BOUND (not CITY_EXTENT*2) -- see the
+// OUT_OF_BOUNDS_MARGIN comment above for why that oversized plane was the
+// actual bug behind "I walked far and didn't explode."
 const ground = new THREE.Mesh(
-  new THREE.BoxGeometry(CITY_EXTENT * 2, 0.2, CITY_EXTENT * 2),
+  new THREE.BoxGeometry(WORLD_BOUND * 2.15, 0.2, WORLD_BOUND * 2.15),
   new THREE.MeshStandardMaterial({ color: 0x07070a, roughness: 0.95 }));
 ground.position.y = -0.1;
 scene.add(ground);
+
+// A visible boundary wall AT EXACTLY WORLD_BOUND -- four tall, glowing,
+// semi-transparent panes so you see the edge of the world coming instead of
+// hitting an invisible tripwire. Matches the square OOB check exactly (not
+// a circle) so the visual cue and the actual trigger line up.
+{
+  const wallMat = new THREE.MeshBasicMaterial({
+    color: 0xff3355, transparent: true, opacity: 0.16, side: THREE.DoubleSide,
+    blending: THREE.AdditiveBlending, depthWrite: false,
+  });
+  const wallH = 340, wallSpan = WORLD_BOUND * 2.1;
+  const mkWall = (x, z, rotY, w) => {
+    const m = new THREE.Mesh(new THREE.PlaneGeometry(w, wallH), wallMat);
+    m.position.set(x, wallH / 2 - 20, z);
+    m.rotation.y = rotY;
+    scene.add(m);
+  };
+  mkWall(WORLD_BOUND, 0, Math.PI / 2, wallSpan);
+  mkWall(-WORLD_BOUND, 0, Math.PI / 2, wallSpan);
+  mkWall(0, WORLD_BOUND, 0, wallSpan);
+  mkWall(0, -WORLD_BOUND, 0, wallSpan);
+}
 
 const roadMat = new THREE.MeshStandardMaterial({ color: 0x0a0a0d, roughness: 0.85 });
 const walkMat = new THREE.MeshStandardMaterial({ color: 0x17171c, roughness: 0.7 });
@@ -385,17 +455,32 @@ const parkedCars = [];
 }
 
 // ---------------------------------------------------------------- PICKUPS --
-// One glowing orb per block, floating at swing height so collecting them
-// rewards actually swinging through the city rather than just running.
-const pickupMat = new THREE.MeshBasicMaterial({ color: 0xffe27a });
+// One pickup per block, floating at swing height so collecting them rewards
+// actually swinging through the city rather than just running. Most are
+// plain score orbs; a handful are special powerups, each with a distinct
+// shape+color so you can tell them apart in the air before you commit.
+const PICKUP_TYPES = [
+  { key: 'orb',    odds: 0.64, color: 0xffe27a, geo: () => new THREE.OctahedronGeometry(0.42) },
+  { key: 'noir',   odds: 0.14, color: 0xd8d8e0, geo: () => new THREE.IcosahedronGeometry(0.46, 0) },
+  { key: 'jump',   odds: 0.11, color: 0x6dff7a, geo: () => new THREE.ConeGeometry(0.34, 0.85, 4) },
+  { key: 'slow',   odds: 0.08, color: 0x6bd4ff, geo: () => new THREE.TorusGeometry(0.34, 0.13, 6, 14) },
+  { key: 'zombie', odds: 0.03, color: 0xaa2244, geo: () => new THREE.IcosahedronGeometry(0.5, 1) },
+];
+const pickupMats = Object.fromEntries(PICKUP_TYPES.map(t => [t.key, new THREE.MeshBasicMaterial({ color: t.color })]));
+function rollPickupType() {
+  let r = rng(), acc = 0;
+  for (const t of PICKUP_TYPES) { acc += t.odds; if (r < acc) return t; }
+  return PICKUP_TYPES[0];
+}
 const pickups = [];
 for (let i = 0; i < GRID_N; i++) for (let j = 0; j < GRID_N; j++) {
   for (let k = 0; k < PICKUP_PER_BLOCK; k++) {
-    const mesh = new THREE.Mesh(new THREE.OctahedronGeometry(0.45), pickupMat);
+    const type = rollPickupType();
+    const mesh = new THREE.Mesh(type.geo(), pickupMats[type.key]);
     const baseY = uniform(6, 15);
     mesh.position.set(blockCenter(i) + uniform(-4, 4), baseY, blockCenter(j) + uniform(-4, 4));
     scene.add(mesh);
-    pickups.push({ mesh, baseY, phase: uniform(0, 6.28), got: false });
+    pickups.push({ mesh, baseY, phase: uniform(0, 6.28), got: false, type: type.key });
   }
 }
 document.getElementById('orbstotal').textContent = pickups.length;
@@ -497,9 +582,201 @@ function stepRain(center, t) {
   rainGeo.attributes.position.needsUpdate = true;
 }
 
+// ------------------------------------------------------------------ AUDIO --
+// Everything here is SYNTHESIZED, not sampled -- short live Web Audio graphs
+// (oscillators + one shared noise buffer) built fresh per one-shot sound.
+// All SFX ride THREE.PositionalAudio (real spatial attenuation, distance-
+// based) attached to a throwaway Object3D at the sound's world position;
+// the music bus is separate and NOT spatial (it's the score, not a prop in
+// the world). AudioContext requires a user gesture to unlock -- resumed
+// inside the "click to enter" handler below.
+const audioCtx = THREE.AudioContext.getContext();
+const listener = new THREE.AudioListener();
+camera.add(listener);
+const noiseBuffer = audioCtx.createBuffer(1, audioCtx.sampleRate, audioCtx.sampleRate);
+{ const d = noiseBuffer.getChannelData(0); for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1; }
+
+function playSpatialAt(pos, build) {
+  const holder = new THREE.Object3D();
+  holder.position.copy(pos);
+  scene.add(holder);
+  const pa = new THREE.PositionalAudio(listener);
+  pa.setRefDistance(6);
+  pa.setRolloffFactor(1.6);
+  pa.setDistanceModel('exponential');
+  pa.setMaxDistance(150);
+  holder.add(pa);
+  const now = audioCtx.currentTime;
+  const { node, stopAt } = build(audioCtx, now);
+  pa.setNodeSource(node);
+  setTimeout(() => scene.remove(holder), Math.max(60, (stopAt - now) * 1000 + 120));
+}
+
+function sfxThwip(pos) {
+  playSpatialAt(pos, (ctx, now) => {
+    const osc = ctx.createOscillator(); osc.type = 'sine';
+    osc.frequency.setValueAtTime(1050, now);
+    osc.frequency.exponentialRampToValueAtTime(240, now + 0.10);
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0.0001, now);
+    g.gain.exponentialRampToValueAtTime(0.3, now + 0.008);
+    g.gain.exponentialRampToValueAtTime(0.0001, now + 0.13);
+    osc.connect(g);
+    osc.start(now); osc.stop(now + 0.14);
+    return { node: g, stopAt: now + 0.14 };
+  });
+}
+function sfxKnock(pos) {
+  playSpatialAt(pos, (ctx, now) => {
+    const out = ctx.createGain();
+    const src = ctx.createBufferSource(); src.buffer = noiseBuffer;
+    const filt = ctx.createBiquadFilter(); filt.type = 'lowpass'; filt.frequency.value = 900;
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0.5, now);
+    g.gain.exponentialRampToValueAtTime(0.001, now + 0.22);
+    src.connect(filt); filt.connect(g); g.connect(out);
+    src.start(now); src.stop(now + 0.24);
+    const osc = ctx.createOscillator(); osc.type = 'sine'; osc.frequency.setValueAtTime(110, now);
+    const g2 = ctx.createGain();
+    g2.gain.setValueAtTime(0.4, now);
+    g2.gain.exponentialRampToValueAtTime(0.001, now + 0.2);
+    osc.connect(g2); g2.connect(out);
+    osc.start(now); osc.stop(now + 0.2);
+    return { node: out, stopAt: now + 0.24 };
+  });
+}
+function sfxHonk(pos) {
+  playSpatialAt(pos, (ctx, now) => {
+    const o1 = ctx.createOscillator(); o1.type = 'square'; o1.frequency.value = 420;
+    const o2 = ctx.createOscillator(); o2.type = 'square'; o2.frequency.value = 528;
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0.0001, now);
+    g.gain.exponentialRampToValueAtTime(0.16, now + 0.03);
+    g.gain.setValueAtTime(0.16, now + 0.22);
+    g.gain.exponentialRampToValueAtTime(0.0001, now + 0.34);
+    o1.connect(g); o2.connect(g);
+    o1.start(now); o2.start(now); o1.stop(now + 0.36); o2.stop(now + 0.36);
+    return { node: g, stopAt: now + 0.36 };
+  });
+}
+function sfxPing(pos) {
+  playSpatialAt(pos, (ctx, now) => {
+    const osc = ctx.createOscillator(); osc.type = 'triangle';
+    osc.frequency.setValueAtTime(660, now);
+    osc.frequency.exponentialRampToValueAtTime(1320, now + 0.09);
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0.0001, now);
+    g.gain.exponentialRampToValueAtTime(0.25, now + 0.015);
+    g.gain.exponentialRampToValueAtTime(0.0001, now + 0.18);
+    osc.connect(g);
+    osc.start(now); osc.stop(now + 0.2);
+    return { node: g, stopAt: now + 0.2 };
+  });
+}
+function sfxExplode(pos) {
+  playSpatialAt(pos, (ctx, now) => {
+    const out = ctx.createGain();
+    const src = ctx.createBufferSource(); src.buffer = noiseBuffer; src.loop = true;
+    const filt = ctx.createBiquadFilter(); filt.type = 'lowpass';
+    filt.frequency.setValueAtTime(1800, now);
+    filt.frequency.exponentialRampToValueAtTime(90, now + 0.9);
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0.65, now);
+    g.gain.exponentialRampToValueAtTime(0.001, now + 0.9);
+    src.connect(filt); filt.connect(g); g.connect(out);
+    src.start(now); src.stop(now + 0.9);
+    const osc = ctx.createOscillator(); osc.type = 'sine'; osc.frequency.setValueAtTime(75, now);
+    osc.frequency.exponentialRampToValueAtTime(30, now + 0.6);
+    const g2 = ctx.createGain();
+    g2.gain.setValueAtTime(0.55, now);
+    g2.gain.exponentialRampToValueAtTime(0.001, now + 0.7);
+    osc.connect(g2); g2.connect(out);
+    osc.start(now); osc.stop(now + 0.7);
+    return { node: out, stopAt: now + 0.9 };
+  });
+}
+
+// Light, occasional honking from random moving traffic -- not constant, just
+// ambience. Rolled in the main loop off a countdown timer.
+let honkTimer = uniform(4, 9);
+function stepHonks(dt, p) {
+  honkTimer -= dt;
+  if (honkTimer > 0) return;
+  honkTimer = uniform(5, 11);
+  const c = choice(cars);
+  if (c && !c.knocked && p.pos.distanceTo(c.obj.position) < 70) sfxHonk(c.obj.position);
+}
+
+// ------------------------------------------------------------ CHIPTUNE FX --
+// Procedurally generated, not a fixed tune -- a sparse, moody, minor-key
+// loop (detective/noir brood: slow tempo, mostly-empty bassline, an
+// off-beat melody note that only sometimes plays). Different every load
+// because it draws from the SAME seeded rng stream as the city, so it's
+// reproducible per-seed but never mechanically identical bar to bar.
+const musicBus = audioCtx.createGain();
+musicBus.gain.value = 0.4;
+musicBus.connect(audioCtx.destination);
+const MUSIC_BPM = 74;
+const BEAT = 60 / MUSIC_BPM;
+const NOIR_SCALE = [110.00, 123.47, 130.81, 146.83, 164.81, 174.61, 196.00, 207.65];  // A2 natural-minor-ish, w/ b2
+let musicNext = 0, musicStep = 0, musicStarted = false;
+function scheduleMusic() {
+  while (musicNext < audioCtx.currentTime + 0.22) {
+    const t = musicNext;
+    if (musicStep % 4 === 0 || musicStep % 4 === 2) {
+      const o = audioCtx.createOscillator(); o.type = 'triangle';
+      o.frequency.value = NOIR_SCALE[0];
+      const filt = audioCtx.createBiquadFilter(); filt.type = 'lowpass'; filt.frequency.value = 420;
+      const g = audioCtx.createGain();
+      g.gain.setValueAtTime(0.0001, t);
+      g.gain.exponentialRampToValueAtTime(0.22, t + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + BEAT * 0.85);
+      o.connect(filt); filt.connect(g); g.connect(musicBus);
+      o.start(t); o.stop(t + BEAT);
+    }
+    if (rng() < 0.32) {
+      const note = choice(NOIR_SCALE) * 2;
+      const o = audioCtx.createOscillator(); o.type = 'square';
+      o.frequency.value = note;
+      const filt = audioCtx.createBiquadFilter(); filt.type = 'lowpass'; filt.frequency.value = 1300;
+      const g = audioCtx.createGain();
+      g.gain.setValueAtTime(0.0001, t);
+      g.gain.exponentialRampToValueAtTime(0.05, t + 0.015);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + BEAT * 0.55);
+      o.connect(filt); filt.connect(g); g.connect(musicBus);
+      o.start(t); o.stop(t + BEAT * 0.55);
+    }
+    musicNext += BEAT / 2;
+    musicStep++;
+  }
+}
+function startMusic() {
+  if (musicStarted) return;
+  musicStarted = true;
+  musicNext = audioCtx.currentTime + 0.1;
+  scheduleMusic();
+  setInterval(scheduleMusic, 100);   // classic lookahead scheduler interval
+}
+
 // ------------------------------------------------------- GAMEPLAY SYSTEMS --
-let knockedCount = 0;
+let knockedCount = 0, score = 0;
 const knockedEl = document.getElementById('knocked'), orbsEl = document.getElementById('orbs');
+const scoreEl = document.getElementById('scoretotal');
+const powerupsEl = document.getElementById('powerups');
+function addScore(n) { score += n; scoreEl.textContent = score; }
+
+// Powerup timers -- all just count down in the main loop; whichever are >0
+// are "active." See stepPickups() for what picks them up, applyPowerupFX()
+// for the HUD, and the main loop for where noir/jump/slow-time actually
+// change behavior (post FX pass, jump velocity, world dt scale).
+let noirTimer = 0, jumpBoostTimer = 0, slowTimeTimer = 0;
+function updatePowerupHud() {
+  const rows = [];
+  if (noirTimer > 0) rows.push(`<div style="color:#ddd">NOIR ${noirTimer.toFixed(1)}s</div>`);
+  if (jumpBoostTimer > 0) rows.push(`<div style="color:#6dff7a">JUMP BOOST ${jumpBoostTimer.toFixed(1)}s</div>`);
+  if (slowTimeTimer > 0) rows.push(`<div style="color:#6bd4ff">SLOW-MO ${slowTimeTimer.toFixed(1)}s</div>`);
+  powerupsEl.innerHTML = rows.join('');
+}
 
 // Shared tumble physics for any knocked car (moving or parked): simple
 // ballistic + spin, settle on the ground, then hand back to whichever
@@ -512,6 +789,8 @@ function knockCar(entry, hitDir, isParked) {
     timer: 2.6, grounded: false,
   };
   knockedCount++; knockedEl.textContent = knockedCount;
+  addScore(KNOCK_SCORE);
+  sfxKnock(entry.obj.position);
   if (isParked) { entry.origPos = entry.obj.position.clone(); entry.origRot = entry.obj.rotation.y; }
 }
 function stepKnocked(list, dt, isParked) {
@@ -563,9 +842,99 @@ function stepPickups(t, p) {
     pk.mesh.rotation.x = t * 0.7 + pk.phase;
     if (p.pos.distanceTo(pk.mesh.position) < 1.6) {
       pk.got = true; pk.mesh.visible = false; collectedNow++;
+      sfxPing(pk.mesh.position);
+      switch (pk.type) {
+        case 'noir': noirTimer = NOIR_DURATION; break;
+        case 'jump': jumpBoostTimer = JUMP_BOOST_DURATION; break;
+        case 'slow': slowTimeTimer = SLOWTIME_DURATION; break;
+        case 'zombie': spawnZombieWave(p.pos); break;
+        default: addScore(PICKUP_SCORE);   // plain orb -- the effect IS the points
+      }
     }
   }
   if (collectedNow) orbsEl.textContent = (parseInt(orbsEl.textContent) || 0) + collectedNow;
+}
+
+// ---------------------------------------------------------------- ZOMBIES --
+// Minecraft-plain low-poly zombies: box body + box head, dark desaturated
+// green. Triggered by the rare "zombie" pickup. They rise up out of the
+// ground OR off rooftops near where you were standing, then just walk
+// straight at you (no pathfinding -- open streets make direct-line chase
+// read fine for this). Touching you accumulates contact time; multiple
+// zombies touching at once accumulate it FASTER (stacking, as asked for),
+// and 0.5 accumulated seconds of contact is instant death via the SAME
+// explode/game-over path as flying out of bounds.
+const zombieMat = new THREE.MeshStandardMaterial({ color: 0x3a4a30, roughness: 0.85 });
+const zombies = [];
+let zombieWaveTimer = 0, zombieContact = 0;
+function makeZombie() {
+  const g = new THREE.Group();
+  const body = new THREE.Mesh(new THREE.BoxGeometry(0.55, 1.1, 0.35), zombieMat);
+  body.position.y = 0.65;
+  const head = new THREE.Mesh(new THREE.BoxGeometry(0.4, 0.4, 0.4), zombieMat);
+  head.position.y = 1.4;
+  g.add(body, head);
+  scene.add(g);
+  return g;
+}
+function spawnZombieWave(origin) {
+  zombieWaveTimer = ZOMBIE_WAVE_DURATION;
+  document.getElementById('zombiewarn').style.display = 'block';
+  for (let i = 0; i < ZOMBIE_COUNT; i++) {
+    const ang = uniform(0, Math.PI * 2), r = uniform(6, 24);
+    const gx = origin.x + Math.cos(ang) * r, gz = origin.z + Math.sin(ang) * r;
+    let baseY = 0;
+    if (rng() < 0.35) {   // pop up from a nearby rooftop instead of the street
+      let best = null, bestD = 999;
+      for (const c of colliders) {
+        const cx = (c.min[0] + c.max[0]) / 2, cz = (c.min[2] + c.max[2]) / 2;
+        const d = Math.hypot(cx - gx, cz - gz);
+        if (d < bestD) { bestD = d; best = c; }
+      }
+      if (best && bestD < 10) baseY = best.max[1];
+    }
+    const obj = makeZombie();
+    obj.position.set(gx, baseY - 1.4, gz);
+    zombies.push({ obj, baseY, riseT: 0, state: 'rising', wobble: uniform(0, 6.28) });
+  }
+}
+function stepZombies(dt, p) {
+  if (zombieWaveTimer > 0) {
+    zombieWaveTimer -= dt;
+    if (zombieWaveTimer <= 0) {
+      for (const z of zombies) z.state = 'sinking';
+      document.getElementById('zombiewarn').style.display = 'none';
+    }
+  }
+  let touching = 0;
+  for (let i = zombies.length - 1; i >= 0; i--) {
+    const z = zombies[i];
+    if (z.state === 'rising') {
+      z.riseT += dt;
+      const u = Math.min(1, z.riseT / 0.8);
+      z.obj.position.y = z.baseY - 1.4 + u * 1.4;
+      if (u >= 1) z.state = 'chasing';
+    } else if (z.state === 'chasing') {
+      const dir = new THREE.Vector3(p.pos.x - z.obj.position.x, 0, p.pos.z - z.obj.position.z);
+      const dist = dir.length();
+      if (dist > 0.4) {
+        dir.normalize();
+        z.obj.position.addScaledVector(dir, ZOMBIE_SPEED * dt);
+        z.obj.rotation.y = Math.atan2(dir.x, dir.z);
+      }
+      z.obj.position.y = z.baseY + Math.sin(performance.now() * 0.005 + z.wobble) * 0.05;
+      if (dist < 1.1 && Math.abs(p.pos.y - z.obj.position.y) < 1.8) touching++;
+    } else if (z.state === 'sinking') {
+      z.obj.position.y -= dt * 3;
+      if (z.obj.position.y < z.baseY - 2.5) { scene.remove(z.obj); zombies.splice(i, 1); }
+    }
+  }
+  if (touching > 0) {
+    zombieContact += dt * touching;   // stacks: N zombies touching = N x faster toward death
+    if (zombieContact >= ZOMBIE_KILL_TIME) triggerGameOver();
+  } else {
+    zombieContact = Math.max(0, zombieContact - dt * 2);
+  }
 }
 
 // ------------------------------------------------------------- GAME OVER --
@@ -587,6 +956,7 @@ function explode(at) {
   }
   flashEl.style.opacity = '1';
   setTimeout(() => flashEl.style.opacity = '0', 60);
+  sfxExplode(at);
 }
 function stepExplosion(dt) {
   for (const part of explosionParts) {
@@ -604,22 +974,30 @@ function triggerGameOver() {
   webHeld = false; player.anchor = null;
   setTimeout(() => {
     document.getElementById('finalscore').textContent =
-      `cars knocked: ${knockedCount}  ·  orbs: ${orbsEl.textContent}/${document.getElementById('orbstotal').textContent}`;
+      `score: ${score}  ·  cars knocked: ${knockedCount}  ·  orbs: ${orbsEl.textContent}/${document.getElementById('orbstotal').textContent}`;
     goEl.style.display = 'flex';
     if (document.pointerLockElement) document.exitPointerLock();
   }, 550);
 }
 function resetGame() {
+  gameOver = false;
+  goEl.style.display = 'none';
   knockedCount = 0; knockedEl.textContent = 0; orbsEl.textContent = 0;
+  score = 0; scoreEl.textContent = 0;
   for (const pk of pickups) { pk.got = false; pk.mesh.visible = true; }
   for (const entry of parkedCars) if (entry.knocked) { entry.knocked = null; entry.obj.position.copy(entry.origPos); entry.obj.rotation.set(0, entry.origRot, 0); }
   for (const entry of cars) if (entry.knocked) { entry.knocked = null; }
   for (const part of explosionParts) part.mesh.visible = false;
+  noirTimer = 0; jumpBoostTimer = 0; slowTimeTimer = 0;
+  noirPass.uniforms.uSat.value = 1.0;
+  zombieWaveTimer = 0; zombieContact = 0;
+  for (const z of zombies) scene.remove(z.obj);
+  zombies.length = 0;
+  document.getElementById('zombiewarn').style.display = 'none';
+  updatePowerupHud();
   respawn();
 }
 document.getElementById('restart').addEventListener('click', () => {
-  goEl.style.display = 'none';
-  gameOver = false;
   resetGame();
   try { renderer.domElement.requestPointerLock(); } catch (e) {}
 });
@@ -634,29 +1012,65 @@ const player = {
   onGround: false, anchor: null, ropeLen: 0,
 };
 function respawn() {
-  // Spawn on a MID-height rooftop near the center — NOT the tallest tower:
-  // from the highest roof no anchor is ever above you, so the first web a
-  // player fires connects to nothing (verified via the live preview probe;
-  // the reticle sat dim on spawn). Mid-height means taller neighbors are
-  // all around, so the first thing you see is a green reticle.
-  let best = null, tallest = null;
-  for (const c of colliders) {
-    const cx = (c.min[0] + c.max[0]) / 2, cz = (c.min[2] + c.max[2]) / 2;
-    const d = Math.hypot(cx, cz), top = c.max[1];
-    if (!tallest || top > tallest.top) tallest = { cx, cz, top };
-    if (top >= 12 && top <= 24 && (!best || d < best.d)) best = { cx, cz, top, d };
-  }
-  const s = best || tallest;
-  player.pos.set(s.cx, s.top + 1.2, s.cz);
-  player.vel.set(0, 0, 0);
+  // Battle-bus-style drop: fall from way above the CENTER of the city and
+  // let gravity + air control bring you in, instead of spawning already
+  // standing on a rooftop. A little horizontal jitter so you don't always
+  // fall through the exact same point, and a small initial downward speed
+  // so the fall reads immediately instead of a beat of pure hang-time.
+  player.pos.set(uniform(-10, 10), FALL_SPAWN_Y, uniform(-10, 10));
+  player.vel.set(0, -8, 0);
   player.anchor = null;
+  player.onGround = false;
 }
-const spidey = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.9, 0.35),
-  new THREE.MeshStandardMaterial({ color: 0xd02040, roughness: 0.5 }));
-const spideyHead = new THREE.Mesh(new THREE.BoxGeometry(0.32, 0.3, 0.3),
-  new THREE.MeshStandardMaterial({ color: 0x2040d0, roughness: 0.5 }));
+// VISIBILITY FIX: the old body material rendered as an unreadable near-
+// black silhouette in this dim, low-ambient scene (Alex: "my skin is black
+// so it's hard to see myself while swinging") -- true regardless of the
+// literal material color, since ANY mid-tone diffuse surface goes nearly
+// black under this lighting. The fix isn't a brighter body color (that
+// would look wrong for a night scene) -- it's small EMISSIVE accents that
+// stay visible no matter how dark the ambient is. Venom-esque: black suit,
+// glowing white eyes + chest mark.
+const suitMat = new THREE.MeshStandardMaterial({ color: 0x030304, roughness: 0.35, metalness: 0.15 });
+const suitGlow = new THREE.MeshBasicMaterial({ color: 0xf2f6ff });
+const spidey = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.9, 0.35), suitMat);
+const spideyHead = new THREE.Mesh(new THREE.BoxGeometry(0.32, 0.3, 0.3), suitMat);
 spideyHead.position.y = 0.62; spidey.add(spideyHead);
+for (const ex of [-0.09, 0.09]) {
+  const eye = new THREE.Mesh(new THREE.BoxGeometry(0.09, 0.05, 0.02), suitGlow);
+  eye.position.set(ex, 0.66, 0.16);
+  spidey.add(eye);
+}
+const chestMark = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.22, 0.02), suitGlow);
+chestMark.position.set(0, 0.05, 0.18);
+spidey.add(chestMark);
 scene.add(spidey);
+
+// TRENCHCOAT (Alex: "basic groom physics of wearing a dark blue trench-
+// coat?") -- a cheap spring-chain approximation, not real cloth sim: N
+// segments, each one lags toward a point below-and-behind whichever
+// segment is above it, offset opposite the player's velocity so it streams
+// backward in a swing/fall the way a coat catching wind would, and
+// lerp-eased each frame so it doesn't just rigidly follow (that's what
+// reads as "groom" instead of "a stiff plank").
+const COAT_N = 5;
+const coatMat = new THREE.MeshStandardMaterial({ color: 0x0c1c4a, roughness: 0.75 });
+const coatSegs = [];
+for (let i = 0; i < COAT_N; i++) {
+  const mesh = new THREE.Mesh(new THREE.BoxGeometry(0.46 - i * 0.03, 0.34, 0.05), coatMat);
+  scene.add(mesh);
+  coatSegs.push({ mesh, pos: new THREE.Vector3() });
+}
+function stepCoat(p) {
+  let prev = p.pos.clone().add(new THREE.Vector3(0, 0.55, 0));
+  for (let i = 0; i < COAT_N; i++) {
+    const seg = coatSegs[i];
+    const target = prev.clone().add(new THREE.Vector3(0, -0.33, 0)).addScaledVector(p.vel, -0.028);
+    seg.pos.lerp(target, 0.4);
+    seg.mesh.position.copy(seg.pos);
+    seg.mesh.lookAt(prev);
+    prev = seg.pos;
+  }
+}
 const webLine = new THREE.Line(
   new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3()]),
   new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.8 }));
@@ -691,16 +1105,19 @@ function tryAttach() {
   const a = findAnchor();
   if (!a) return false;
   player.anchor = a;
+  sfxThwip(a);
   const dist = player.pos.distanceTo(a);
-  // ROPE LENGTH BUG (fixed): this used to be `dist * 0.9` -- deliberately
-  // SHORTER than however far away you actually were when you fired. The
-  // very next physics step then found the rope "already too long" and
-  // yanked you 10% of the distance toward the anchor in a single frame --
-  // an instant, visible teleport right as you started swinging. The rope
-  // should start at exactly your current distance (so nothing snaps) and
-  // only ever be clamped SHORTER for street clearance, never as a blanket
-  // tightening.
-  player.ropeLen = Math.max(3, Math.min(dist, a.y - 2.2));
+  // ROPE LENGTH, ROUND 2 (the "still some kind of teleport" report): round
+  // 1 fixed the obvious `dist*0.9` shrink, but the ground-clearance clamp
+  // (`Math.min(dist, a.y - 2.2)`) could STILL shorten the rope below the
+  // actual attach-moment distance whenever a nearby-but-shortish building
+  // was grabbed while already fairly high up -- same mechanism, same
+  // instant-snap symptom, just a narrower trigger condition (why it wasn't
+  // EVERY swing). Fix: the rope always starts at the exact current
+  // distance, full stop, no clamping of any kind at attach time. Ground
+  // safety is handled entirely by the existing AABB/ground collision below
+  // (p.pos.y < 0.9), which stops a low swing softly instead of snapping it.
+  player.ropeLen = Math.max(3, dist);
   // entry boost: a swing needs tangential speed — from near-standstill,
   // inject some along the camera's horizontal forward so the first web
   // always MOVES you instead of leaving you dangling
@@ -734,9 +1151,12 @@ addEventListener('mouseup', e => { if (e.button === 0) webHeld = false; });
 const startEl = document.getElementById('start');
 let entered = false;
 startEl.addEventListener('click', () => {
+  if (entered) return;
   entered = true;
   startEl.style.display = 'none';
   try { renderer.domElement.requestPointerLock(); } catch (e) { /* fallback look */ }
+  if (audioCtx.state === 'suspended') audioCtx.resume();
+  startMusic();
 });
 document.addEventListener('pointerlockerror', () => {
   document.getElementById('webstate').textContent = 'no pointer lock (embedded?) — mouse-look fallback on';
@@ -769,7 +1189,7 @@ function stepPlayer(dt) {
   // web attach / release
   if (webHeld && !p.anchor && !p.onGround) tryAttach();
   if (webHeld && !p.anchor && p.onGround) { // jump-launch into a swing
-    p.vel.y = 12; p.onGround = false; tryAttach();
+    p.vel.y = jumpBoostTimer > 0 ? JUMP_VEL_BOOSTED : JUMP_VEL_NORMAL; p.onGround = false; tryAttach();
   }
   if (!webHeld && p.anchor) {
     p.anchor = null;
@@ -781,11 +1201,14 @@ function stepPlayer(dt) {
   }
 
   p.vel.y -= GRAV * dt;
+  p.vel.y = Math.max(p.vel.y, -46);   // terminal velocity: keeps the 240-unit sky drop
+                                       // controllable and stops single-frame tunneling
+                                       // through thin colliders at extreme fall speed
   if (p.onGround) {
     const target = inDir.multiplyScalar(keys.ShiftLeft ? RUN * 1.7 : RUN);
     p.vel.x += (target.x - p.vel.x) * Math.min(1, dt * 8);
     p.vel.z += (target.z - p.vel.z) * Math.min(1, dt * 8);
-    if (keys.Space) p.vel.y = 12;
+    if (keys.Space) p.vel.y = jumpBoostTimer > 0 ? JUMP_VEL_BOOSTED : JUMP_VEL_NORMAL;
   } else {
     p.vel.addScaledVector(inDir, AIR_CTRL * dt);
   }
@@ -834,10 +1257,10 @@ function stepPlayer(dt) {
   }
 
   // OUT OF BOUNDS: fly past the city edge (or fall through the world) and
-  // it's game over -- explode() fires here, the overlay shows after a beat
-  // so the burst is visible first.
-  const bound = EDGE + OUT_OF_BOUNDS_MARGIN;
-  if (Math.abs(p.pos.x) > bound || Math.abs(p.pos.z) > bound || p.pos.y < -25) {
+  // it's ALWAYS game over -- explode() fires here, the overlay shows after
+  // a beat so the burst is visible first. WORLD_BOUND is the exact radius
+  // the visible boundary wall sits at, so this always matches what you saw.
+  if (Math.abs(p.pos.x) > WORLD_BOUND || Math.abs(p.pos.z) > WORLD_BOUND || p.pos.y < -25) {
     triggerGameOver();
     return;
   }
@@ -850,6 +1273,7 @@ function stepPlayer(dt) {
   const sp = Math.hypot(p.vel.x, p.vel.z);
   if (sp > 0.5) spidey.rotation.y = Math.atan2(p.vel.x, p.vel.z);
   spidey.rotation.x = THREE.MathUtils.clamp(sp * 0.02 * (p.anchor ? 1.6 : 0.4), 0, 0.9);
+  stepCoat(p);
 
   // third-person camera
   const camOff = new THREE.Vector3(
@@ -876,17 +1300,39 @@ function stepPlayer(dt) {
 
 // ------------------------------------------------------------- MAIN LOOP --
 respawn();
+for (const seg of coatSegs) seg.pos.copy(player.pos);   // avoid a first-frame unfurl-from-origin pop
 camera.position.copy(player.pos).add(new THREE.Vector3(0, 3, 10));
-let last = performance.now(), simT = 0;
+let last = performance.now(), simT = 0, worldT = 0;
 function loop(now) {
   requestAnimationFrame(loop);
   let dt = Math.min(0.033, (now - last) / 1000);
   last = now;
   simT += dt;
-  stepTraffic(simT, dt);
-  stepKnocked(cars, dt, false);
-  stepKnocked(parkedCars, dt, true);
-  stepPlayer(dt);
+
+  // SLOW-TIME powerup: the WORLD (traffic, lights, knocked-car physics,
+  // zombies) runs on a scaled-down dt; the player's own dt is scaled much
+  // less, so you feel fast/decisive while everything else drags -- the
+  // classic bullet-time asymmetry, not just a global slow-mo.
+  if (slowTimeTimer > 0) {
+    slowTimeTimer -= dt;
+    if (slowTimeTimer < 0) slowTimeTimer = 0;
+  }
+  const worldDt = slowTimeTimer > 0 ? dt * SLOWTIME_WORLD_SCALE : dt;
+  const playerDt = slowTimeTimer > 0 ? dt * SLOWTIME_PLAYER_SCALE : dt;
+  worldT += worldDt;
+
+  if (noirTimer > 0) { noirTimer -= dt; if (noirTimer < 0) noirTimer = 0; }
+  if (jumpBoostTimer > 0) { jumpBoostTimer -= dt; if (jumpBoostTimer < 0) jumpBoostTimer = 0; }
+  noirPass.uniforms.uSat.value = THREE.MathUtils.lerp(
+    noirPass.uniforms.uSat.value, noirTimer > 0 ? 0.0 : 1.0, Math.min(1, dt * 3));
+  updatePowerupHud();
+
+  stepTraffic(worldT, worldDt);
+  stepKnocked(cars, worldDt, false);
+  stepKnocked(parkedCars, worldDt, true);
+  stepZombies(worldDt, player);
+  stepHonks(worldDt, player);
+  stepPlayer(playerDt);
   if (!gameOver) stepPickups(simT, player);
   stepExplosion(dt);
   stepRain(player.pos, simT);
@@ -896,10 +1342,15 @@ requestAnimationFrame(loop);
 
 // Debug hook -- lets anyone poke at live state from devtools without
 // needing a build step (e.g. `__sw.player.pos.set(x,y,z)` to teleport).
-window.__sw = { player, cars, parkedCars, pickups, colliders, EDGE,
+window.__sw = { player, cars, parkedCars, pickups, colliders, EDGE, WORLD_BOUND,
                 triggerGameOver, resetGame, checkKnocks, knockCar, respawn,
                 stepPickups, stepPlayer, stepTraffic, stepKnocked, stepExplosion,
-                get gameOver() { return gameOver; } };
+                zombies, spawnZombieWave, stepZombies, scene, spidey, coatSegs, camera,
+                get gameOver() { return gameOver; },
+                get noirTimer() { return noirTimer; },
+                get jumpBoostTimer() { return jumpBoostTimer; },
+                get slowTimeTimer() { return slowTimeTimer; },
+                get zombieContact() { return zombieContact; } };
 </script>
 </body>
 </html>
