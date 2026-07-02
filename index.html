@@ -14,12 +14,26 @@
   #center { position: fixed; left: 50%; top: 50%; width: 6px; height: 6px;
     margin: -3px; border-radius: 50%; background: #9fe8ffcc; z-index: 10;
     box-shadow: 0 0 8px #0af; pointer-events: none; }
-  #start {
+  #start, #gameover {
     position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
-    background: #010208ee; color: #9fe8ff; z-index: 20; cursor: pointer;
+    background: #010208ee; color: #9fe8ff; z-index: 20;
     font: 16px/1.8 ui-monospace, Menlo, monospace; text-align: center;
   }
-  #start h1 { color: #ff64c8; font-size: 28px; text-shadow: 0 0 18px #f0a; }
+  #start { cursor: pointer; }
+  #start h1, #gameover h1 { color: #ff64c8; font-size: 28px; text-shadow: 0 0 18px #f0a; }
+  #gameover { display: none; background: #200005ee; }
+  #gameover h1 { font-size: 38px; letter-spacing: 2px; }
+  #finalscore { font-size: 15px; color: #ffe27a; }
+  #restart {
+    margin-top: 18px; font: inherit; color: #010208; background: #4dff88;
+    border: none; padding: 10px 22px; border-radius: 4px; cursor: pointer;
+    box-shadow: 0 0 16px #4dff88aa;
+  }
+  #flash { position: fixed; inset: 0; background: #fff; opacity: 0; pointer-events: none;
+    z-index: 15; transition: opacity 0.05s linear; }
+  #score { position: fixed; right: 14px; top: 12px; color: #ffe27a; z-index: 10;
+    font: 13px/1.5 ui-monospace, Menlo, monospace; text-shadow: 0 0 6px #a80;
+    user-select: none; pointer-events: none; text-align: right; }
 </style>
 </head>
 <body>
@@ -28,9 +42,17 @@
   same procedural city as the Blender scene — seed 7, live traffic, rain, neon<br><br>
   <b>click to enter</b> (pointer lock)<br><br>
   mouse — look &nbsp;·&nbsp; <b>hold LMB or SPACE</b> — shoot web &amp; swing (release to let go)<br>
-  WASD — run / air control &nbsp;·&nbsp; shift — sprint &nbsp;·&nbsp; R — respawn on a rooftop
+  WASD — run / air control &nbsp;·&nbsp; shift — sprint &nbsp;·&nbsp; R — respawn on a rooftop<br><br>
+  swing into cars to knock them over &nbsp;·&nbsp; collect the glowing orbs &nbsp;·&nbsp; don't fly past the city edge
 </div></div>
+<div id="gameover"><div>
+  <h1>SWING&hellip; SWANG&hellip; SWUNG</h1>
+  <div id="finalscore"></div>
+  <button id="restart">Try Again?</button>
+</div></div>
+<div id="flash"></div>
 <div id="hud">web: <b id="webstate">ready</b> · speed: <b id="speed">0</b></div>
+<div id="score">cars knocked: <b id="knocked">0</b><br>orbs: <b id="orbs">0</b>/<b id="orbstotal">0</b></div>
 <div id="center"></div>
 
 <script>
@@ -71,17 +93,21 @@ import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js'
 // ---------------------------------------------------------------- CONFIG --
 // Mirrors city_generator.py CONFIG. Change dials here, logic stays put.
 const SEED = 7;
-const GRID_N = 6, BLOCK_SIZE = 18.0, STREET_W = 4.4, LANE_HALF = 0.95;
+const GRID_N = 8, BLOCK_SIZE = 18.0, STREET_W = 4.4, LANE_HALF = 0.95;   // 6->8: bigger city
 const SIDEWALK_W = 1.6, DASH_LEN = 1.4, DASH_STEP = 3.0;
 const LOTS_PER_SIDE = 2, EMPTY_LOT_ODDS = 0.10;
 const H_LOW = [7, 12], H_MID = [14, 34], H_HERO = [42, 58], H_WEIGHTS = [0.25, 0.62];
 const ANTENNA_ODDS = 0.28;
-const CARS_PER_LANE = 4, CAR_SPEED = 8.0;
+const CARS_PER_LANE = 4, CAR_SPEED = 8.0, PARKED_PER_ROAD = 3;
 const ACCEL = 3.5, DECEL = 6.0, MIN_GAP = 1.6, CAR_LEN = 2.2, LOOKAHEAD = 14.0;
 const TURN_ODDS = 0.25, TURN_SPEED = 5.0;
 const LIGHT_GREEN = 4.2, LIGHT_ALLRED = 0.9;
 const RAIN_COUNT = 900;
 const PALETTE = [[0.0, 0.85, 1.0], [1.0, 0.10, 0.6], [0.6, 0.20, 1.0], [0.1, 1.0, 0.7]];
+// gameplay
+const OUT_OF_BOUNDS_MARGIN = 14;        // how far past the city edge before you explode
+const KNOCK_SPEED = 6.0, KNOCK_RADIUS = 1.5;   // min player speed / range to knock a car over
+const PICKUP_PER_BLOCK = 1, PICKUP_SCORE = 10, KNOCK_SCORE = 25;
 
 const PITCH = BLOCK_SIZE + STREET_W;
 const HALF = (GRID_N - 1) / 2 * PITCH;
@@ -333,9 +359,47 @@ for (const p of ROADS) for (const axis of ['NS', 'EW']) for (const dirn of [1, -
       obj: makeCarMesh(choice(CAR_COLORS)), axis, dirn, lane, s,
       v: CAR_SPEED * uniform(0.6, 1.0),
       turnQ: rng() < TURN_ODDS ? choice(ROADS.slice(1, -1)) : null, arc: null,
+      knocked: null,
     });
   }
 }
+// Parked cars up on the sidewalk (mirrors build_parked() in city_generator.py) --
+// stationary until the player knocks one, then it's just a special case of
+// the same tumble physics moving cars get when hit.
+const parkedCars = [];
+{
+  const off = STREET_W / 2 + 0.7;
+  for (const p of ROADS) for (const axis of ['EW', 'NS']) {
+    const used = [];
+    for (let placed = 0, tries = 0; placed < PARKED_PER_ROAD && tries < 80; tries++) {
+      const a = uniform(-EDGE + 2, EDGE - 2);
+      if (nearIntersection(a) || used.some(u => Math.abs(a - u) < 3.4)) continue;
+      const side = choice([1, -1]);
+      const obj = makeCarMesh(choice(CAR_COLORS));
+      if (axis === 'EW') { obj.rotation.y = rng() < 0.5 ? 0 : Math.PI; obj.position.set(a, 0, p + side * off); }
+      else { obj.rotation.y = rng() < 0.5 ? Math.PI / 2 : -Math.PI / 2; obj.position.set(p + side * off, 0, a); }
+      parkedCars.push({ obj, knocked: null });
+      used.push(a); placed++;
+    }
+  }
+}
+
+// ---------------------------------------------------------------- PICKUPS --
+// One glowing orb per block, floating at swing height so collecting them
+// rewards actually swinging through the city rather than just running.
+const pickupMat = new THREE.MeshBasicMaterial({ color: 0xffe27a });
+const pickups = [];
+for (let i = 0; i < GRID_N; i++) for (let j = 0; j < GRID_N; j++) {
+  for (let k = 0; k < PICKUP_PER_BLOCK; k++) {
+    const mesh = new THREE.Mesh(new THREE.OctahedronGeometry(0.45), pickupMat);
+    const baseY = uniform(6, 15);
+    mesh.position.set(blockCenter(i) + uniform(-4, 4), baseY, blockCenter(j) + uniform(-4, 4));
+    scene.add(mesh);
+    pickups.push({ mesh, baseY, phase: uniform(0, 6.28), got: false });
+  }
+}
+document.getElementById('orbstotal').textContent = pickups.length;
+
 const TURNS = { 'NS,1': [[1, -1], Math.PI, 'EW', 1], 'NS,-1': [[-1, 1], 0, 'EW', -1],
                 'EW,1': [[-1, -1], Math.PI / 2, 'NS', -1], 'EW,-1': [[1, 1], -Math.PI / 2, 'NS', 1] };
 function beginArc(c) {
@@ -361,6 +425,7 @@ function stepTraffic(t, dt) {
     lanes.get(k).push(c.s);
   }
   for (const c of cars) {
+    if (c.knocked) continue;   // tumble physics owns this car right now (see stepKnocked)
     if (c.arc) {
       c.arc.prog += TURN_SPEED * dt;
       if (c.arc.prog >= c.arc.r * Math.PI / 2) {
@@ -432,6 +497,133 @@ function stepRain(center, t) {
   rainGeo.attributes.position.needsUpdate = true;
 }
 
+// ------------------------------------------------------- GAMEPLAY SYSTEMS --
+let knockedCount = 0;
+const knockedEl = document.getElementById('knocked'), orbsEl = document.getElementById('orbs');
+
+// Shared tumble physics for any knocked car (moving or parked): simple
+// ballistic + spin, settle on the ground, then hand back to whichever
+// system owns it (moving cars rejoin traffic; parked cars reset in place).
+function knockCar(entry, hitDir, isParked) {
+  if (entry.knocked) return;
+  entry.knocked = {
+    vel: hitDir.clone().multiplyScalar(uniform(5, 8)).add(new THREE.Vector3(0, uniform(4, 7), 0)),
+    ang: new THREE.Vector3(uniform(-6, 6), uniform(-4, 4), uniform(-6, 6)),
+    timer: 2.6, grounded: false,
+  };
+  knockedCount++; knockedEl.textContent = knockedCount;
+  if (isParked) { entry.origPos = entry.obj.position.clone(); entry.origRot = entry.obj.rotation.y; }
+}
+function stepKnocked(list, dt, isParked) {
+  for (const entry of list) {
+    const k = entry.knocked;
+    if (!k) continue;
+    k.timer -= dt;
+    if (!k.grounded) {
+      k.vel.y -= 22 * dt;
+      entry.obj.position.addScaledVector(k.vel, dt);
+      entry.obj.rotation.x += k.ang.x * dt;
+      entry.obj.rotation.y += k.ang.y * dt;
+      entry.obj.rotation.z += k.ang.z * dt;
+      if (entry.obj.position.y < 0.25) {
+        entry.obj.position.y = 0.25; k.vel.set(0, 0, 0); k.ang.multiplyScalar(0.15); k.grounded = true;
+      }
+    }
+    if (k.timer <= 0) {
+      entry.knocked = null;
+      if (isParked) {
+        entry.obj.position.copy(entry.origPos);
+        entry.obj.rotation.set(0, entry.origRot, 0);
+      } else {
+        // rejoin traffic: same wrap-to-edge trick stepTraffic already uses
+        entry.s = -entry.dirn * (EDGE + 5);
+        entry.v = CAR_SPEED * 0.7;
+        entry.obj.rotation.set(0, entry.obj.rotation.y, 0);
+      }
+    }
+  }
+}
+function checkKnocks(p, speed) {
+  if (speed < KNOCK_SPEED) return;
+  const dir = p.vel.clone().normalize();
+  for (const list of [cars, parkedCars]) {
+    for (const entry of list) {
+      if (entry.knocked) continue;
+      if (p.pos.distanceTo(entry.obj.position) < KNOCK_RADIUS) knockCar(entry, dir, list === parkedCars);
+    }
+  }
+}
+
+function stepPickups(t, p) {
+  let collectedNow = 0;
+  for (const pk of pickups) {
+    if (pk.got) continue;
+    pk.mesh.position.y = pk.baseY + Math.sin(t * 1.6 + pk.phase) * 0.6;
+    pk.mesh.rotation.y = t * 1.2 + pk.phase;
+    pk.mesh.rotation.x = t * 0.7 + pk.phase;
+    if (p.pos.distanceTo(pk.mesh.position) < 1.6) {
+      pk.got = true; pk.mesh.visible = false; collectedNow++;
+    }
+  }
+  if (collectedNow) orbsEl.textContent = (parseInt(orbsEl.textContent) || 0) + collectedNow;
+}
+
+// ------------------------------------------------------------- GAME OVER --
+let gameOver = false;
+const flashEl = document.getElementById('flash'), goEl = document.getElementById('gameover');
+const explosionParts = [];
+const explodeMat = new THREE.MeshBasicMaterial({ color: 0xffaa33 });
+for (let i = 0; i < 24; i++) {
+  const m = new THREE.Mesh(new THREE.BoxGeometry(0.4, 0.4, 0.4), explodeMat);
+  m.visible = false; scene.add(m);
+  explosionParts.push({ mesh: m, vel: new THREE.Vector3(), life: 0 });
+}
+function explode(at) {
+  for (const part of explosionParts) {
+    part.mesh.visible = true;
+    part.mesh.position.copy(at);
+    part.vel.set(uniform(-1, 1), uniform(0.2, 1), uniform(-1, 1)).normalize().multiplyScalar(uniform(8, 18));
+    part.life = uniform(0.8, 1.4);
+  }
+  flashEl.style.opacity = '1';
+  setTimeout(() => flashEl.style.opacity = '0', 60);
+}
+function stepExplosion(dt) {
+  for (const part of explosionParts) {
+    if (part.life <= 0) { part.mesh.visible = false; continue; }
+    part.vel.y -= 18 * dt;
+    part.mesh.position.addScaledVector(part.vel, dt);
+    part.mesh.rotation.x += 6 * dt; part.mesh.rotation.y += 5 * dt;
+    part.life -= dt;
+  }
+}
+function triggerGameOver() {
+  if (gameOver) return;
+  gameOver = true;
+  explode(player.pos);
+  webHeld = false; player.anchor = null;
+  setTimeout(() => {
+    document.getElementById('finalscore').textContent =
+      `cars knocked: ${knockedCount}  ·  orbs: ${orbsEl.textContent}/${document.getElementById('orbstotal').textContent}`;
+    goEl.style.display = 'flex';
+    if (document.pointerLockElement) document.exitPointerLock();
+  }, 550);
+}
+function resetGame() {
+  knockedCount = 0; knockedEl.textContent = 0; orbsEl.textContent = 0;
+  for (const pk of pickups) { pk.got = false; pk.mesh.visible = true; }
+  for (const entry of parkedCars) if (entry.knocked) { entry.knocked = null; entry.obj.position.copy(entry.origPos); entry.obj.rotation.set(0, entry.origRot, 0); }
+  for (const entry of cars) if (entry.knocked) { entry.knocked = null; }
+  for (const part of explosionParts) part.mesh.visible = false;
+  respawn();
+}
+document.getElementById('restart').addEventListener('click', () => {
+  goEl.style.display = 'none';
+  gameOver = false;
+  resetGame();
+  try { renderer.domElement.requestPointerLock(); } catch (e) {}
+});
+
 // ---------------------------------------------------------------- PLAYER --
 // A point mass with gravity. Hold web: raycast toward look-direction (tilted
 // up) against the buildings; on hit, a rope constraint turns gravity into a
@@ -500,9 +692,15 @@ function tryAttach() {
   if (!a) return false;
   player.anchor = a;
   const dist = player.pos.distanceTo(a);
-  // rope: slightly taut, but never longer than the height that keeps the
-  // arc's low point ~2.2 above the street
-  player.ropeLen = Math.max(3, Math.min(dist * 0.9, a.y - 2.2));
+  // ROPE LENGTH BUG (fixed): this used to be `dist * 0.9` -- deliberately
+  // SHORTER than however far away you actually were when you fired. The
+  // very next physics step then found the rope "already too long" and
+  // yanked you 10% of the distance toward the anchor in a single frame --
+  // an instant, visible teleport right as you started swinging. The rope
+  // should start at exactly your current distance (so nothing snaps) and
+  // only ever be clamped SHORTER for street clearance, never as a blanket
+  // tightening.
+  player.ropeLen = Math.max(3, Math.min(dist, a.y - 2.2));
   // entry boost: a swing needs tangential speed — from near-standstill,
   // inject some along the camera's horizontal forward so the first web
   // always MOVES you instead of leaving you dangling
@@ -557,6 +755,7 @@ const GRAV = 26, RUN = 11, AIR_CTRL = 11;
 let reticleClock = 0;
 function stepPlayer(dt) {
   const p = player;
+  if (gameOver) return;   // frozen behind the game-over overlay until Try Again
   // camera-relative input direction on the ground plane
   const f = new THREE.Vector3(-Math.sin(yaw), 0, -Math.cos(yaw));
   const r = new THREE.Vector3(-f.z, 0, f.x);
@@ -634,6 +833,18 @@ function stepPlayer(dt) {
     if (axis === 5) { p.pos.z = c.max[2] + R; if (p.vel.z < 0) p.vel.z = 0; }
   }
 
+  // OUT OF BOUNDS: fly past the city edge (or fall through the world) and
+  // it's game over -- explode() fires here, the overlay shows after a beat
+  // so the burst is visible first.
+  const bound = EDGE + OUT_OF_BOUNDS_MARGIN;
+  if (Math.abs(p.pos.x) > bound || Math.abs(p.pos.z) > bound || p.pos.y < -25) {
+    triggerGameOver();
+    return;
+  }
+
+  const sp0 = p.vel.length();
+  checkKnocks(p, sp0);
+
   // visuals: lean the body into the velocity
   spidey.position.copy(p.pos);
   const sp = Math.hypot(p.vel.x, p.vel.z);
@@ -673,11 +884,22 @@ function loop(now) {
   last = now;
   simT += dt;
   stepTraffic(simT, dt);
+  stepKnocked(cars, dt, false);
+  stepKnocked(parkedCars, dt, true);
   stepPlayer(dt);
+  if (!gameOver) stepPickups(simT, player);
+  stepExplosion(dt);
   stepRain(player.pos, simT);
   composer.render();
 }
 requestAnimationFrame(loop);
+
+// Debug hook -- lets anyone poke at live state from devtools without
+// needing a build step (e.g. `__sw.player.pos.set(x,y,z)` to teleport).
+window.__sw = { player, cars, parkedCars, pickups, colliders, EDGE,
+                triggerGameOver, resetGame, checkKnocks, knockCar, respawn,
+                stepPickups, stepPlayer, stepTraffic, stepKnocked, stepExplosion,
+                get gameOver() { return gameOver; } };
 </script>
 </body>
 </html>
