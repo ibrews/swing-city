@@ -1,0 +1,683 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Swing City — low-poly Blade Runner, webs included</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #010208; }
+  #hud {
+    position: fixed; left: 14px; bottom: 12px; color: #9fe8ff; z-index: 10;
+    font: 13px/1.5 ui-monospace, Menlo, monospace; text-shadow: 0 0 6px #0af;
+    user-select: none; pointer-events: none;
+  }
+  #hud b { color: #ff64c8; }
+  #center { position: fixed; left: 50%; top: 50%; width: 6px; height: 6px;
+    margin: -3px; border-radius: 50%; background: #9fe8ffcc; z-index: 10;
+    box-shadow: 0 0 8px #0af; pointer-events: none; }
+  #start {
+    position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+    background: #010208ee; color: #9fe8ff; z-index: 20; cursor: pointer;
+    font: 16px/1.8 ui-monospace, Menlo, monospace; text-align: center;
+  }
+  #start h1 { color: #ff64c8; font-size: 28px; text-shadow: 0 0 18px #f0a; }
+</style>
+</head>
+<body>
+<div id="start"><div>
+  <h1>SWING CITY</h1>
+  same procedural city as the Blender scene — seed 7, live traffic, rain, neon<br><br>
+  <b>click to enter</b> (pointer lock)<br><br>
+  mouse — look &nbsp;·&nbsp; <b>hold LMB or SPACE</b> — shoot web &amp; swing (release to let go)<br>
+  WASD — run / air control &nbsp;·&nbsp; shift — sprint &nbsp;·&nbsp; R — respawn on a rooftop
+</div></div>
+<div id="hud">web: <b id="webstate">ready</b> · speed: <b id="speed">0</b></div>
+<div id="center"></div>
+
+<script>
+// If ANYTHING breaks (CDN unreachable, shader compile, script error), say so
+// on the start screen instead of silently ignoring clicks.
+addEventListener('error', e => {
+  const el = document.querySelector('#start div');
+  if (el) el.innerHTML = '<h1>SWING CITY</h1>load error:<br><b>' +
+    (e.message || e.type) + '</b><br>' + (e.filename || '') + ':' + (e.lineno || '');
+}, true);
+addEventListener('unhandledrejection', e => {
+  const el = document.querySelector('#start div');
+  if (el) el.innerHTML = '<h1>SWING CITY</h1>load error:<br><b>' + e.reason + '</b>';
+});
+</script>
+<script type="importmap">
+{ "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+} }
+</script>
+
+<script type="module">
+// ===========================================================================
+// Swing City — a Three.js port of city_generator.py (same folder tree).
+//
+// The city layout, window-grid facade logic, signal cycle, and stop-and-go
+// traffic sim are ported 1:1 from the Blender generator so the SAME SEED
+// produces the SAME city. Blender is Z-up; Three.js is Y-up, so Blender
+// (x, y, z) maps to Three (x, z_height, y) — height moves to Y, and the
+// city plan lives on XZ.
+// ===========================================================================
+import * as THREE from 'three';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+
+// ---------------------------------------------------------------- CONFIG --
+// Mirrors city_generator.py CONFIG. Change dials here, logic stays put.
+const SEED = 7;
+const GRID_N = 6, BLOCK_SIZE = 18.0, STREET_W = 4.4, LANE_HALF = 0.95;
+const SIDEWALK_W = 1.6, DASH_LEN = 1.4, DASH_STEP = 3.0;
+const LOTS_PER_SIDE = 2, EMPTY_LOT_ODDS = 0.10;
+const H_LOW = [7, 12], H_MID = [14, 34], H_HERO = [42, 58], H_WEIGHTS = [0.25, 0.62];
+const ANTENNA_ODDS = 0.28;
+const CARS_PER_LANE = 4, CAR_SPEED = 8.0;
+const ACCEL = 3.5, DECEL = 6.0, MIN_GAP = 1.6, CAR_LEN = 2.2, LOOKAHEAD = 14.0;
+const TURN_ODDS = 0.25, TURN_SPEED = 5.0;
+const LIGHT_GREEN = 4.2, LIGHT_ALLRED = 0.9;
+const RAIN_COUNT = 900;
+const PALETTE = [[0.0, 0.85, 1.0], [1.0, 0.10, 0.6], [0.6, 0.20, 1.0], [0.1, 1.0, 0.7]];
+
+const PITCH = BLOCK_SIZE + STREET_W;
+const HALF = (GRID_N - 1) / 2 * PITCH;
+const CITY_EXTENT = GRID_N * PITCH, EDGE = CITY_EXTENT / 2;
+const blockCenter = i => i * PITCH - HALF;
+const roadPos = k => (k - 0.5) * PITCH - HALF;
+const ROADS = Array.from({ length: GRID_N + 1 }, (_, k) => roadPos(k));
+
+// Seeded RNG (mulberry32) so the city is identical every load.
+function mulberry32(a) {
+  return function () {
+    a |= 0; a = a + 0x6D2B79F5 | 0;
+    let t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+const rng = mulberry32(SEED);
+const uniform = (a, b) => a + (b - a) * rng();
+const choice = arr => arr[Math.floor(rng() * arr.length)];
+
+// ------------------------------------------------------------------ SCENE --
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x02040c);
+scene.fog = new THREE.FogExp2(0x05070f, 0.008);
+
+const camera = new THREE.PerspectiveCamera(70, innerWidth / innerHeight, 0.1, 900);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(innerWidth, innerHeight);
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 0.85;
+document.body.appendChild(renderer.domElement);
+
+const composer = new EffectComposer(renderer);
+composer.addPass(new RenderPass(scene, camera));
+const bloom = new UnrealBloomPass(new THREE.Vector2(innerWidth, innerHeight), 0.75, 0.55, 0.55);
+composer.addPass(bloom);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+  composer.setSize(innerWidth, innerHeight);
+});
+
+scene.add(new THREE.AmbientLight(0x223044, 0.9));
+const moon = new THREE.DirectionalLight(0x7899ff, 0.7);
+moon.position.set(30, 80, -30);
+scene.add(moon);
+
+// ------------------------------------------------------ WINDOW MATERIAL --
+// The same facade trick as mat_windows() in the Blender file, in GLSL:
+// world-space MODULO carves window cells, a per-cell hash lights ~62% of
+// them in the building's neon color, the rest stays dark facade.
+const windowMat = new THREE.ShaderMaterial({
+  uniforms: { fogColor: { value: scene.fog.color }, fogDensity: { value: scene.fog.density } },
+  vertexShader: /* glsl */`
+    attribute vec3 instColor;
+    varying vec3 vWorld, vColor;
+    void main() {
+      vec4 w = modelMatrix * instanceMatrix * vec4(position, 1.0);
+      vWorld = w.xyz; vColor = instColor;
+      gl_Position = projectionMatrix * viewMatrix * w;
+    }`,
+  fragmentShader: /* glsl */`
+    varying vec3 vWorld, vColor;
+    uniform vec3 fogColor; uniform float fogDensity;
+    float hash(vec3 c) { return fract(sin(dot(c, vec3(12.9898, 78.233, 37.719))) * 43758.5453); }
+    void main() {
+      float Pz = 1.35, Ph = 1.15;                    // window row/col pitch
+      float row = step(mod(vWorld.y, Pz), Pz * 0.55);
+      float col = step(mod(vWorld.x + vWorld.z, Ph), Ph * 0.5);
+      vec3 cell = floor(vec3(vWorld.x / Ph, vWorld.z / Ph, vWorld.y / Pz));
+      float lit = step(0.38, hash(cell));            // ~62% of cells lit
+      float win = row * col * lit;
+      vec3 base = vec3(0.012, 0.014, 0.022);
+      vec3 colr = base + vColor * win * 1.6;
+      float d = length(vWorld - cameraPosition);
+      float f = 1.0 - exp(-fogDensity * fogDensity * d * d);
+      gl_FragColor = vec4(mix(colr, fogColor, f), 1.0);
+    }`
+});
+
+// ------------------------------------------------------------- CITY BUILD --
+const colliders = [];   // AABBs the player collides with (buildings)
+const boxGeo = new THREE.BoxGeometry(1, 1, 1);
+
+function pickHeight() {
+  const r = rng();
+  if (r < H_WEIGHTS[0]) return uniform(...H_LOW);
+  if (r < H_WEIGHTS[0] + H_WEIGHTS[1]) return uniform(...H_MID);
+  return uniform(...H_HERO);
+}
+
+// Pass 1 — generate building segment transforms (so we know instance counts).
+const segs = [], crowns = [], antennas = [];
+for (let i = 0; i < GRID_N; i++) for (let j = 0; j < GRID_N; j++) {
+  const cx = blockCenter(i), cz = blockCenter(j);
+  const interior = BLOCK_SIZE - 2 * SIDEWALK_W, lot = interior / LOTS_PER_SIDE;
+  for (let li = 0; li < LOTS_PER_SIDE; li++) for (let lj = 0; lj < LOTS_PER_SIDE; lj++) {
+    if (rng() < EMPTY_LOT_ODDS) continue;
+    const lx = cx - interior / 2 + (li + 0.5) * lot;
+    const lz = cz - interior / 2 + (lj + 0.5) * lot;
+    const color = choice(PALETTE), h = pickHeight();
+    const n = Math.max(1, Math.min(4, Math.floor(h / 9)));
+    let y = 0, wx = lot * uniform(0.78, 0.95), wz = lot * uniform(0.78, 0.95);
+    for (let s = 0; s < n; s++) {
+      const sh = (h / n) * uniform(0.85, 1.15);
+      segs.push({ x: lx, y: y + sh / 2, z: lz, sx: wx, sy: sh, sz: wz, color });
+      colliders.push({ min: [lx - wx / 2, y, lz - wz / 2], max: [lx + wx / 2, y + sh, lz + wz / 2] });
+      y += sh; wx *= uniform(0.78, 0.92); wz *= uniform(0.78, 0.92);
+    }
+    crowns.push({ x: lx, y: y + 0.12, z: lz, sx: wx * 1.06, sy: 0.24, sz: wz * 1.06, color });
+    if (rng() < ANTENNA_ODDS) {
+      const ah = h * uniform(0.18, 0.35);
+      antennas.push({ x: lx, y: y + ah / 2, z: lz, sy: ah, color });
+    }
+  }
+}
+
+// Pass 2 — instanced meshes.
+function instancedBoxes(list, material, glow = 0) {
+  const m = new THREE.InstancedMesh(boxGeo, material, list.length);
+  const M = new THREE.Matrix4(), colors = new Float32Array(list.length * 3);
+  list.forEach((b, idx) => {
+    M.makeScale(b.sx, b.sy, b.sz).setPosition(b.x, b.y, b.z);
+    m.setMatrixAt(idx, M);
+    const g = glow || 1;
+    colors.set([b.color[0] * g, b.color[1] * g, b.color[2] * g], idx * 3);
+  });
+  m.geometry = boxGeo.clone();
+  m.geometry.setAttribute('instColor', new THREE.InstancedBufferAttribute(colors, 3));
+  scene.add(m);
+  return m;
+}
+const buildingMesh = instancedBoxes(segs, windowMat);
+
+// crowns + antennas: raw emissive (unlit basic material, vertex-colored)
+const crownMat = new THREE.ShaderMaterial({
+  vertexShader: `attribute vec3 instColor; varying vec3 vC;
+    void main(){ vC = instColor;
+      gl_Position = projectionMatrix * viewMatrix * modelMatrix * instanceMatrix * vec4(position,1.0); }`,
+  fragmentShader: `varying vec3 vC; void main(){ gl_FragColor = vec4(vC, 1.0); }`
+});
+instancedBoxes(crowns, crownMat, 2.2);
+instancedBoxes(antennas.map(a => ({ ...a, sx: 0.12, sz: 0.12 })), crownMat, 3.0);
+
+// Ground, roads, sidewalks, dashes
+const ground = new THREE.Mesh(
+  new THREE.BoxGeometry(CITY_EXTENT * 2, 0.2, CITY_EXTENT * 2),
+  new THREE.MeshStandardMaterial({ color: 0x07070a, roughness: 0.95 }));
+ground.position.y = -0.1;
+scene.add(ground);
+
+const roadMat = new THREE.MeshStandardMaterial({ color: 0x0a0a0d, roughness: 0.85 });
+const walkMat = new THREE.MeshStandardMaterial({ color: 0x17171c, roughness: 0.7 });
+const span = CITY_EXTENT + STREET_W;
+for (const p of ROADS) {
+  const rv = new THREE.Mesh(new THREE.BoxGeometry(STREET_W, 0.04, span), roadMat);
+  rv.position.set(p, 0.02, 0); scene.add(rv);
+  const rh = new THREE.Mesh(new THREE.BoxGeometry(span, 0.04, STREET_W), roadMat);
+  rh.position.set(0, 0.02, p); scene.add(rh);
+}
+for (let i = 0; i < GRID_N; i++) for (let j = 0; j < GRID_N; j++) {
+  const w = new THREE.Mesh(new THREE.BoxGeometry(BLOCK_SIZE, 0.1, BLOCK_SIZE), walkMat);
+  w.position.set(blockCenter(i), 0.05, blockCenter(j)); scene.add(w);
+}
+const nearIntersection = v => ROADS.some(r => Math.abs(v - r) < STREET_W / 2 + 1.0);
+const dashes = [];
+for (const p of ROADS) {
+  for (let d = -EDGE; d < EDGE; d += DASH_STEP) {
+    if (nearIntersection(d + DASH_LEN / 2)) continue;
+    dashes.push({ x: p, y: 0.045, z: d + DASH_LEN / 2, sx: 0.1, sy: 0.012, sz: DASH_LEN, color: [0.9, 0.85, 0.5] });
+    dashes.push({ x: d + DASH_LEN / 2, y: 0.045, z: p, sx: DASH_LEN, sy: 0.012, sz: 0.1, color: [0.9, 0.85, 0.5] });
+  }
+}
+instancedBoxes(dashes, crownMat, 1.2);
+
+// ------------------------------------------------------- TRAFFIC LIGHTS --
+function lightPhase(t) {
+  const period = 2 * (LIGHT_GREEN + LIGHT_ALLRED), tm = t % period;
+  if (tm < LIGHT_GREEN) return 'NS';
+  if (tm < LIGHT_GREEN + LIGHT_ALLRED) return 'X';
+  if (tm < 2 * LIGHT_GREEN + LIGHT_ALLRED) return 'EW';
+  return 'X';
+}
+const RED = new THREE.Color(2.0, 0.1, 0.06), GREEN = new THREE.Color(0.15, 2.0, 0.4);
+const nsHeadMat = new THREE.MeshBasicMaterial({ color: GREEN });
+const ewHeadMat = new THREE.MeshBasicMaterial({ color: RED });
+const poleMat = new THREE.MeshStandardMaterial({ color: 0x15151a, roughness: 0.5, metalness: 0.6 });
+{
+  const sw = STREET_W / 2 + 0.4;
+  const corners = [[+sw, -sw, 'NS'], [-sw, +sw, 'NS'], [-sw, -sw, 'EW'], [+sw, +sw, 'EW']];
+  const poleGeo = new THREE.CylinderGeometry(0.05, 0.05, 4.4);
+  const headGeo = new THREE.BoxGeometry(0.3, 0.55, 0.3);
+  const poles = new THREE.InstancedMesh(poleGeo, poleMat, ROADS.length * ROADS.length * 4);
+  let nsHeads = [], ewHeads = [], pi = 0;
+  const M = new THREE.Matrix4();
+  for (const p of ROADS) for (const q of ROADS) for (const [ox, oz, which] of corners) {
+    M.identity().setPosition(p + ox, 2.2, q + oz);
+    poles.setMatrixAt(pi++, M);
+    (which === 'NS' ? nsHeads : ewHeads).push([p + ox, 4.6, q + oz]);
+  }
+  scene.add(poles);
+  for (const [list, mat] of [[nsHeads, nsHeadMat], [ewHeads, ewHeadMat]]) {
+    const im = new THREE.InstancedMesh(headGeo, mat, list.length);
+    list.forEach((pos, i2) => { M.identity().setPosition(...pos); im.setMatrixAt(i2, M); });
+    scene.add(im);
+  }
+}
+
+// ------------------------------------------------------------ TRAFFIC SIM --
+// Same model as simulate_traffic() in the Blender file, run LIVE each frame.
+const CAR_COLORS = [0xcc3333, 0x3366e0, 0xd9b32e, 0x33b366, 0xb3b3bf, 0xe07326];
+function makeCarMesh(color) {
+  const g = new THREE.Group();
+  const body = new THREE.MeshStandardMaterial({ color, roughness: 0.4, metalness: 0.4 });
+  const add = (geo, x, y, z, mat) => { const m = new THREE.Mesh(geo, mat); m.position.set(x, y, z); g.add(m); };
+  add(new THREE.BoxGeometry(2.2, 0.45, 0.95), 0, 0.30, 0, body);
+  add(new THREE.BoxGeometry(1.1, 0.5, 0.85), -0.1, 0.68, 0, body);
+  const head = new THREE.MeshBasicMaterial({ color: new THREE.Color(2.2, 2.2, 1.9) });
+  const tail = new THREE.MeshBasicMaterial({ color: new THREE.Color(2.2, 0.15, 0.1) });
+  add(new THREE.BoxGeometry(0.12, 0.18, 0.7), 1.05, 0.30, 0, head);
+  add(new THREE.BoxGeometry(0.10, 0.16, 0.7), -1.05, 0.34, 0, tail);
+  scene.add(g);
+  return g;
+}
+const cars = [];
+for (const p of ROADS) for (const axis of ['NS', 'EW']) for (const dirn of [1, -1]) {
+  const lane = axis === 'NS' ? p + dirn * LANE_HALF : p - dirn * LANE_HALF;
+  const spawns = [];
+  for (let n = 0; n < CARS_PER_LANE; n++) {
+    let s = -EDGE + (2 * EDGE / CARS_PER_LANE) * n + uniform(0, 2 * EDGE / CARS_PER_LANE * 0.4);
+    if (dirn < 0) s = -s;
+    for (let tries = 0; tries < 80; tries++) {   // spawn sanitation (see .py)
+      const inBox = ROADS.some(q => Math.abs(s - q) < STREET_W / 2 + 1.4);
+      const clash = spawns.some(o => Math.abs(s - o) < CAR_LEN + MIN_GAP + 1.2);
+      let tooClose = false;
+      if (axis === 'EW') for (const q of ROADS) {
+        const dl = dirn * ((q - dirn * (STREET_W / 2 + 0.8)) - s);
+        if (dl > 0 && dl < 7) tooClose = true;
+      }
+      if (!inBox && !clash && !tooClose) break;
+      s = uniform(-EDGE, EDGE);
+    }
+    spawns.push(s);
+    cars.push({
+      obj: makeCarMesh(choice(CAR_COLORS)), axis, dirn, lane, s,
+      v: CAR_SPEED * uniform(0.6, 1.0),
+      turnQ: rng() < TURN_ODDS ? choice(ROADS.slice(1, -1)) : null, arc: null,
+    });
+  }
+}
+const TURNS = { 'NS,1': [[1, -1], Math.PI, 'EW', 1], 'NS,-1': [[-1, 1], 0, 'EW', -1],
+                'EW,1': [[-1, -1], Math.PI / 2, 'NS', -1], 'EW,-1': [[1, 1], -Math.PI / 2, 'NS', 1] };
+function beginArc(c) {
+  const [[sx, sz], th0, nAxis, nDirn] = TURNS[c.axis + ',' + c.dirn];
+  const p = c.axis === 'NS' ? c.lane - c.dirn * LANE_HALF : c.turnQ;
+  const q = c.axis === 'NS' ? c.turnQ : c.lane + c.dirn * LANE_HALF;
+  const sw = STREET_W / 2;
+  c.arc = { cx: p + sx * sw, cz: q + sz * sw, r: sw - LANE_HALF, th0, prog: 0, nAxis, nDirn };
+  c.turnQ = null;
+}
+const arcState = a => {
+  const th = a.th0 - a.prog / a.r;
+  return [a.cx + a.r * Math.cos(th), a.cz + a.r * Math.sin(th), th - Math.PI / 2];
+};
+function stepTraffic(t, dt) {
+  const phase = lightPhase(t);
+  nsHeadMat.color.copy(phase === 'NS' ? GREEN : RED);
+  ewHeadMat.color.copy(phase === 'EW' ? GREEN : RED);
+  const lanes = new Map();
+  for (const c of cars) if (!c.arc) {
+    const k = c.axis + ',' + c.lane.toFixed(2);
+    if (!lanes.has(k)) lanes.set(k, []);
+    lanes.get(k).push(c.s);
+  }
+  for (const c of cars) {
+    if (c.arc) {
+      c.arc.prog += TURN_SPEED * dt;
+      if (c.arc.prog >= c.arc.r * Math.PI / 2) {
+        const [x, z] = arcState(c.arc);
+        c.axis = c.arc.nAxis; c.dirn = c.arc.nDirn;
+        if (c.axis === 'NS') { c.lane = x; c.s = z; } else { c.lane = z; c.s = x; }
+        c.v = TURN_SPEED; c.arc = null;
+      } else {
+        const [x, z, hd] = arcState(c.arc);
+        c.obj.position.set(x, 0, z); c.obj.rotation.y = -hd;   // three: Y-up, CW flip
+        continue;
+      }
+    }
+    let dStop = null;
+    const stopOff = STREET_W / 2 + 0.8;
+    if (phase !== c.axis) for (const q of ROADS) {
+      const d = c.dirn * ((q - c.dirn * stopOff) - c.s);
+      if (d > -0.5 && d < LOOKAHEAD) dStop = dStop === null ? d : Math.min(dStop, d);
+    }
+    let ahead = null;
+    for (const os of lanes.get(c.axis + ',' + c.lane.toFixed(2)) || []) {
+      const d = c.dirn * (os - c.s);
+      if (d > 0.1 && (ahead === null || d < ahead)) ahead = d;
+    }
+    if (ahead !== null) {
+      const dg = ahead - CAR_LEN - MIN_GAP;
+      if (dg < LOOKAHEAD) dStop = dStop === null ? dg : Math.min(dStop, dg);
+    }
+    const vAllow = dStop !== null ? Math.sqrt(Math.max(0, 2 * DECEL * Math.max(dStop - 0.3, 0))) : CAR_SPEED;
+    const vT = Math.min(CAR_SPEED, vAllow);
+    c.v = c.v < vT ? Math.min(vT, c.v + ACCEL * dt) : Math.max(vT, c.v - DECEL * dt);
+    c.s += c.dirn * c.v * dt;
+    if (c.turnQ !== null && phase === c.axis) {
+      const de = c.dirn * (c.s - (c.turnQ - c.dirn * STREET_W / 2));
+      if (de >= 0 && de < 1.2) { beginArc(c); continue; }
+      if (de >= 1.2) c.turnQ = null;
+    }
+    if (c.dirn * c.s > EDGE + 5) c.s = -c.dirn * (EDGE + 5);
+    if (c.axis === 'NS') {
+      c.obj.position.set(c.lane, 0, c.s);
+      c.obj.rotation.y = c.dirn > 0 ? -Math.PI / 2 : Math.PI / 2;
+    } else {
+      c.obj.position.set(c.s, 0, c.lane);
+      c.obj.rotation.y = c.dirn > 0 ? 0 : Math.PI;
+    }
+  }
+}
+// NOTE on rotation.y signs: the city plan's math is in Blender's XY, which
+// maps to Three's XZ with Z flipped in handedness — headings negate.
+
+// ------------------------------------------------------------------ RAIN --
+const rainGeo = new THREE.BufferGeometry();
+const rainPos = new Float32Array(RAIN_COUNT * 6);
+rainGeo.setAttribute('position', new THREE.BufferAttribute(rainPos, 3));
+const rainDrops = [];
+for (let i = 0; i < RAIN_COUNT; i++) {
+  rainDrops.push({ dx: uniform(-20, 20), dz: uniform(-20, 20),
+                   z0: uniform(0, 40), spd: uniform(34, 56), len: uniform(0.35, 0.9) });
+}
+const rain = new THREE.LineSegments(rainGeo,
+  new THREE.LineBasicMaterial({ color: 0x8fb8d8, transparent: true, opacity: 0.35 }));
+scene.add(rain);
+function stepRain(center, t) {
+  rainDrops.forEach((d, i) => {
+    const y = 40 - ((d.z0 + d.spd * t) % 40);
+    const x = center.x + d.dx, z = center.z + d.dz;
+    rainPos.set([x, y, z, x + 0.06, y + d.len, z + 0.02], i * 6);
+  });
+  rainGeo.attributes.position.needsUpdate = true;
+}
+
+// ---------------------------------------------------------------- PLAYER --
+// A point mass with gravity. Hold web: raycast toward look-direction (tilted
+// up) against the buildings; on hit, a rope constraint turns gravity into a
+// pendulum — the whole Spider-Man feel is just "project velocity onto the
+// sphere while the rope is taut," plus a small tangential pump.
+const player = {
+  pos: new THREE.Vector3(), vel: new THREE.Vector3(),
+  onGround: false, anchor: null, ropeLen: 0,
+};
+function respawn() {
+  // Spawn on a MID-height rooftop near the center — NOT the tallest tower:
+  // from the highest roof no anchor is ever above you, so the first web a
+  // player fires connects to nothing (verified via the live preview probe;
+  // the reticle sat dim on spawn). Mid-height means taller neighbors are
+  // all around, so the first thing you see is a green reticle.
+  let best = null, tallest = null;
+  for (const c of colliders) {
+    const cx = (c.min[0] + c.max[0]) / 2, cz = (c.min[2] + c.max[2]) / 2;
+    const d = Math.hypot(cx, cz), top = c.max[1];
+    if (!tallest || top > tallest.top) tallest = { cx, cz, top };
+    if (top >= 12 && top <= 24 && (!best || d < best.d)) best = { cx, cz, top, d };
+  }
+  const s = best || tallest;
+  player.pos.set(s.cx, s.top + 1.2, s.cz);
+  player.vel.set(0, 0, 0);
+  player.anchor = null;
+}
+const spidey = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.9, 0.35),
+  new THREE.MeshStandardMaterial({ color: 0xd02040, roughness: 0.5 }));
+const spideyHead = new THREE.Mesh(new THREE.BoxGeometry(0.32, 0.3, 0.3),
+  new THREE.MeshStandardMaterial({ color: 0x2040d0, roughness: 0.5 }));
+spideyHead.position.y = 0.62; spidey.add(spideyHead);
+scene.add(spidey);
+const webLine = new THREE.Line(
+  new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3()]),
+  new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.8 }));
+webLine.visible = false;
+scene.add(webLine);
+
+const raycaster = new THREE.Raycaster();
+// Forgiving anchor search: instead of one thin ray (which whiffs between
+// buildings constantly and made webbing feel broken), sample a cone of rays
+// around look-direction-tilted-up and take the highest hit. Then clamp the
+// rope so the BOTTOM of the swing arc clears the street — an unclamped rope
+// longer than your altitude slams you into the pavement mid-swing.
+function findAnchor() {
+  const fwd = new THREE.Vector3();
+  camera.getWorldDirection(fwd);
+  const up = new THREE.Vector3(0, 1, 0);
+  const right = fwd.clone().cross(up).normalize();
+  let best = null;
+  for (const [u, r] of [[0.9, 0], [1.4, 0], [0.6, 0], [0.9, 0.35], [0.9, -0.35],
+                        [1.4, 0.5], [1.4, -0.5], [2.2, 0], [0.9, 0.7], [0.9, -0.7]]) {
+    const dir = fwd.clone().addScaledVector(up, u).addScaledVector(right, r).normalize();
+    raycaster.set(player.pos, dir);
+    raycaster.far = 80;
+    const hit = raycaster.intersectObject(buildingMesh, false)[0];
+    if (hit && hit.point.y > player.pos.y + 1.5 && (!best || hit.point.y > best.y)) {
+      best = hit.point.clone();
+    }
+  }
+  return best;
+}
+function tryAttach() {
+  const a = findAnchor();
+  if (!a) return false;
+  player.anchor = a;
+  const dist = player.pos.distanceTo(a);
+  // rope: slightly taut, but never longer than the height that keeps the
+  // arc's low point ~2.2 above the street
+  player.ropeLen = Math.max(3, Math.min(dist * 0.9, a.y - 2.2));
+  // entry boost: a swing needs tangential speed — from near-standstill,
+  // inject some along the camera's horizontal forward so the first web
+  // always MOVES you instead of leaving you dangling
+  const hSpeed = Math.hypot(player.vel.x, player.vel.z);
+  if (hSpeed < 7) {
+    const f = new THREE.Vector3(); camera.getWorldDirection(f);
+    f.y = 0; f.normalize();
+    player.vel.addScaledVector(f, 7 - hSpeed);
+  }
+  return true;
+}
+
+// ----------------------------------------------------------------- INPUT --
+const keys = {};
+let webHeld = false, yaw = 0, pitch = -0.15;
+addEventListener('keydown', e => {
+  keys[e.code] = true;
+  if (e.code === 'Space') { webHeld = true; e.preventDefault(); }
+  if (e.code === 'KeyR') respawn();
+});
+addEventListener('keyup', e => {
+  keys[e.code] = false;
+  if (e.code === 'Space') webHeld = false;
+});
+addEventListener('mousedown', e => { if (e.button === 0) webHeld = true; });
+addEventListener('mouseup', e => { if (e.button === 0) webHeld = false; });
+// Enter the game on click. Pointer lock gives the best mouse-look, but it's
+// DENIED inside sandboxed iframes (e.g. embedded preview panels) — so treat
+// it as an enhancement: the click always starts the game, and if lock isn't
+// granted we fall back to raw mouse-look (movementX/Y works unlocked too).
+const startEl = document.getElementById('start');
+let entered = false;
+startEl.addEventListener('click', () => {
+  entered = true;
+  startEl.style.display = 'none';
+  try { renderer.domElement.requestPointerLock(); } catch (e) { /* fallback look */ }
+});
+document.addEventListener('pointerlockerror', () => {
+  document.getElementById('webstate').textContent = 'no pointer lock (embedded?) — mouse-look fallback on';
+});
+document.addEventListener('pointerlockchange', () => {
+  if (!document.pointerLockElement && !entered) startEl.style.display = 'flex';
+});
+addEventListener('mousemove', e => {
+  if (!entered) return;
+  yaw -= e.movementX * 0.0024;
+  pitch = Math.max(-1.35, Math.min(0.9, pitch - e.movementY * 0.0022));
+});
+
+// ----------------------------------------------------------- PLAYER STEP --
+const GRAV = 26, RUN = 11, AIR_CTRL = 11;
+let reticleClock = 0;
+function stepPlayer(dt) {
+  const p = player;
+  // camera-relative input direction on the ground plane
+  const f = new THREE.Vector3(-Math.sin(yaw), 0, -Math.cos(yaw));
+  const r = new THREE.Vector3(-f.z, 0, f.x);
+  const inDir = new THREE.Vector3();
+  if (keys.KeyW) inDir.add(f);
+  if (keys.KeyS) inDir.sub(f);
+  if (keys.KeyD) inDir.add(r);
+  if (keys.KeyA) inDir.sub(r);
+  if (inDir.lengthSq() > 0) inDir.normalize();
+
+  // web attach / release
+  if (webHeld && !p.anchor && !p.onGround) tryAttach();
+  if (webHeld && !p.anchor && p.onGround) { // jump-launch into a swing
+    p.vel.y = 12; p.onGround = false; tryAttach();
+  }
+  if (!webHeld && p.anchor) {
+    p.anchor = null;
+    // release flick: a little up-and-forward on letting go, so releasing at
+    // the bottom of an arc launches you the way Spidey games do
+    p.vel.y += 3.5;
+    const sp2 = Math.hypot(p.vel.x, p.vel.z);
+    if (sp2 > 1) { p.vel.x *= 1 + 2 / sp2; p.vel.z *= 1 + 2 / sp2; }
+  }
+
+  p.vel.y -= GRAV * dt;
+  if (p.onGround) {
+    const target = inDir.multiplyScalar(keys.ShiftLeft ? RUN * 1.7 : RUN);
+    p.vel.x += (target.x - p.vel.x) * Math.min(1, dt * 8);
+    p.vel.z += (target.z - p.vel.z) * Math.min(1, dt * 8);
+    if (keys.Space) p.vel.y = 12;
+  } else {
+    p.vel.addScaledVector(inDir, AIR_CTRL * dt);
+  }
+  p.pos.addScaledVector(p.vel, dt);
+
+  // rope constraint => pendulum
+  if (p.anchor) {
+    const d = p.pos.clone().sub(p.anchor);
+    if (d.length() > p.ropeLen) {
+      d.setLength(p.ropeLen);
+      p.pos.copy(p.anchor).add(d);
+      const n = d.normalize();
+      const radial = n.multiplyScalar(p.vel.dot(n));
+      p.vel.sub(radial);                       // keep only tangential motion
+      p.vel.multiplyScalar(1.004);             // tiny pump so swings build
+      // holding W while taut pumps the swing hard (like kicking your legs)
+      if (keys.KeyW && p.vel.lengthSq() > 1) {
+        p.vel.addScaledVector(p.vel.clone().normalize(), 10 * dt);
+      }
+    }
+    webLine.visible = true;
+    webLine.geometry.setFromPoints([p.pos, p.anchor]);
+  } else webLine.visible = false;
+
+  // ground + building AABB collisions
+  p.onGround = false;
+  if (p.pos.y < 0.9) { p.pos.y = 0.9; if (p.vel.y < 0) p.vel.y = 0; p.onGround = true; }
+  const R = 0.4;
+  for (const c of colliders) {
+    if (p.pos.x < c.min[0] - R || p.pos.x > c.max[0] + R ||
+        p.pos.z < c.min[2] - R || p.pos.z > c.max[2] + R ||
+        p.pos.y < c.min[1] - R || p.pos.y > c.max[1] + 1.0) continue;
+    // minimum-penetration push-out
+    const pens = [
+      [p.pos.x - (c.min[0] - R), 0], [(c.max[0] + R) - p.pos.x, 1],
+      [p.pos.y - (c.min[1] - R), 2], [(c.max[1] + 0.9) - p.pos.y, 3],
+      [p.pos.z - (c.min[2] - R), 4], [(c.max[2] + R) - p.pos.z, 5]];
+    pens.sort((a, b) => a[0] - b[0]);
+    const [, axis] = pens[0];
+    if (axis === 0) { p.pos.x = c.min[0] - R; if (p.vel.x > 0) p.vel.x = 0; }
+    if (axis === 1) { p.pos.x = c.max[0] + R; if (p.vel.x < 0) p.vel.x = 0; }
+    if (axis === 2) { p.pos.y = c.min[1] - R; if (p.vel.y > 0) p.vel.y = 0; }
+    if (axis === 3) { p.pos.y = c.max[1] + 0.9; if (p.vel.y < 0) p.vel.y = 0; p.onGround = true; }
+    if (axis === 4) { p.pos.z = c.min[2] - R; if (p.vel.z > 0) p.vel.z = 0; }
+    if (axis === 5) { p.pos.z = c.max[2] + R; if (p.vel.z < 0) p.vel.z = 0; }
+  }
+
+  // visuals: lean the body into the velocity
+  spidey.position.copy(p.pos);
+  const sp = Math.hypot(p.vel.x, p.vel.z);
+  if (sp > 0.5) spidey.rotation.y = Math.atan2(p.vel.x, p.vel.z);
+  spidey.rotation.x = THREE.MathUtils.clamp(sp * 0.02 * (p.anchor ? 1.6 : 0.4), 0, 0.9);
+
+  // third-person camera
+  const camOff = new THREE.Vector3(
+    Math.sin(yaw) * Math.cos(pitch), -Math.sin(pitch), Math.cos(yaw) * Math.cos(pitch)
+  ).multiplyScalar(8.5);
+  const target = p.pos.clone().add(camOff).add(new THREE.Vector3(0, 2.2, 0));
+  camera.position.lerp(target, Math.min(1, dt * 7));
+  camera.lookAt(p.pos.x, p.pos.y + 1.2, p.pos.z);
+
+  document.getElementById('webstate').textContent =
+    p.anchor ? 'SWINGING' : (webHeld ? 'no anchor in range' : 'ready');
+  document.getElementById('speed').textContent = p.vel.length().toFixed(1);
+
+  // reticle: green + bright when a web would connect right now
+  reticleClock += dt;
+  if (reticleClock > 0.12) {
+    reticleClock = 0;
+    const ok = p.anchor || !!findAnchor();
+    const el = document.getElementById('center');
+    el.style.background = ok ? '#4dff88' : '#9fe8ff55';
+    el.style.boxShadow = ok ? '0 0 10px #4f8' : '0 0 4px #0af6';
+  }
+}
+
+// ------------------------------------------------------------- MAIN LOOP --
+respawn();
+camera.position.copy(player.pos).add(new THREE.Vector3(0, 3, 10));
+let last = performance.now(), simT = 0;
+function loop(now) {
+  requestAnimationFrame(loop);
+  let dt = Math.min(0.033, (now - last) / 1000);
+  last = now;
+  simT += dt;
+  stepTraffic(simT, dt);
+  stepPlayer(dt);
+  stepRain(player.pos, simT);
+  composer.render();
+}
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
