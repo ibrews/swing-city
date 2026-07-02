@@ -53,6 +53,7 @@
   trouble you can cause before the night's over.<br><br>
   <b>click to enter</b><br><br>
   mouse — look &nbsp;·&nbsp; <b>hold LMB or SPACE</b> — shoot a web and swing (let go to release)<br>
+  <b>tap LMB or SPACE</b> — no jump button: a quick tap pulls you up like a web-assisted hop<br>
   WASD — run / steer in the air &nbsp;·&nbsp; shift — sprint &nbsp;·&nbsp; R — respawn<br><br>
   <b>HOW TO WIN:</b> there's no ending — just a high score. Smash into cars while swinging to send
   them flying (+25), grab the glowing orbs for points (+10) — a few unusual-looking ones do
@@ -169,13 +170,28 @@ const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setSize(innerWidth, innerHeight);
 renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
-renderer.toneMappingExposure = 0.85;
+// Exposure raised 0.85->1.05: Alex -- "a lot of the scene just renders as
+// black." With only emissive surfaces (windows/signs/lights) and no real
+// bounce lighting, non-emissive geometry (roads, sidewalks, car bodies, the
+// player) had almost nothing lighting it and crushed to black under ACES at
+// the old exposure. Paired with the ambient-light bump below.
+renderer.toneMappingExposure = 1.05;
 document.body.appendChild(renderer.domElement);
 
 const composer = new EffectComposer(renderer);
 composer.addPass(new RenderPass(scene, camera));
-const bloom = new UnrealBloomPass(new THREE.Vector2(innerWidth, innerHeight), 0.75, 0.55, 0.55);
+// Bloom STRENGTH now fades with altitude (see updateBloom() in the main
+// loop) -- punchy and dramatic on the initial sky-fall (Alex: "cool for the
+// first few seconds then a little overwhelming"), settling to a calmer
+// baseline once you're down at city level. `bloom` is `let`, not `const`,
+// specifically so strength can be animated.
+const BLOOM_STRENGTH_FALL = 1.5, BLOOM_STRENGTH_BASE = 0.62;
+let bloom = new UnrealBloomPass(new THREE.Vector2(innerWidth, innerHeight), BLOOM_STRENGTH_FALL, 0.55, 0.6);
 composer.addPass(bloom);
+function updateBloom(playerY) {
+  const fallProgress = THREE.MathUtils.clamp((FALL_SPAWN_Y - playerY) / (FALL_SPAWN_Y - 30), 0, 1);
+  bloom.strength = THREE.MathUtils.lerp(BLOOM_STRENGTH_FALL, BLOOM_STRENGTH_BASE, fallProgress);
+}
 
 // NOIR pickup: full desaturation, driven by uSat (1 = normal, 0 = grayscale).
 // Lerped toward its target each frame in the main loop -- see noirTimer.
@@ -199,8 +215,12 @@ addEventListener('resize', () => {
   composer.setSize(innerWidth, innerHeight);
 });
 
-scene.add(new THREE.AmbientLight(0x223044, 0.9));
-const moon = new THREE.DirectionalLight(0x7899ff, 0.7);
+// Ambient bumped 0.9->1.4 -- same "renders as black" fix as the exposure
+// change above, from the other lever: this is what lights non-emissive
+// surfaces (roads, sidewalks, car bodies, the player's own suit) at all.
+const ambientLight = new THREE.AmbientLight(0x2c3c58, 1.4);
+scene.add(ambientLight);
+const moon = new THREE.DirectionalLight(0x7899ff, 0.8);
 moon.position.set(30, 80, -30);
 scene.add(moon);
 
@@ -570,11 +590,53 @@ for (let i = 0; i < RAIN_COUNT; i++) {
   rainDrops.push({ dx: uniform(-20, 20), dz: uniform(-20, 20),
                    z0: uniform(0, 40), spd: uniform(34, 56), len: uniform(0.35, 0.9) });
 }
-const rain = new THREE.LineSegments(rainGeo,
-  new THREE.LineBasicMaterial({ color: 0x8fb8d8, transparent: true, opacity: 0.35 }));
+const rainMat = new THREE.LineBasicMaterial({ color: 0x8fb8d8, transparent: true, opacity: 0 });
+const rain = new THREE.LineSegments(rainGeo, rainMat);
 scene.add(rain);
+
+// ---------------------------------------------------------------- WEATHER --
+// Rain now drifts between random intensity targets instead of being always-
+// on at a fixed density (Alex: "have the rain randomly turn on and crank to
+// various intensities, and have random flashes of lightning"). Intensity
+// controls two things at once: opacity (a lighter drizzle should look
+// fainter, not just sparser) and how many of the RAIN_COUNT drops are
+// actually "live" -- the rest get parked at a degenerate point so they
+// don't draw, which fakes a variable particle count without touching the
+// buffer geometry's size.
+let rainIntensity = 0, rainTarget = 0, rainRetimer = uniform(5, 12);
+let lightningTimer = uniform(10, 24);
+function stepWeather(dt) {
+  rainRetimer -= dt;
+  if (rainRetimer <= 0) {
+    rainRetimer = uniform(14, 34);
+    const r = rng();
+    rainTarget = r < 0.3 ? 0 : r < 0.6 ? uniform(0.12, 0.4) : uniform(0.55, 1.0);
+  }
+  rainIntensity += (rainTarget - rainIntensity) * Math.min(1, dt * 0.4);
+  rainMat.opacity = 0.42 * rainIntensity;
+
+  lightningTimer -= dt;
+  if (lightningTimer <= 0) {
+    lightningTimer = uniform(11, 28);
+    if (rainIntensity > 0.3) triggerLightning();
+  }
+}
+function triggerLightning() {
+  flashEl.style.background = '#dfe8ff';
+  flashEl.style.opacity = '0.5';
+  setTimeout(() => { flashEl.style.opacity = '0'; }, 80);
+  setTimeout(() => { flashEl.style.opacity = '0.28'; }, 150);
+  setTimeout(() => { flashEl.style.opacity = '0'; flashEl.style.background = '#fff'; }, 230);
+  sfxThunder();
+}
+
 function stepRain(center, t) {
+  const liveCount = Math.floor(RAIN_COUNT * rainIntensity);
   rainDrops.forEach((d, i) => {
+    if (i >= liveCount) {
+      rainPos.set([0, -999, 0, 0, -999, 0], i * 6);
+      return;
+    }
     const y = 40 - ((d.z0 + d.spd * t) % 40);
     const x = center.x + d.dx, z = center.z + d.dz;
     rainPos.set([x, y, z, x + 0.06, y + d.len, z + 0.02], i * 6);
@@ -696,6 +758,32 @@ function sfxExplode(pos) {
   });
 }
 
+// Thunder -- NOT spatial (playSpatialAt attaches to a world position; this
+// is atmospheric, it should sound the same regardless of where you are), so
+// it goes straight to a gain node on the destination instead of through a
+// PositionalAudio. A sharp noise crack up front, then a long low rumble.
+function sfxThunder() {
+  const ctx = audioCtx, now = ctx.currentTime;
+  const out = ctx.createGain(); out.gain.value = 0.5; out.connect(ctx.destination);
+  const crack = ctx.createBufferSource(); crack.buffer = noiseBuffer;
+  const crackFilt = ctx.createBiquadFilter(); crackFilt.type = 'highpass'; crackFilt.frequency.value = 800;
+  const crackGain = ctx.createGain();
+  crackGain.gain.setValueAtTime(0.5, now);
+  crackGain.gain.exponentialRampToValueAtTime(0.001, now + 0.12);
+  crack.connect(crackFilt); crackFilt.connect(crackGain); crackGain.connect(out);
+  crack.start(now); crack.stop(now + 0.14);
+  const rumble = ctx.createBufferSource(); rumble.buffer = noiseBuffer; rumble.loop = true;
+  const rumbleFilt = ctx.createBiquadFilter(); rumbleFilt.type = 'lowpass';
+  rumbleFilt.frequency.setValueAtTime(400, now + 0.05);
+  rumbleFilt.frequency.exponentialRampToValueAtTime(60, now + 2.2);
+  const rumbleGain = ctx.createGain();
+  rumbleGain.gain.setValueAtTime(0.0001, now);
+  rumbleGain.gain.exponentialRampToValueAtTime(0.4, now + 0.15);
+  rumbleGain.gain.exponentialRampToValueAtTime(0.0001, now + 2.4);
+  rumble.connect(rumbleFilt); rumbleFilt.connect(rumbleGain); rumbleGain.connect(out);
+  rumble.start(now); rumble.stop(now + 2.4);
+}
+
 // Light, occasional honking from random moving traffic -- not constant, just
 // ambience. Rolled in the main loop off a countdown timer.
 let honkTimer = uniform(4, 9);
@@ -714,7 +802,7 @@ function stepHonks(dt, p) {
 // because it draws from the SAME seeded rng stream as the city, so it's
 // reproducible per-seed but never mechanically identical bar to bar.
 const musicBus = audioCtx.createGain();
-musicBus.gain.value = 0.4;
+musicBus.gain.value = 0;   // starts silent -- faded in by updateFallMusic() once you land
 musicBus.connect(audioCtx.destination);
 const MUSIC_BPM = 74;
 const BEAT = 60 / MUSIC_BPM;
@@ -756,6 +844,64 @@ function startMusic() {
   musicNext = audioCtx.currentTime + 0.1;
   scheduleMusic();
   setInterval(scheduleMusic, 100);   // classic lookahead scheduler interval
+}
+
+// HYPE FALL MUSIC (Alex: "let's have a cool hype music as we fall at the
+// beginning") -- a separate, faster, driving loop on its own bus, playing
+// loud while you're up in the sky-drop, then crossfading OUT into the
+// normal noir loop as you approach the city / land. Same synthesis
+// approach as the noir loop (procedural, off the seeded rng), just a much
+// more energetic BPM/pattern: a filtered-noise "kick" every beat plus a
+// sawtooth arpeggio on the off-beats.
+const hypeBus = audioCtx.createGain();
+hypeBus.gain.value = 0;
+hypeBus.connect(audioCtx.destination);
+const HYPE_BPM = 132;
+const HYPE_BEAT = 60 / HYPE_BPM;
+const HYPE_SCALE = [110.00, 130.81, 146.83, 164.81, 196.00, 220.00];
+let hypeNext = 0, hypeStarted = false;
+function scheduleHype() {
+  while (hypeNext < audioCtx.currentTime + 0.22) {
+    const t = hypeNext;
+    {
+      const src = audioCtx.createBufferSource(); src.buffer = noiseBuffer;
+      const filt = audioCtx.createBiquadFilter(); filt.type = 'lowpass'; filt.frequency.value = 150;
+      const g = audioCtx.createGain();
+      g.gain.setValueAtTime(0.5, t);
+      g.gain.exponentialRampToValueAtTime(0.001, t + HYPE_BEAT * 0.4);
+      src.connect(filt); filt.connect(g); g.connect(hypeBus);
+      src.start(t); src.stop(t + HYPE_BEAT * 0.4);
+    }
+    if (rng() < 0.85) {
+      const note = choice(HYPE_SCALE) * (rng() < 0.5 ? 2 : 1);
+      const o = audioCtx.createOscillator(); o.type = 'sawtooth'; o.frequency.value = note;
+      const filt = audioCtx.createBiquadFilter(); filt.type = 'lowpass'; filt.frequency.value = 2200;
+      const g = audioCtx.createGain();
+      g.gain.setValueAtTime(0.0001, t);
+      g.gain.exponentialRampToValueAtTime(0.13, t + 0.01);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + HYPE_BEAT * 0.45);
+      o.connect(filt); filt.connect(g); g.connect(hypeBus);
+      o.start(t); o.stop(t + HYPE_BEAT * 0.45);
+    }
+    hypeNext += HYPE_BEAT / 2;
+  }
+}
+function startHype() {
+  if (hypeStarted) return;
+  hypeStarted = true;
+  hypeNext = audioCtx.currentTime + 0.1;
+  scheduleHype();
+  setInterval(scheduleHype, 100);
+}
+let fallMusicPhase = 'hype';   // 'hype' while dropping -> 'settled' once landed/low
+function updateFallMusic(playerY, onGround) {
+  if (fallMusicPhase !== 'hype') return;
+  hypeBus.gain.setTargetAtTime(0.45, audioCtx.currentTime, 0.4);
+  if (onGround || playerY < 45) {
+    fallMusicPhase = 'settled';
+    hypeBus.gain.setTargetAtTime(0, audioCtx.currentTime, 1.0);
+    musicBus.gain.setTargetAtTime(0.4, audioCtx.currentTime, 1.6);
+  }
 }
 
 // ------------------------------------------------------- GAMEPLAY SYSTEMS --
@@ -804,6 +950,33 @@ function stepKnocked(list, dt, isParked) {
       entry.obj.rotation.x += k.ang.x * dt;
       entry.obj.rotation.y += k.ang.y * dt;
       entry.obj.rotation.z += k.ang.z * dt;
+
+      // BUILDING COLLISION for tumbling cars (Alex's question again -- a
+      // knocked car flung near a wall used to fly straight through it with
+      // zero response). Same min-penetration AABB push-out as the player
+      // uses, sized for a car body, with a soft bounce on the horizontal
+      // axes (so it deflects off a wall instead of just stopping dead) and
+      // a hard stop vertically (landing on a setback/ledge).
+      const CR = 0.9;
+      const pos = entry.obj.position;
+      for (const c of colliders) {
+        if (pos.x < c.min[0] - CR || pos.x > c.max[0] + CR ||
+            pos.z < c.min[2] - CR || pos.z > c.max[2] + CR ||
+            pos.y < c.min[1] - CR || pos.y > c.max[1] + CR) continue;
+        const pens = [
+          [pos.x - (c.min[0] - CR), 0], [(c.max[0] + CR) - pos.x, 1],
+          [pos.y - (c.min[1] - CR), 2], [(c.max[1] + CR) - pos.y, 3],
+          [pos.z - (c.min[2] - CR), 4], [(c.max[2] + CR) - pos.z, 5]];
+        pens.sort((a, b) => a[0] - b[0]);
+        const [, axis] = pens[0];
+        if (axis === 0) { pos.x = c.min[0] - CR; if (k.vel.x > 0) k.vel.x *= -0.2; }
+        if (axis === 1) { pos.x = c.max[0] + CR; if (k.vel.x < 0) k.vel.x *= -0.2; }
+        if (axis === 2) { pos.y = c.min[1] - CR; if (k.vel.y > 0) k.vel.y = 0; }
+        if (axis === 3) { pos.y = c.max[1] + CR; if (k.vel.y < 0) k.vel.y = 0; }
+        if (axis === 4) { pos.z = c.min[2] - CR; if (k.vel.z > 0) k.vel.z *= -0.2; }
+        if (axis === 5) { pos.z = c.max[2] + CR; if (k.vel.z < 0) k.vel.z *= -0.2; }
+      }
+
       if (entry.obj.position.y < 0.25) {
         entry.obj.position.y = 0.25; k.vel.set(0, 0, 0); k.ang.multiplyScalar(0.15); k.grounded = true;
       }
@@ -819,6 +992,24 @@ function stepKnocked(list, dt, isParked) {
         entry.v = CAR_SPEED * 0.7;
         entry.obj.rotation.set(0, entry.obj.rotation.y, 0);
       }
+    }
+  }
+}
+const CAR_SOLID_RADIUS = 1.35;   // rough car half-length + a little player radius
+function resolveCarCollisions(p, speed) {
+  for (const list of [cars, parkedCars]) {
+    for (const entry of list) {
+      if (entry.knocked) continue;
+      const dx = p.pos.x - entry.obj.position.x, dz = p.pos.z - entry.obj.position.z;
+      const dist = Math.hypot(dx, dz);
+      if (dist >= CAR_SOLID_RADIUS || dist < 1e-4) continue;
+      if (Math.abs(p.pos.y - (entry.obj.position.y + 0.4)) > 1.1) continue;   // rough car height gate
+      if (speed >= KNOCK_SPEED && dist < KNOCK_RADIUS) continue;   // let checkKnocks smash through instead of blocking
+      const nx = dx / dist, nz = dz / dist;
+      p.pos.x += nx * (CAR_SOLID_RADIUS - dist);
+      p.pos.z += nz * (CAR_SOLID_RADIUS - dist);
+      const vIn = p.vel.x * nx + p.vel.z * nz;
+      if (vIn < 0) { p.vel.x -= vIn * nx; p.vel.z -= vIn * nz; }
     }
   }
 }
@@ -1021,17 +1212,23 @@ function respawn() {
   player.vel.set(0, -8, 0);
   player.anchor = null;
   player.onGround = false;
+  // Re-arm the hype-fall music cue every time you drop back in (death,
+  // R-respawn) too, not just the very first entry.
+  fallMusicPhase = 'hype';
+  if (musicStarted) musicBus.gain.setTargetAtTime(0, audioCtx.currentTime, 0.6);
 }
-// VISIBILITY FIX: the old body material rendered as an unreadable near-
-// black silhouette in this dim, low-ambient scene (Alex: "my skin is black
-// so it's hard to see myself while swinging") -- true regardless of the
-// literal material color, since ANY mid-tone diffuse surface goes nearly
-// black under this lighting. The fix isn't a brighter body color (that
-// would look wrong for a night scene) -- it's small EMISSIVE accents that
-// stay visible no matter how dark the ambient is. Venom-esque: black suit,
-// glowing white eyes + chest mark.
-const suitMat = new THREE.MeshStandardMaterial({ color: 0x030304, roughness: 0.35, metalness: 0.15 });
+// VISIBILITY FIX, ROUND 2 (Alex: "I'm still too dark to see"): round 1
+// relied entirely on small emissive accents against a near-black (0x030304)
+// body, betting the scene lighting fix (exposure/ambient above) would carry
+// the rest -- it didn't fully land. This round lightens the suit itself (a
+// dark blue-charcoal, not near-black, so it actually catches the raised
+// ambient instead of needing to), and makes BOTH accent colors bigger and
+// bolder: white eyes stay, but the chest mark is now red (not white) and
+// bigger, and the coat gets a red lining that peeks from behind it -- Alex's
+// "maybe we get some red in there."
+const suitMat = new THREE.MeshStandardMaterial({ color: 0x12172c, roughness: 0.4, metalness: 0.1 });
 const suitGlow = new THREE.MeshBasicMaterial({ color: 0xf2f6ff });
+const suitRed = new THREE.MeshBasicMaterial({ color: 0xff2a3a });
 const spidey = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.9, 0.35), suitMat);
 const spideyHead = new THREE.Mesh(new THREE.BoxGeometry(0.32, 0.3, 0.3), suitMat);
 spideyHead.position.y = 0.62; spidey.add(spideyHead);
@@ -1040,7 +1237,7 @@ for (const ex of [-0.09, 0.09]) {
   eye.position.set(ex, 0.66, 0.16);
   spidey.add(eye);
 }
-const chestMark = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.22, 0.02), suitGlow);
+const chestMark = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.28, 0.02), suitRed);
 chestMark.position.set(0, 0.05, 0.18);
 spidey.add(chestMark);
 scene.add(spidey);
@@ -1052,11 +1249,20 @@ scene.add(spidey);
 // backward in a swing/fall the way a coat catching wind would, and
 // lerp-eased each frame so it doesn't just rigidly follow (that's what
 // reads as "groom" instead of "a stiff plank").
+// LIGHTER blue (0x0c1c4a -> 0x3f72e8) -- Alex: "maybe a lighter blue cloak."
+// The old navy was too close to the scene's own dark-blue ambient/fog to
+// read as a separate object. Also added a thin red lining peeking from
+// behind each panel (his "maybe we get some red in there") -- a child mesh
+// on each segment, so it inherits the same lerp/lookAt transform for free.
 const COAT_N = 5;
-const coatMat = new THREE.MeshStandardMaterial({ color: 0x0c1c4a, roughness: 0.75 });
+const coatMat = new THREE.MeshStandardMaterial({ color: 0x3f72e8, roughness: 0.6, metalness: 0.05 });
+const coatLiningMat = new THREE.MeshBasicMaterial({ color: 0xdd1f2f });
 const coatSegs = [];
 for (let i = 0; i < COAT_N; i++) {
   const mesh = new THREE.Mesh(new THREE.BoxGeometry(0.46 - i * 0.03, 0.34, 0.05), coatMat);
+  const lining = new THREE.Mesh(new THREE.BoxGeometry(0.5 - i * 0.03, 0.38, 0.02), coatLiningMat);
+  lining.position.z = -0.045;
+  mesh.add(lining);
   scene.add(mesh);
   coatSegs.push({ mesh, pos: new THREE.Vector3() });
 }
@@ -1132,7 +1338,7 @@ function tryAttach() {
 
 // ----------------------------------------------------------------- INPUT --
 const keys = {};
-let webHeld = false, yaw = 0, pitch = -0.15;
+let webHeld = false, prevWebHeld = false, yaw = 0, pitch = -0.15;
 addEventListener('keydown', e => {
   keys[e.code] = true;
   if (e.code === 'Space') { webHeld = true; e.preventDefault(); }
@@ -1157,6 +1363,7 @@ startEl.addEventListener('click', () => {
   try { renderer.domElement.requestPointerLock(); } catch (e) { /* fallback look */ }
   if (audioCtx.state === 'suspended') audioCtx.resume();
   startMusic();
+  startHype();
 });
 document.addEventListener('pointerlockerror', () => {
   document.getElementById('webstate').textContent = 'no pointer lock (embedded?) — mouse-look fallback on';
@@ -1186,11 +1393,36 @@ function stepPlayer(dt) {
   if (keys.KeyA) inDir.sub(r);
   if (inDir.lengthSq() > 0) inDir.normalize();
 
-  // web attach / release
-  if (webHeld && !p.anchor && !p.onGround) tryAttach();
-  if (webHeld && !p.anchor && p.onGround) { // jump-launch into a swing
-    p.vel.y = jumpBoostTimer > 0 ? JUMP_VEL_BOOSTED : JUMP_VEL_NORMAL; p.onGround = false; tryAttach();
+  // WEB ATTACH / TAP-ZIP / RELEASE (Alex: "tough to start swinging from the
+  // ground, if I hold spacebar I just keep hopping... let's basically get
+  // rid of standard jumping, all upward movement can be web-based, and a
+  // tap of the swing button should basically register like a jump."
+  //
+  // Root cause of the hopping: the old code re-applied jump velocity EVERY
+  // SINGLE FRAME Space was held AND the player was grounded -- go up an
+  // inch, gravity brings you right back down, onGround flips true again,
+  // jump re-fires immediately. A stutter-hop, not a jump.
+  //
+  // Redesign: there is no separate "jump" anymore. Pressing the web button
+  // is EDGE-TRIGGERED (webPressed = true only on the frame it goes from up
+  // to down, tracked via prevWebHeld) -- so holding does nothing extra,
+  // only a fresh press does. On press: try to find a real building
+  // (tryAttach); if one's found, you swing. If NOT (tapped from open
+  // ground, or just nothing in range), you still get a brief self-
+  // propelled pull upward -- same idea as a swing, just against nothing in
+  // particular, which is exactly "pulling myself for a moment into the
+  // air" rather than a generic jump.
+  const webPressed = webHeld && !prevWebHeld;
+  if (webPressed && !p.anchor) {
+    const found = tryAttach();
+    if (!found) {
+      p.vel.y = jumpBoostTimer > 0 ? JUMP_VEL_BOOSTED * 0.85 : JUMP_VEL_NORMAL;
+      const f2 = new THREE.Vector3(); camera.getWorldDirection(f2); f2.y = 0; f2.normalize();
+      p.vel.addScaledVector(f2, 3.5);
+      p.onGround = false;
+    }
   }
+  prevWebHeld = webHeld;
   if (!webHeld && p.anchor) {
     p.anchor = null;
     // release flick: a little up-and-forward on letting go, so releasing at
@@ -1208,7 +1440,6 @@ function stepPlayer(dt) {
     const target = inDir.multiplyScalar(keys.ShiftLeft ? RUN * 1.7 : RUN);
     p.vel.x += (target.x - p.vel.x) * Math.min(1, dt * 8);
     p.vel.z += (target.z - p.vel.z) * Math.min(1, dt * 8);
-    if (keys.Space) p.vel.y = jumpBoostTimer > 0 ? JUMP_VEL_BOOSTED : JUMP_VEL_NORMAL;
   } else {
     p.vel.addScaledVector(inDir, AIR_CTRL * dt);
   }
@@ -1256,6 +1487,17 @@ function stepPlayer(dt) {
     if (axis === 5) { p.pos.z = c.max[2] + R; if (p.vel.z < 0) p.vel.z = 0; }
   }
 
+  // CAR COLLISION (Alex: "is there any collision or physics on the cars?"
+  // -- there wasn't; you passed straight through). Cars now block you like
+  // a soft obstacle at normal speed, EXCEPT when you qualify for a knock
+  // (fast + close), in which case collision yields to the knock entirely --
+  // you smash through and send it flying instead of stopping dead against
+  // it. Sphere-based, not full oriented-box: cars are small and this reads
+  // fine at the distances involved, and it's far cheaper than rotated-AABB
+  // math against 100+ moving objects every frame.
+  const sp0 = p.vel.length();
+  resolveCarCollisions(p, sp0);
+
   // OUT OF BOUNDS: fly past the city edge (or fall through the world) and
   // it's ALWAYS game over -- explode() fires here, the overlay shows after
   // a beat so the burst is visible first. WORLD_BOUND is the exact radius
@@ -1265,8 +1507,7 @@ function stepPlayer(dt) {
     return;
   }
 
-  const sp0 = p.vel.length();
-  checkKnocks(p, sp0);
+  checkKnocks(p, p.vel.length());
 
   // visuals: lean the body into the velocity
   spidey.position.copy(p.pos);
@@ -1335,22 +1576,33 @@ function loop(now) {
   stepPlayer(playerDt);
   if (!gameOver) stepPickups(simT, player);
   stepExplosion(dt);
+  stepWeather(worldDt);
   stepRain(player.pos, simT);
+  updateBloom(player.pos.y);
+  updateFallMusic(player.pos.y, player.onGround);
   composer.render();
 }
 requestAnimationFrame(loop);
 
 // Debug hook -- lets anyone poke at live state from devtools without
 // needing a build step (e.g. `__sw.player.pos.set(x,y,z)` to teleport).
-window.__sw = { player, cars, parkedCars, pickups, colliders, EDGE, WORLD_BOUND,
+window.__sw = { THREE, player, cars, parkedCars, pickups, colliders, EDGE, WORLD_BOUND,
                 triggerGameOver, resetGame, checkKnocks, knockCar, respawn,
                 stepPickups, stepPlayer, stepTraffic, stepKnocked, stepExplosion,
                 zombies, spawnZombieWave, stepZombies, scene, spidey, coatSegs, camera,
+                resolveCarCollisions, stepWeather, triggerLightning, updateBloom, stepRain, rain, findAnchor,
+                updateFallMusic, bloom, musicBus, hypeBus,
                 get gameOver() { return gameOver; },
                 get noirTimer() { return noirTimer; },
                 get jumpBoostTimer() { return jumpBoostTimer; },
                 get slowTimeTimer() { return slowTimeTimer; },
-                get zombieContact() { return zombieContact; } };
+                get zombieContact() { return zombieContact; },
+                get rainIntensity() { return rainIntensity; },
+                get rainTarget() { return rainTarget; },
+                set rainTarget(v) { rainTarget = v; },
+                get fallMusicPhase() { return fallMusicPhase; },
+                get webHeld() { return webHeld; },
+                set webHeld(v) { webHeld = v; } };
 </script>
 </body>
 </html>
