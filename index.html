@@ -213,8 +213,12 @@ const choice = arr => arr[Math.floor(rng() * arr.length)];
 
 // ------------------------------------------------------------------ SCENE --
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x02040c);
-scene.fog = new THREE.FogExp2(0x05070f, 0.008);
+// Round 2 brightness pass (Alex: "brighten the world a little to look more
+// like our old Blender screenshot -- still night, but not 90% black") --
+// background and fog lifted a touch alongside the exposure/ambient bumps
+// below. Still a near-black night sky, just not crushed all the way to it.
+scene.background = new THREE.Color(0x060a18);
+scene.fog = new THREE.FogExp2(0x0a0f1e, 0.008);
 
 const camera = new THREE.PerspectiveCamera(70, innerWidth / innerHeight, 0.1, 900);
 // WebXR "dolly" pattern: the camera is a child of a movable rig, not moved
@@ -234,12 +238,14 @@ renderer.xr.enabled = true;
 renderer.setSize(innerWidth, innerHeight);
 renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
-// Exposure raised 0.85->1.05: Alex -- "a lot of the scene just renders as
-// black." With only emissive surfaces (windows/signs/lights) and no real
-// bounce lighting, non-emissive geometry (roads, sidewalks, car bodies, the
-// player) had almost nothing lighting it and crushed to black under ACES at
-// the old exposure. Paired with the ambient-light bump below.
-renderer.toneMappingExposure = 1.05;
+// Exposure raised 0.85->1.05->1.18: Alex -- "a lot of the scene just
+// renders as black" (round 1), then later "brighten the world a little to
+// look more like our old Blender screenshot -- still night, but not 90%
+// black" (round 2). With only emissive surfaces (windows/signs/lights) and
+// no real bounce lighting, non-emissive geometry (roads, sidewalks, car
+// bodies, the player) had almost nothing lighting it and crushed to black
+// under ACES. Paired with the ambient-light bump below.
+renderer.toneMappingExposure = 1.18;
 document.body.appendChild(renderer.domElement);
 // VRButton.createButton() self-detects support (navigator.xr /
 // isSessionSupported) and renders as a disabled "VR NOT SUPPORTED" button
@@ -284,10 +290,11 @@ addEventListener('resize', () => {
   webLineMat.resolution.set(innerWidth, innerHeight);   // Line2 needs this kept in sync
 });
 
-// Ambient bumped 0.9->1.4 -- same "renders as black" fix as the exposure
-// change above, from the other lever: this is what lights non-emissive
-// surfaces (roads, sidewalks, car bodies, the player's own suit) at all.
-const ambientLight = new THREE.AmbientLight(0x2c3c58, 1.4);
+// Ambient bumped 0.9->1.4->1.7 -- same lever as the exposure change above,
+// round 2 (Alex: "brighten the world a little... still night, but not 90%
+// black"). This is what lights non-emissive surfaces (roads, sidewalks,
+// car bodies, the player's own suit) at all.
+const ambientLight = new THREE.AmbientLight(0x2c3c58, 1.7);
 scene.add(ambientLight);
 const moon = new THREE.DirectionalLight(0x7899ff, 0.8);
 moon.position.set(30, 80, -30);
@@ -318,7 +325,14 @@ const windowMat = new THREE.ShaderMaterial({
       vec3 cell = floor(vec3(vWorld.x / Ph, vWorld.z / Ph, vWorld.y / Pz));
       float lit = step(0.38, hash(cell));            // ~62% of cells lit
       float win = row * col * lit;
-      vec3 base = vec3(0.012, 0.014, 0.022);
+      // Round 2 brightness pass (Alex: "brighten the world a little...
+      // still night, but not 90% black"). This raw shader computes its own
+      // color and ignores scene lighting entirely -- the ambient-light and
+      // exposure bumps elsewhere in this file do NOT reach it, which is
+      // why the dark facade between windows stayed pitch black even after
+      // those. This constant is the actual lever: it's the base wall tone,
+      // now a visible dim teal-navy instead of near-zero.
+      vec3 base = vec3(0.045, 0.052, 0.075);
       vec3 colr = base + vColor * win * 1.6;
       float d = length(vWorld - cameraPosition);
       float f = 1.0 - exp(-fogDensity * fogDensity * d * d);
@@ -2378,7 +2392,7 @@ window.__sw = { THREE, player, cars, parkedCars, pickups, colliders, EDGE, WORLD
                 MULTIPLAYER_URL,
                 get myColor() { return myColor; }, webLine, spidey,
                 playerKnockCooldowns, makePawnBody, makeCoat, stepCoatFor,
-                knownPlayerIds, updatePlayerCount, playerCountEl };
+                knownPlayerIds, updatePlayerCount, playerCountEl, composer };
 </script>
 </body>
 </html>
