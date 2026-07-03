@@ -176,17 +176,34 @@ import { VRButton } from 'three/addons/webxr/VRButton.js';
 // ---------------------------------------------------------------- CONFIG --
 // Mirrors city_generator.py CONFIG. Change dials here, logic stays put.
 const SEED = 7;
-const GRID_N = 8, BLOCK_SIZE = 18.0, STREET_W = 4.4, LANE_HALF = 0.95;   // 6->8: bigger city
+// 8->16 (family playtest, item 6): city FOOTPRINT scales linearly with GRID_N but AREA (and
+// roughly building count) scales as GRID_N^2, so doubling here is the "at least 4x as big"
+// Alex asked for, not a further 4x on top of the earlier 6->8 bump. ROADS.length (traffic
+// lane/light count) only scales linearly with GRID_N, so car/pole counts stay ~2x, not 4x --
+// see the vehicle-density comment near CARS_PER_LANE below for the perf reasoning.
+const GRID_N = 16, BLOCK_SIZE = 18.0, STREET_W = 4.4, LANE_HALF = 0.95;
 const SIDEWALK_W = 1.6, DASH_LEN = 1.4, DASH_STEP = 3.0;
 const LOTS_PER_SIDE = 2, EMPTY_LOT_ODDS = 0.10;
-const H_LOW = [7, 12], H_MID = [14, 34], H_HERO = [42, 58], H_WEIGHTS = [0.25, 0.62];
+// Widened alongside the 4x city (Alex: "more variety in... building size") -- taller hero
+// range gives the bigger map some real landmark-scale towers instead of just more of the same.
+const H_LOW = [6, 14], H_MID = [13, 40], H_HERO = [42, 70], H_WEIGHTS = [0.25, 0.62];
 const ANTENNA_ODDS = 0.28;
+// CARS_PER_LANE unchanged -- moving-car count scales with ROADS.length (linear in GRID_N,
+// ~1.9x at 8->16), not with GRID_N^2 like buildings, so traffic density doesn't quadruple
+// alongside the city. See the "4x scale perf check" verification pass for actual numbers.
 const CARS_PER_LANE = 4, CAR_SPEED = 8.0, PARKED_PER_ROAD = 3;
 const ACCEL = 3.5, DECEL = 6.0, MIN_GAP = 1.6, CAR_LEN = 2.2, LOOKAHEAD = 14.0;
 const TURN_ODDS = 0.25, TURN_SPEED = 5.0;
 const LIGHT_GREEN = 4.2, LIGHT_ALLRED = 0.9;
 const RAIN_COUNT = 900;
-const PALETTE = [[0.0, 0.85, 1.0], [1.0, 0.10, 0.6], [0.6, 0.20, 1.0], [0.1, 1.0, 0.7]];
+// Widened 4->10 (family playtest, item 6: "more variety in glowing colors") -- kept every
+// original hue plus fills in the rest of the neon wheel (amber, red, lime, ice-blue, deep
+// violet, hot orange) so a bigger city doesn't just repeat the same 4 signs more often.
+const PALETTE = [
+  [0.0, 0.85, 1.0], [1.0, 0.10, 0.6], [0.6, 0.20, 1.0], [0.1, 1.0, 0.7],
+  [1.0, 0.65, 0.0], [1.0, 0.15, 0.15], [0.55, 1.0, 0.15], [0.3, 0.55, 1.0],
+  [0.85, 0.85, 0.15], [0.75, 0.0, 0.55],
+];
 // gameplay
 // OUT_OF_BOUNDS_MARGIN history: was 14 with an oversized ground plane (a
 // real bug -- "I've walked very far and haven't exploded," see the ground
@@ -237,6 +254,70 @@ function mulberry32(a) {
 const rng = mulberry32(SEED);
 const uniform = (a, b) => a + (b - a) * rng();
 const choice = arr => arr[Math.floor(rng() * arr.length)];
+
+// ------------------------------------------------------------ BUILDING NAMES --
+// Family playtest, item 12 (Alex: "give random names on the buildings to help with
+// someone trying to find their friend... do some Japanese katakana as well. Definitely
+// nothing rude"). DESIGN DECISION: names are INVENTED via syllable recombination, both
+// English-style and katakana-style -- never real dictionary words in either language.
+// Real words (especially Japanese, which we can't reliably vet for unintended meaning
+// without deep language expertise) carry a rude-collision risk a nonsense generator
+// doesn't. A profanity blocklist is still checked as a second layer, since short random
+// syllable combos can occasionally spell a real (and occasionally rude) word by chance
+// -- see genBuildingName() below for how the two layers combine.
+const EN_ONSETS = ['B', 'BR', 'D', 'DR', 'F', 'FL', 'FR', 'G', 'GL', 'GR', 'H', 'J', 'K',
+  'KL', 'L', 'M', 'N', 'P', 'PL', 'PR', 'R', 'S', 'SK', 'SL', 'SM', 'SN', 'SP', 'ST', 'SW',
+  'T', 'TR', 'V', 'W', 'Z'];
+const EN_VOWELS = ['A', 'E', 'I', 'O', 'U', 'AI', 'EE', 'OO', 'OA', 'IE', 'AU'];
+const EN_CODAS = ['', '', 'B', 'D', 'F', 'G', 'K', 'L', 'M', 'N', 'P', 'R', 'S', 'T', 'X',
+  'Z', 'SH', 'TH', 'NG', 'CK'];
+function genEnglishName() {
+  const n = 2 + Math.floor(rng() * 2);   // 2-3 syllables, e.g. KINKABOBBA-style
+  let s = '';
+  for (let i = 0; i < n; i++) s += choice(EN_ONSETS) + choice(EN_VOWELS) + choice(EN_CODAS);
+  return s;
+}
+// Plain katakana mora (no small-kana digraphs -- kept simple), plus the small-tsu (ッ,
+// consonant doubling) and long-vowel mark (ー) for texture/flourish, both used sparingly.
+const KANA = ['ア', 'イ', 'ウ', 'エ', 'オ', 'カ', 'キ', 'ク', 'ケ', 'コ', 'ガ', 'ギ', 'グ', 'ゲ', 'ゴ',
+  'サ', 'シ', 'ス', 'セ', 'ソ', 'ザ', 'ジ', 'ズ', 'ゼ', 'ゾ', 'タ', 'チ', 'ツ', 'テ', 'ト', 'ダ', 'ヂ', 'ヅ', 'デ', 'ド',
+  'ナ', 'ニ', 'ヌ', 'ネ', 'ノ', 'ハ', 'ヒ', 'フ', 'ヘ', 'ホ', 'バ', 'ビ', 'ブ', 'ベ', 'ボ', 'パ', 'ピ', 'プ', 'ペ', 'ポ',
+  'マ', 'ミ', 'ム', 'メ', 'モ', 'ヤ', 'ユ', 'ヨ', 'ラ', 'リ', 'ル', 'レ', 'ロ', 'ワ', 'ン'];
+function genKatakanaName() {
+  const n = 2 + Math.floor(rng() * 3);   // 2-4 mora
+  let s = '';
+  for (let i = 0; i < n; i++) {
+    s += choice(KANA);
+    if (i < n - 1 && rng() < 0.18) s += 'ッ';
+  }
+  if (rng() < 0.3) s += 'ー';
+  return s;
+}
+// English blocklist: standard curated profanity/slur roots, substring-matched against the
+// FULL generated name (not per-syllable) since a blocked word can straddle a syllable
+// boundary -- e.g. onset F + vowel U + coda CK spells "FUCK" outright in one syllable, and
+// a syllable ending in S followed by one starting "HIT" spells "SHIT" across the boundary.
+const PROFANITY_EN = ['fuck', 'shit', 'bitch', 'cunt', 'dick', 'cock', 'pussy', 'asshole',
+  'nigg', 'fag', 'whore', 'slut', 'rape', 'nazi', 'hitler', 'kike', 'spic', 'chink',
+  'retard', 'piss', 'damn', 'hell', 'crap', 'tit', 'boob', 'cum', 'anal', 'porn', 'turd',
+  'poop', 'wank', 'twat', 'bastard', 'skank', 'dyke', 'homo', 'gook', 'jap', 'coon',
+  'wetback', 'tranny', 'molest', 'incest', 'pedo', 'sex'];
+// Katakana blocklist: best-effort only -- see the DESIGN DECISION note above, this is NOT
+// exhaustive native-speaker vetting (we don't have that), it's a conservative second layer
+// covering the vulgar/crude terms most likely to accidentally form from short mora combos.
+const PROFANITY_KATAKANA = ['クソ', 'チンコ', 'マンコ', 'ヤロウ', 'バカ', 'アホ', 'ケツ', 'シネ', 'ゴミ'];
+function isBlocked(name, list) {
+  const low = name.toLowerCase();
+  return list.some(w => low.includes(w.toLowerCase()));
+}
+function genBuildingName() {
+  const useKatakana = rng() < 0.22;   // occasional katakana signage; mostly English-style
+  for (let tries = 0; tries < 20; tries++) {
+    const name = useKatakana ? genKatakanaName() : genEnglishName();
+    if (!isBlocked(name, useKatakana ? PROFANITY_KATAKANA : PROFANITY_EN)) return name;
+  }
+  return genEnglishName();   // exceedingly unlikely fallback -- see the retry loop above
+}
 
 // ---------------------------------------------------- TIME-SYNCED RNG --
 // For anything that must render IDENTICALLY across multiplayer clients
@@ -410,6 +491,11 @@ const windowMat = new THREE.ShaderMaterial({
 // ------------------------------------------------------------- CITY BUILD --
 const colliders = [];   // AABBs the player collides with (buildings)
 const boxGeo = new THREE.BoxGeometry(1, 1, 1);
+// Round-tower geometry for the CYLINDER archetype below -- taper baked into the unit mesh
+// (top radius < bottom) so a per-instance non-uniform (sx, sy, sz) scale still reads as a
+// tapered drum, same trick TOWER gets by stacking differently-scaled box segments.
+const cylGeo = new THREE.CylinderGeometry(0.42, 0.5, 1, 12);
+const spireGeo = new THREE.ConeGeometry(0.5, 1, 8);   // pointed-roof crown variant
 
 function pickHeight() {
   const r = rng();
@@ -418,8 +504,20 @@ function pickHeight() {
   return uniform(...H_HERO);
 }
 
+// Building "type" archetypes (family playtest, item 6: "more variety in... type" -- not
+// just recolors of the same tapering-segment shape). TOWER is the original shape; SLAB and
+// CYLINDER are genuinely different footprints/silhouettes. Odds favor TOWER since it reads
+// as the city's default skyline shape, with the other two as real but less common variety.
+function pickBuildingType() {
+  const r = rng();
+  if (r < 0.55) return 'tower';
+  if (r < 0.80) return 'cylinder';
+  return 'slab';
+}
+
 // Pass 1 — generate building segment transforms (so we know instance counts).
-const segs = [], crowns = [], antennas = [];
+const segs = [], cylSegs = [], plateCrowns = [], spireCrowns = [], antennas = [];
+const buildingLabels = [];   // one per block, on that block's TALLEST building -- see item 12 below
 // Tracks the best rooftop for the leaderboard billboard while buildings
 // generate anyway (Alex: "somewhere prominent... e.g. a tall building or
 // the city center") -- prominence favors height AND proximity to the city
@@ -430,27 +528,80 @@ let billboardSpot = null, billboardProminence = -Infinity;
 for (let i = 0; i < GRID_N; i++) for (let j = 0; j < GRID_N; j++) {
   const cx = blockCenter(i), cz = blockCenter(j);
   const interior = BLOCK_SIZE - 2 * SIDEWALK_W, lot = interior / LOTS_PER_SIDE;
+  let bestLot = null;   // tallest building in this block gets the name label
   for (let li = 0; li < LOTS_PER_SIDE; li++) for (let lj = 0; lj < LOTS_PER_SIDE; lj++) {
     if (rng() < EMPTY_LOT_ODDS) continue;
     const lx = cx - interior / 2 + (li + 0.5) * lot;
     const lz = cz - interior / 2 + (lj + 0.5) * lot;
-    const color = choice(PALETTE), h = pickHeight();
-    const n = Math.max(1, Math.min(4, Math.floor(h / 9)));
-    let y = 0, wx = lot * uniform(0.78, 0.95), wz = lot * uniform(0.78, 0.95);
-    for (let s = 0; s < n; s++) {
-      const sh = (h / n) * uniform(0.85, 1.15);
-      segs.push({ x: lx, y: y + sh / 2, z: lz, sx: wx, sy: sh, sz: wz, color });
-      colliders.push({ min: [lx - wx / 2, y, lz - wz / 2], max: [lx + wx / 2, y + sh, lz + wz / 2] });
-      y += sh; wx *= uniform(0.78, 0.92); wz *= uniform(0.78, 0.92);
+    const color = choice(PALETTE), h = pickHeight(), btype = pickBuildingType();
+    let y = 0, wx, wz;
+    if (btype === 'slab') {
+      // Wide/squat, never tapers -- a totally different silhouette from the tapering
+      // tower (occasionally 2 short floors for taller rolls, otherwise a single block).
+      const n = h > 22 ? 2 : 1, capH = Math.min(h, n === 2 ? h : h * 0.6);
+      wx = lot * uniform(0.92, 1.0); wz = lot * uniform(0.92, 1.0);
+      for (let s = 0; s < n; s++) {
+        const sh = capH / n;
+        segs.push({ x: lx, y: y + sh / 2, z: lz, sx: wx, sy: sh, sz: wz, color });
+        colliders.push({ min: [lx - wx / 2, y, lz - wz / 2], max: [lx + wx / 2, y + sh, lz + wz / 2] });
+        y += sh;
+      }
+    } else if (btype === 'cylinder') {
+      // Round tapering tower, pushed into cylSegs (rendered with cylGeo instead of
+      // boxGeo). Smaller footprint ratio than TOWER since a circle visually reads
+      // "big" faster than a box of the same width.
+      const n = Math.max(1, Math.min(4, Math.floor(h / 10)));
+      wx = lot * uniform(0.62, 0.78); wz = wx;
+      for (let s = 0; s < n; s++) {
+        const sh = (h / n) * uniform(0.85, 1.15);
+        cylSegs.push({ x: lx, y: y + sh / 2, z: lz, sx: wx, sy: sh, sz: wz, color });
+        // Collider stays a box (AABB) even for a round building -- a slightly generous
+        // square hitbox is the same approximation every other collider in this file uses.
+        colliders.push({ min: [lx - wx / 2, y, lz - wz / 2], max: [lx + wx / 2, y + sh, lz + wz / 2] });
+        y += sh; wx *= uniform(0.82, 0.94); wz = wx;
+      }
+    } else {
+      // TOWER -- original shape, unchanged: stacked tapering box segments.
+      const n = Math.max(1, Math.min(4, Math.floor(h / 9)));
+      wx = lot * uniform(0.78, 0.95); wz = lot * uniform(0.78, 0.95);
+      for (let s = 0; s < n; s++) {
+        const sh = (h / n) * uniform(0.85, 1.15);
+        segs.push({ x: lx, y: y + sh / 2, z: lz, sx: wx, sy: sh, sz: wz, color });
+        colliders.push({ min: [lx - wx / 2, y, lz - wz / 2], max: [lx + wx / 2, y + sh, lz + wz / 2] });
+        y += sh; wx *= uniform(0.78, 0.92); wz *= uniform(0.78, 0.92);
+      }
     }
-    crowns.push({ x: lx, y: y + 0.12, z: lz, sx: wx * 1.06, sy: 0.24, sz: wz * 1.06, color });
+    // Crown style: flat plate (original) or a pointed spire -- purely cosmetic roof
+    // variety (Alex: "buildings with different crown/antenna styles").
+    if (rng() < 0.32) {
+      spireCrowns.push({ x: lx, y: y + h * 0.09, z: lz, sx: wx * 1.3, sy: h * 0.18, sz: wz * 1.3, color });
+    } else {
+      plateCrowns.push({ x: lx, y: y + 0.12, z: lz, sx: wx * 1.06, sy: 0.24, sz: wz * 1.06, color });
+    }
     if (rng() < ANTENNA_ODDS) {
-      const ah = h * uniform(0.18, 0.35);
-      antennas.push({ x: lx, y: y + ah / 2, z: lz, sy: ah, color });
+      if (rng() < 0.35) {
+        // Beacon cluster -- 3 short rods at staggered heights/offsets instead of one
+        // tall rod, mostly for a taller/hero-building feel.
+        for (let a = 0; a < 3; a++) {
+          const ah = h * uniform(0.08, 0.2);
+          antennas.push({ x: lx + uniform(-wx * 0.3, wx * 0.3), y: y + ah / 2, z: lz + uniform(-wz * 0.3, wz * 0.3), sy: ah, color });
+        }
+      } else {
+        const ah = h * uniform(0.18, 0.35);
+        antennas.push({ x: lx, y: y + ah / 2, z: lz, sy: ah, color });
+      }
     }
+    if (!bestLot || y > bestLot.topY) bestLot = { x: lx, z: lz, topY: y, color };
     const distFromCenter = Math.hypot(lx, lz);
     const prominence = h - distFromCenter * 0.5;
     if (prominence > billboardProminence) { billboardProminence = prominence; billboardSpot = { x: lx, z: lz, topY: y, wx, wz }; }
+  }
+  // Item 12 (Alex: "give random names on the buildings to help with someone trying to
+  // find their friend"): one named landmark per block, on its tallest building -- enough
+  // density to be useful for wayfinding without labeling every single building (visual
+  // clutter) or adding an unbounded number of label sprites at the 4x city scale.
+  if (bestLot) {
+    buildingLabels.push({ x: bestLot.x, z: bestLot.z, y: bestLot.topY + 2.6, color: bestLot.color, text: genBuildingName() });
   }
 }
 
@@ -461,7 +612,9 @@ const rooftopCoins = [];
 const coinMat = new THREE.MeshStandardMaterial({
   color: 0xffd54a, emissive: 0xffaa00, emissiveIntensity: 0.6, metalness: 0.6, roughness: 0.3,
 });
-for (const crown of crowns) {
+// crowns split into plateCrowns/spireCrowns (crown-style variety, see above) -- rooftop
+// coins go on every roof regardless of which crown style it got.
+for (const crown of [...plateCrowns, ...spireCrowns]) {
   const coin = new THREE.Mesh(new THREE.CylinderGeometry(0.5, 0.5, 0.12, 16), coinMat);
   coin.position.set(crown.x, crown.y + 1.2, crown.z);
   scene.add(coin);
@@ -475,8 +628,8 @@ function stepRooftopCoins(t) {
 }
 
 // Pass 2 — instanced meshes.
-function instancedBoxes(list, material, glow = 0) {
-  const m = new THREE.InstancedMesh(boxGeo, material, list.length);
+function instancedMeshes(list, geometry, material, glow = 0) {
+  const m = new THREE.InstancedMesh(geometry, material, list.length);
   const M = new THREE.Matrix4(), colors = new Float32Array(list.length * 3);
   list.forEach((b, idx) => {
     M.makeScale(b.sx, b.sy, b.sz).setPosition(b.x, b.y, b.z);
@@ -484,12 +637,14 @@ function instancedBoxes(list, material, glow = 0) {
     const g = glow || 1;
     colors.set([b.color[0] * g, b.color[1] * g, b.color[2] * g], idx * 3);
   });
-  m.geometry = boxGeo.clone();
+  m.geometry = geometry.clone();
   m.geometry.setAttribute('instColor', new THREE.InstancedBufferAttribute(colors, 3));
   scene.add(m);
   return m;
 }
+const instancedBoxes = (list, material, glow = 0) => instancedMeshes(list, boxGeo, material, glow);
 const buildingMesh = instancedBoxes(segs, windowMat);
+const cylBuildingMesh = cylSegs.length ? instancedMeshes(cylSegs, cylGeo, windowMat) : null;
 
 // crowns + antennas: raw emissive (unlit basic material, vertex-colored)
 const crownMat = new THREE.ShaderMaterial({
@@ -498,8 +653,55 @@ const crownMat = new THREE.ShaderMaterial({
       gl_Position = projectionMatrix * viewMatrix * modelMatrix * instanceMatrix * vec4(position,1.0); }`,
   fragmentShader: `varying vec3 vC; void main(){ gl_FragColor = vec4(vC, 1.0); }`
 });
-instancedBoxes(crowns, crownMat, 2.2);
+instancedBoxes(plateCrowns, crownMat, 2.2);
+if (spireCrowns.length) instancedMeshes(spireCrowns, spireGeo, crownMat, 2.2);
 instancedBoxes(antennas.map(a => ({ ...a, sx: 0.12, sz: 0.12 })), crownMat, 3.0);
+
+// Building name-label sprites -- canvas-texture billboards floating above each block's
+// tallest building (see buildingLabels above). NOTE: this predates and is superseded-in-
+// spirit by the shared CANVAS TEXT PANELS primitive (makeCanvasTexture/makeTextSprite/
+// makeCanvasPanel) added further down this file for player name tags + the leaderboard
+// billboard -- reusing makeCanvasTexture here instead of allocating a second parallel
+// canvas/texture path, per "check if that helper already exists before building a new
+// one." Kept as its own function (not calling the shared makeTextSprite) because building
+// labels need two things that helper doesn't do: auto-sizing the canvas to the text's
+// actual measured width (names vary 4-12+ chars) and `fog: true` on the sprite material so
+// labels naturally fall off at distance instead of being visible across the whole 4x-bigger
+// map -- name tags/leaderboard are meant to always be legible up close, buildings aren't.
+function paletteToCss(c) {
+  return `rgb(${Math.round(Math.min(1, c[0]) * 255)},${Math.round(Math.min(1, c[1]) * 255)},${Math.round(Math.min(1, c[2]) * 255)})`;
+}
+function makeBuildingLabelSprite(text, cssColor, worldHeight = 3.0) {
+  const fontSize = 64;
+  const measureCtx = document.createElement('canvas').getContext('2d');
+  measureCtx.font = `bold ${fontSize}px ui-monospace, Menlo, monospace`;
+  const textW = measureCtx.measureText(text).width;
+  const padX = fontSize * 0.55, padY = fontSize * 0.45;
+  const canvasW = Math.ceil(textW + padX * 2), canvasH = Math.ceil(fontSize + padY * 2);
+  const { texture, redraw } = makeCanvasTexture(canvasW, canvasH);
+  redraw((ctx, w, h) => {
+    ctx.font = `bold ${fontSize}px ui-monospace, Menlo, monospace`;
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    const cx = w / 2, cy = h / 2;
+    ctx.shadowColor = cssColor; ctx.shadowBlur = fontSize * 0.5;
+    ctx.fillStyle = cssColor;
+    ctx.fillText(text, cx, cy);
+    ctx.shadowBlur = 0;
+    ctx.globalAlpha = 0.92; ctx.fillStyle = '#ffffff';
+    ctx.fillText(text, cx, cy);
+    ctx.globalAlpha = 1;
+  });
+  texture.colorSpace = THREE.SRGBColorSpace;
+  const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: texture, transparent: true, depthWrite: false, fog: true }));
+  sprite.scale.set(worldHeight * (canvasW / canvasH), worldHeight, 1);
+  return sprite;
+}
+const buildingLabelSprites = buildingLabels.map(lbl => {
+  const sprite = makeBuildingLabelSprite(lbl.text, paletteToCss(lbl.color));
+  sprite.position.set(lbl.x, lbl.y, lbl.z);
+  scene.add(sprite);
+  return sprite;
+});
 
 // SESSION LEADERBOARD BILLBOARD (Alex: "represented in 3D space in the
 // city on a billboard") -- mounted on whichever rooftop scored highest on
@@ -639,19 +841,66 @@ const poleMat = new THREE.MeshStandardMaterial({ color: 0x15151a, roughness: 0.5
 // ------------------------------------------------------------ TRAFFIC SIM --
 // Same model as simulate_traffic() in the Blender file, run LIVE each frame.
 const CAR_COLORS = [0xcc3333, 0x3366e0, 0xd9b32e, 0x33b366, 0xb3b3bf, 0xe07326];
-function makeCarMesh(color) {
+// Vehicle "type" archetypes (family playtest, item 12 [sic -- see delegation manifest item
+// 6/12 note]: "let's have some trucks and jeeps in the road as well"). Each type keeps the
+// SAME 4-mesh procedural-box structure makeCarMesh already used for the sedan (body, cab,
+// headlight, taillight) -- only the proportions/offsets change -- so adding types doesn't
+// add draw calls per vehicle, only the (much smaller, linear-not-quadratic) increase from
+// more ROADS at the 4x city scale. `car`'s numbers below are byte-for-byte the original
+// sedan proportions, so the default vehicle is visually unchanged.
+// solidR/knockR/knockSpeedMult/mass answer Alex's own follow-up ("a truck probably
+// shouldn't be knocked around by a light tap the same way a sedan is"): bigger vehicles
+// get a bigger collision radius, need more speed to budge, and tumble less dramatically
+// per hit (knockCar divides launch velocity/spin by mass) -- see knockCar/
+// resolveCarCollisions/checkKnocks below for where these actually get used.
+const VEHICLE_TYPES = {
+  car: {
+    key: 'car', odds: 0.72,
+    bodyLen: 2.2, bodyW: 0.95, bodyH: 0.45, bodyY: 0.30,
+    cabLen: 1.1, cabW: 0.85, cabH: 0.5, cabY: 0.68, cabX: -0.1,
+    lightW: 0.7, lightX: 1.06, tailX: -1.09,
+    len: 2.2, solidR: 1.35, knockR: 1.5, knockSpeedMult: 1.0, mass: 1.0,
+  },
+  truck: {
+    // Cab-forward flatbed -- chassis is the long low "body", raised cab up front.
+    key: 'truck', odds: 0.16,
+    bodyLen: 3.4, bodyW: 1.2, bodyH: 0.5, bodyY: 0.32,
+    cabLen: 1.05, cabW: 1.05, cabH: 0.62, cabY: 0.86, cabX: 1.15,
+    lightW: 0.9, lightX: 1.72, tailX: -1.72,
+    len: 3.6, solidR: 1.9, knockR: 2.0, knockSpeedMult: 1.6, mass: 2.0,
+  },
+  jeep: {
+    // Short wheelbase, boxy, wider stance, low flat roof instead of a tapered cabin.
+    key: 'jeep', odds: 0.12,
+    bodyLen: 2.0, bodyW: 1.05, bodyH: 0.5, bodyY: 0.33,
+    cabLen: 1.0, cabW: 0.95, cabH: 0.4, cabY: 0.66, cabX: 0.0,
+    lightW: 0.85, lightX: 1.02, tailX: -1.02,
+    len: 2.1, solidR: 1.55, knockR: 1.7, knockSpeedMult: 1.25, mass: 1.4,
+  },
+};
+const MAX_VEHICLE_LEN = Math.max(...Object.values(VEHICLE_TYPES).map(v => v.len));
+function rollVehicleType() {
+  let r = rng(), acc = 0;
+  for (const key in VEHICLE_TYPES) {
+    acc += VEHICLE_TYPES[key].odds;
+    if (r < acc) return VEHICLE_TYPES[key];
+  }
+  return VEHICLE_TYPES.car;
+}
+function makeCarMesh(color, vt = VEHICLE_TYPES.car) {
   const g = new THREE.Group();
   const body = new THREE.MeshStandardMaterial({ color, roughness: 0.4, metalness: 0.4 });
   const add = (geo, x, y, z, mat) => { const m = new THREE.Mesh(geo, mat); m.position.set(x, y, z); g.add(m); };
-  add(new THREE.BoxGeometry(2.2, 0.45, 0.95), 0, 0.30, 0, body);
-  add(new THREE.BoxGeometry(1.1, 0.5, 0.85), -0.1, 0.68, 0, body);
+  add(new THREE.BoxGeometry(vt.bodyLen, vt.bodyH, vt.bodyW), 0, vt.bodyY, 0, body);
+  add(new THREE.BoxGeometry(vt.cabLen, vt.cabH, vt.cabW), vt.cabX, vt.cabY, 0, body);
   const head = new THREE.MeshBasicMaterial({ color: new THREE.Color(2.2, 2.2, 1.9) });
   const tail = new THREE.MeshBasicMaterial({ color: new THREE.Color(2.2, 0.15, 0.1) });
-  add(new THREE.BoxGeometry(0.12, 0.18, 0.7), 1.06, 0.30, 0, head);
+  add(new THREE.BoxGeometry(0.12, 0.18, vt.lightW), vt.lightX, vt.bodyY, 0, head);
   // tail light pulled out from -1.05 -- its outer face sat exactly coplanar
   // with the body box's back face at x=-1.1, z-fighting under most view
   // angles (Alex: "the red on the back of the cars has z-fighting").
-  add(new THREE.BoxGeometry(0.10, 0.16, 0.7), -1.09, 0.34, 0, tail);
+  add(new THREE.BoxGeometry(0.10, 0.16, vt.lightW), vt.tailX, vt.bodyY + 0.04, 0, tail);
+  g.userData.vehicleType = vt.key;
   scene.add(g);
   return g;
 }
@@ -662,9 +911,13 @@ for (const p of ROADS) for (const axis of ['NS', 'EW']) for (const dirn of [1, -
   for (let n = 0; n < CARS_PER_LANE; n++) {
     let s = -EDGE + (2 * EDGE / CARS_PER_LANE) * n + uniform(0, 2 * EDGE / CARS_PER_LANE * 0.4);
     if (dirn < 0) s = -s;
+    const vt = rollVehicleType();
     for (let tries = 0; tries < 80; tries++) {   // spawn sanitation (see .py)
       const inBox = ROADS.some(q => Math.abs(s - q) < STREET_W / 2 + 1.4);
-      const clash = spawns.some(o => Math.abs(s - o) < CAR_LEN + MIN_GAP + 1.2);
+      // MAX_VEHICLE_LEN buffer (not per-pair length) since spawns[] doesn't track
+      // neighboring lengths yet at this point -- a flat truck-sized buffer keeps every
+      // spawn correctly spaced regardless of what type ends up next to it.
+      const clash = spawns.some(o => Math.abs(s - o) < MAX_VEHICLE_LEN + MIN_GAP + 1.2);
       let tooClose = false;
       if (axis === 'EW') for (const q of ROADS) {
         const dl = dirn * ((q - dirn * (STREET_W / 2 + 0.8)) - s);
@@ -675,10 +928,12 @@ for (const p of ROADS) for (const axis of ['NS', 'EW']) for (const dirn of [1, -
     }
     spawns.push(s);
     cars.push({
-      obj: makeCarMesh(choice(CAR_COLORS)), axis, dirn, lane, s,
+      obj: makeCarMesh(choice(CAR_COLORS), vt), axis, dirn, lane, s,
       v: CAR_SPEED * uniform(0.6, 1.0),
       turnQ: rng() < TURN_ODDS ? choice(ROADS.slice(1, -1)) : null, arc: null,
       knocked: null,
+      type: vt.key, len: vt.len, solidR: vt.solidR, knockR: vt.knockR,
+      knockSpeedMult: vt.knockSpeedMult, mass: vt.mass,
     });
   }
 }
@@ -694,10 +949,14 @@ const parkedCars = [];
       const a = uniform(-EDGE + 2, EDGE - 2);
       if (nearIntersection(a) || used.some(u => Math.abs(a - u) < 3.4)) continue;
       const side = choice([1, -1]);
-      const obj = makeCarMesh(choice(CAR_COLORS));
+      const vt = rollVehicleType();
+      const obj = makeCarMesh(choice(CAR_COLORS), vt);
       if (axis === 'EW') { obj.rotation.y = rng() < 0.5 ? 0 : Math.PI; obj.position.set(a, 0, p + side * off); }
       else { obj.rotation.y = rng() < 0.5 ? Math.PI / 2 : -Math.PI / 2; obj.position.set(p + side * off, 0, a); }
-      parkedCars.push({ obj, knocked: null });
+      parkedCars.push({
+        obj, knocked: null, type: vt.key, len: vt.len, solidR: vt.solidR, knockR: vt.knockR,
+        knockSpeedMult: vt.knockSpeedMult, mass: vt.mass,
+      });
       used.push(a); placed++;
     }
   }
@@ -756,7 +1015,10 @@ function stepTraffic(t, dt) {
   for (const c of cars) if (!c.arc) {
     const k = c.axis + ',' + c.lane.toFixed(2);
     if (!lanes.has(k)) lanes.set(k, []);
-    lanes.get(k).push(c.s);
+    // Store length alongside position -- trucks are longer than sedans, so the
+    // gap-keeping math below needs each pair's actual combined length, not the old
+    // flat CAR_LEN constant (which would let a car tailgate a truck's overhang).
+    lanes.get(k).push({ s: c.s, len: c.len });
   }
   for (const c of cars) {
     if (c.knocked) continue;   // tumble physics owns this car right now (see stepKnocked)
@@ -779,13 +1041,13 @@ function stepTraffic(t, dt) {
       const d = c.dirn * ((q - c.dirn * stopOff) - c.s);
       if (d > -0.5 && d < LOOKAHEAD) dStop = dStop === null ? d : Math.min(dStop, d);
     }
-    let ahead = null;
-    for (const os of lanes.get(c.axis + ',' + c.lane.toFixed(2)) || []) {
-      const d = c.dirn * (os - c.s);
-      if (d > 0.1 && (ahead === null || d < ahead)) ahead = d;
+    let ahead = null, aheadLen = CAR_LEN;
+    for (const o of lanes.get(c.axis + ',' + c.lane.toFixed(2)) || []) {
+      const d = c.dirn * (o.s - c.s);
+      if (d > 0.1 && (ahead === null || d < ahead)) { ahead = d; aheadLen = o.len; }
     }
     if (ahead !== null) {
-      const dg = ahead - CAR_LEN - MIN_GAP;
+      const dg = ahead - (c.len + aheadLen) / 2 - MIN_GAP;
       if (dg < LOOKAHEAD) dStop = dStop === null ? dg : Math.min(dStop, dg);
     }
     const vAllow = dStop !== null ? Math.sqrt(Math.max(0, 2 * DECEL * Math.max(dStop - 0.3, 0))) : CAR_SPEED;
@@ -1283,7 +1545,10 @@ function updatePowerupHud() {
 // score multiplier (Alex: "bonus points for hitting more cars").
 function knockCar(entry, hitDir, isParked, speed) {
   if (entry.knocked) return;
-  const momentum = Math.min(2.2, Math.max(1, (speed || KNOCK_SPEED) / KNOCK_SPEED));
+  // Divided by mass (Alex: "a truck probably shouldn't be knocked around by a light tap
+  // the same way a sedan is") -- a truck (mass 2.0) launches/spins at half a sedan's
+  // momentum for the same hit speed, so it tumbles less dramatically per knock.
+  const momentum = Math.min(2.2, Math.max(1, (speed || KNOCK_SPEED) / KNOCK_SPEED)) / (entry.mass || 1);
   entry.knocked = {
     vel: hitDir.clone().multiplyScalar(uniform(5, 8) * momentum).add(new THREE.Vector3(0, uniform(4, 7) * momentum, 0)),
     ang: new THREE.Vector3(uniform(-6, 6), uniform(-4, 4), uniform(-6, 6)).multiplyScalar(momentum),
@@ -1379,7 +1644,7 @@ function stepKnocked(list, dt, isParked) {
 // like nothing happened, which reads as "sometimes it doesn't work" even
 // when it did. Added a bump thud + brief flash, edge-triggered off a
 // cooldown so it doesn't spam while pressed against a car.
-const CAR_SOLID_RADIUS = 1.35;   // rough car half-length + a little player radius
+const CAR_SOLID_RADIUS = 1.35;   // rough car half-length + a little player radius -- default (sedan) fallback
 let carBumpCooldown = 0;
 let buildingBumpCooldown = 0, playerPushCooldown = 0;
 function resolveCarCollisions(p, speed) {
@@ -1387,14 +1652,18 @@ function resolveCarCollisions(p, speed) {
   for (const list of [cars, parkedCars]) {
     for (const entry of list) {
       if (entry.knocked) continue;
+      // Per-vehicle radius/knock threshold (trucks/jeeps): see VEHICLE_TYPES above.
+      const solidR = entry.solidR || CAR_SOLID_RADIUS;
+      const knockR = entry.knockR || KNOCK_RADIUS;
+      const knockThresh = KNOCK_SPEED * (entry.knockSpeedMult || 1);
       const dx = p.pos.x - entry.obj.position.x, dz = p.pos.z - entry.obj.position.z;
       const dist = Math.hypot(dx, dz);
-      if (dist >= CAR_SOLID_RADIUS || dist < 1e-4) continue;
+      if (dist >= solidR || dist < 1e-4) continue;
       if (Math.abs(p.pos.y - (entry.obj.position.y + 0.4)) > 1.7) continue;   // rough car height gate
-      if (speed >= KNOCK_SPEED && dist < KNOCK_RADIUS) continue;   // let checkKnocks smash through instead of blocking
+      if (speed >= knockThresh && dist < knockR) continue;   // let checkKnocks smash through instead of blocking
       const nx = dx / dist, nz = dz / dist;
-      p.pos.x += nx * (CAR_SOLID_RADIUS - dist);
-      p.pos.z += nz * (CAR_SOLID_RADIUS - dist);
+      p.pos.x += nx * (solidR - dist);
+      p.pos.z += nz * (solidR - dist);
       const vIn = p.vel.x * nx + p.vel.z * nz;
       if (vIn < 0) { p.vel.x -= vIn * nx; p.vel.z -= vIn * nz; }
       hit = true;
@@ -1407,12 +1676,16 @@ function resolveCarCollisions(p, speed) {
   return hit;
 }
 function checkKnocks(p, speed) {
-  if (speed < KNOCK_SPEED) return;
   const dir = p.vel.clone().normalize();
   for (const list of [cars, parkedCars]) {
     for (const entry of list) {
       if (entry.knocked) continue;
-      if (p.pos.distanceTo(entry.obj.position) < KNOCK_RADIUS) knockCar(entry, dir, list === parkedCars, speed);
+      // Per-vehicle knock resistance: a truck (knockSpeedMult 1.6) needs a much faster
+      // hit than a sedan before it'll budge at all; a jeep sits in between.
+      const knockThresh = KNOCK_SPEED * (entry.knockSpeedMult || 1);
+      if (speed < knockThresh) continue;
+      const knockR = entry.knockR || KNOCK_RADIUS;
+      if (p.pos.distanceTo(entry.obj.position) < knockR) knockCar(entry, dir, list === parkedCars, speed);
     }
   }
 }
@@ -2908,6 +3181,8 @@ renderer.setAnimationLoop(loop);
 // Debug hook -- lets anyone poke at live state from devtools without
 // needing a build step (e.g. `__sw.player.pos.set(x,y,z)` to teleport).
 window.__sw = { THREE, player, cars, parkedCars, pickups, colliders, EDGE, WORLD_BOUND,
+                GRID_N, VEHICLE_TYPES, buildingLabels, buildingLabelSprites, segs, cylSegs,
+                genBuildingName, isBlocked, PROFANITY_EN, PROFANITY_KATAKANA,
                 rooftopCoins, stepRooftopCoins,
                 triggerGameOver, resetGame, checkKnocks, knockCar, respawn,
                 stepPickups, stepPlayer, stepTraffic, stepKnocked, stepExplosion,
