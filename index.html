@@ -34,6 +34,11 @@
   }
   #flash { position: fixed; inset: 0; background: #fff; opacity: 0; pointer-events: none;
     z-index: 15; transition: opacity 0.05s linear; }
+  #warnvignette { position: fixed; inset: 0; opacity: 0; pointer-events: none; z-index: 14;
+    box-shadow: inset 0 0 22vw 6vw #ff1a2e; transition: opacity 0.15s linear; }
+  #warntext { position: fixed; left: 50%; bottom: 18%; transform: translateX(-50%);
+    color: #ff3b4d; font: 16px/1.4 ui-monospace, Menlo, monospace; text-shadow: 0 0 10px #ff1a2e;
+    z-index: 14; opacity: 0; pointer-events: none; letter-spacing: 2px; text-align: center; }
   #score { position: fixed; right: 14px; top: 12px; color: #ffe27a; z-index: 10;
     font: 13px/1.5 ui-monospace, Menlo, monospace; text-shadow: 0 0 6px #a80;
     user-select: none; pointer-events: none; text-align: right; }
@@ -57,7 +62,8 @@
   WASD — run / steer in the air &nbsp;·&nbsp; shift — sprint &nbsp;·&nbsp; R — respawn<br><br>
   <b>HOW TO WIN:</b> there's no ending — just a high score. Smash into cars while swinging to send
   them flying (+25), grab the glowing orbs for points (+10) — a few unusual-looking ones do
-  something other than add points. Stay over the city. The streets below do not forgive.
+  something other than add points. Cross the glowing boundary wall and the screen turns red --
+  you've got about 2 seconds to get back inside before it's over.
 </div></div>
 <div id="gameover"><div>
   <h1>SWING&hellip; SWANG&hellip; SWUNG</h1>
@@ -65,6 +71,8 @@
   <button id="restart">Try Again?</button>
 </div></div>
 <div id="flash"></div>
+<div id="warnvignette"></div>
+<div id="warntext">LEAVING THE CITY &mdash; GET BACK</div>
 <div id="hud">web: <b id="webstate">ready</b> · speed: <b id="speed">0</b></div>
 <div id="score">score: <b id="scoretotal">0</b><br>cars knocked: <b id="knocked">0</b><br>orbs: <b id="orbs">0</b>/<b id="orbstotal">0</b></div>
 <div id="powerups"></div>
@@ -106,6 +114,9 @@ import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
+import { Line2 } from 'three/addons/lines/Line2.js';
+import { LineGeometry } from 'three/addons/lines/LineGeometry.js';
+import { LineMaterial } from 'three/addons/lines/LineMaterial.js';
 
 // ---------------------------------------------------------------- CONFIG --
 // Mirrors city_generator.py CONFIG. Change dials here, logic stays put.
@@ -122,15 +133,17 @@ const LIGHT_GREEN = 4.2, LIGHT_ALLRED = 0.9;
 const RAIN_COUNT = 900;
 const PALETTE = [[0.0, 0.85, 1.0], [1.0, 0.10, 0.6], [0.6, 0.20, 1.0], [0.1, 1.0, 0.7]];
 // gameplay
-// OUT_OF_BOUNDS_MARGIN (real bug fix): this used to be 14, and the ground
-// plane extended CITY_EXTENT*2 beyond that -- so you could walk ~90 EXTRA
-// units past the visible last building, still standing on lit "city ground"
-// the whole way, before the invisible wall ever caught you. Alex: "I've
-// walked very far... and I haven't exploded" -- correct, the ground was
-// lying to him about where the world actually ended. Tightened margin +
-// ground plane now sized to just past it (see ground mesh below) + an
-// actual visible boundary wall, so the edge is something you SEE coming.
-const OUT_OF_BOUNDS_MARGIN = 5;
+// OUT_OF_BOUNDS_MARGIN history: was 14 with an oversized ground plane (a
+// real bug -- "I've walked very far and haven't exploded," see the ground
+// mesh comment below), tightened to 5 to fix that. Alex's follow-up:
+// "a little more margin area... maybe glow red when you're about to
+// explode so you have 2 seconds to get to a safe area." So: margin opened
+// back up (5->16, more open space before ANY danger), AND death is no
+// longer instant on crossing it -- OUT_OF_BOUNDS_GRACE gives a countdown
+// (with a growing red vignette) to get back before it's fatal. See the OOB
+// handling in stepPlayer for the grace-period logic.
+const OUT_OF_BOUNDS_MARGIN = 16;
+const OUT_OF_BOUNDS_GRACE = 2.0;   // seconds you can survive past the wall before exploding
 const KNOCK_SPEED = 6.0, KNOCK_RADIUS = 1.5;   // min player speed / range to knock a car over
 const PICKUP_PER_BLOCK = 1, PICKUP_SCORE = 10, KNOCK_SCORE = 25;
 const JUMP_VEL_NORMAL = 12, JUMP_VEL_BOOSTED = 20, JUMP_BOOST_DURATION = 9;
@@ -213,6 +226,7 @@ addEventListener('resize', () => {
   camera.updateProjectionMatrix();
   renderer.setSize(innerWidth, innerHeight);
   composer.setSize(innerWidth, innerHeight);
+  webLineMat.resolution.set(innerWidth, innerHeight);   // Line2 needs this kept in sync
 });
 
 // Ambient bumped 0.9->1.4 -- same "renders as black" fix as the exposure
@@ -500,7 +514,7 @@ for (let i = 0; i < GRID_N; i++) for (let j = 0; j < GRID_N; j++) {
     const baseY = uniform(6, 15);
     mesh.position.set(blockCenter(i) + uniform(-4, 4), baseY, blockCenter(j) + uniform(-4, 4));
     scene.add(mesh);
-    pickups.push({ mesh, baseY, phase: uniform(0, 6.28), got: false, type: type.key });
+    pickups.push({ mesh, baseY, phase: uniform(0, 6.28), got: false, type: type.key, color: type.color });
   }
 }
 document.getElementById('orbstotal').textContent = pickups.length;
@@ -733,6 +747,20 @@ function sfxPing(pos) {
     osc.connect(g);
     osc.start(now); osc.stop(now + 0.2);
     return { node: g, stopAt: now + 0.2 };
+  });
+}
+// Soft bump thud for a blocked (non-knock) car collision -- much gentler
+// than sfxKnock, just enough to confirm "yes, you hit something."
+function sfxBump(pos) {
+  playSpatialAt(pos, (ctx, now) => {
+    const src = ctx.createBufferSource(); src.buffer = noiseBuffer;
+    const filt = ctx.createBiquadFilter(); filt.type = 'lowpass'; filt.frequency.value = 500;
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0.22, now);
+    g.gain.exponentialRampToValueAtTime(0.001, now + 0.1);
+    src.connect(filt); filt.connect(g);
+    src.start(now); src.stop(now + 0.12);
+    return { node: g, stopAt: now + 0.12 };
   });
 }
 function sfxExplode(pos) {
@@ -995,23 +1023,40 @@ function stepKnocked(list, dt, isParked) {
     }
   }
 }
+// CONSISTENCY FIX (Alex: "cars collisions are inconsistent"). Two real
+// causes, not guessed: (1) the height gate was +/-1.1 units around a fixed
+// car-body height, which misses plenty of ordinary swing/jump-arc heights
+// that clearly LOOK like they should collide -- widened to 1.7. (2) a
+// "block" had ZERO feedback (no sound, no visual) -- so even where the
+// physics WAS working, walking into a car and just silently stopping felt
+// like nothing happened, which reads as "sometimes it doesn't work" even
+// when it did. Added a bump thud + brief flash, edge-triggered off a
+// cooldown so it doesn't spam while pressed against a car.
 const CAR_SOLID_RADIUS = 1.35;   // rough car half-length + a little player radius
+let carBumpCooldown = 0;
 function resolveCarCollisions(p, speed) {
+  let hit = false;
   for (const list of [cars, parkedCars]) {
     for (const entry of list) {
       if (entry.knocked) continue;
       const dx = p.pos.x - entry.obj.position.x, dz = p.pos.z - entry.obj.position.z;
       const dist = Math.hypot(dx, dz);
       if (dist >= CAR_SOLID_RADIUS || dist < 1e-4) continue;
-      if (Math.abs(p.pos.y - (entry.obj.position.y + 0.4)) > 1.1) continue;   // rough car height gate
+      if (Math.abs(p.pos.y - (entry.obj.position.y + 0.4)) > 1.7) continue;   // rough car height gate
       if (speed >= KNOCK_SPEED && dist < KNOCK_RADIUS) continue;   // let checkKnocks smash through instead of blocking
       const nx = dx / dist, nz = dz / dist;
       p.pos.x += nx * (CAR_SOLID_RADIUS - dist);
       p.pos.z += nz * (CAR_SOLID_RADIUS - dist);
       const vIn = p.vel.x * nx + p.vel.z * nz;
       if (vIn < 0) { p.vel.x -= vIn * nx; p.vel.z -= vIn * nz; }
+      hit = true;
     }
   }
+  if (hit && carBumpCooldown <= 0) {
+    sfxBump(p.pos);
+    carBumpCooldown = 0.35;
+  }
+  return hit;
 }
 function checkKnocks(p, speed) {
   if (speed < KNOCK_SPEED) return;
@@ -1021,6 +1066,39 @@ function checkKnocks(p, speed) {
       if (entry.knocked) continue;
       if (p.pos.distanceTo(entry.obj.position) < KNOCK_RADIUS) knockCar(entry, dir, list === parkedCars);
     }
+  }
+}
+
+// PICKUP SPARKLE BURST (Alex: "let's have nice explosions when we get the
+// orb pickups") -- a small, snappy particle pop in the pickup's OWN color,
+// on a dedicated pool separate from the (much bigger, orange, death-
+// flavored) game-over explosion pool. Reusing that pool would mean a
+// pickup collected right after a death visually stomps on the explosion,
+// and death's particles are the wrong color/vibe for "yay, an orb."
+const sparkleParts = [];
+for (let i = 0; i < 10; i++) {
+  const m = new THREE.Mesh(new THREE.OctahedronGeometry(0.13), new THREE.MeshBasicMaterial({ color: 0xffffff }));
+  m.visible = false; scene.add(m);
+  sparkleParts.push({ mesh: m, vel: new THREE.Vector3(), life: 0 });
+}
+function pickupBurst(pos, colorHex) {
+  for (const part of sparkleParts) {
+    part.mesh.visible = true;
+    part.mesh.material.color.setHex(colorHex);
+    part.mesh.position.copy(pos);
+    part.vel.set(uniform(-1, 1), uniform(0.3, 1), uniform(-1, 1)).normalize().multiplyScalar(uniform(3, 7));
+    part.life = uniform(0.35, 0.6);
+  }
+}
+function stepSparkles(dt) {
+  for (const part of sparkleParts) {
+    if (part.life <= 0) { part.mesh.visible = false; continue; }
+    part.vel.y -= 9 * dt;
+    part.mesh.position.addScaledVector(part.vel, dt);
+    part.mesh.rotation.x += 8 * dt; part.mesh.rotation.y += 7 * dt;
+    const s = Math.max(0.05, part.life / 0.5);
+    part.mesh.scale.setScalar(s);
+    part.life -= dt;
   }
 }
 
@@ -1034,6 +1112,7 @@ function stepPickups(t, p) {
     if (p.pos.distanceTo(pk.mesh.position) < 1.6) {
       pk.got = true; pk.mesh.visible = false; collectedNow++;
       sfxPing(pk.mesh.position);
+      pickupBurst(pk.mesh.position, pk.color);
       switch (pk.type) {
         case 'noir': noirTimer = NOIR_DURATION; break;
         case 'jump': jumpBoostTimer = JUMP_BOOST_DURATION; break;
@@ -1131,6 +1210,8 @@ function stepZombies(dt, p) {
 // ------------------------------------------------------------- GAME OVER --
 let gameOver = false;
 const flashEl = document.getElementById('flash'), goEl = document.getElementById('gameover');
+const warnVignetteEl = document.getElementById('warnvignette'), warnTextEl = document.getElementById('warntext');
+let oobTimer = 0;
 const explosionParts = [];
 const explodeMat = new THREE.MeshBasicMaterial({ color: 0xffaa33 });
 for (let i = 0; i < 24; i++) {
@@ -1179,6 +1260,8 @@ function resetGame() {
   for (const entry of parkedCars) if (entry.knocked) { entry.knocked = null; entry.obj.position.copy(entry.origPos); entry.obj.rotation.set(0, entry.origRot, 0); }
   for (const entry of cars) if (entry.knocked) { entry.knocked = null; }
   for (const part of explosionParts) part.mesh.visible = false;
+  for (const part of sparkleParts) part.mesh.visible = false;
+  oobTimer = 0; warnVignetteEl.style.opacity = '0'; warnTextEl.style.opacity = '0';
   noirTimer = 0; jumpBoostTimer = 0; slowTimeTimer = 0;
   noirPass.uniforms.uSat.value = 1.0;
   zombieWaveTimer = 0; zombieContact = 0;
@@ -1277,9 +1360,21 @@ function stepCoat(p) {
     prev = seg.pos;
   }
 }
-const webLine = new THREE.Line(
-  new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3()]),
-  new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.8 }));
+// WEB LINE VISIBILITY FIX (Alex: "sometimes I can't see the web"): the old
+// webLine was a plain THREE.Line, which draws via WebGL's native gl.LINE_WIDTH
+// -- and most GPU drivers (ANGLE/Windows especially, but plenty of others
+// too) hard-clamp that to 1 physical pixel NO MATTER what material.linewidth
+// says. At typical viewing distance a 1px line against a busy neon
+// background is exactly the kind of thing that reads as "sometimes visible,
+// sometimes not" depending on angle/antialiasing/pixel ratio -- not a fluke,
+// a known WebGL limitation. Line2 (three/addons/lines) draws real
+// screen-space-width geometry instead of relying on gl.LINE_WIDTH, so the
+// width is guaranteed regardless of GPU/driver.
+const webLineMat = new LineMaterial({ color: 0xeaf6ff, linewidth: 3, transparent: true, opacity: 0.95 });
+webLineMat.resolution.set(innerWidth, innerHeight);   // required for Line2 to compute screen-space width
+const webLineGeo = new LineGeometry();
+webLineGeo.setPositions([0, 0, 0, 0, 0, 0]);
+const webLine = new Line2(webLineGeo, webLineMat);
 webLine.visible = false;
 scene.add(webLine);
 
@@ -1339,6 +1434,13 @@ function tryAttach() {
 // ----------------------------------------------------------------- INPUT --
 const keys = {};
 let webHeld = false, prevWebHeld = false, yaw = 0, pitch = -0.15;
+// Grapple-flourish state for the no-anchor-found self-zip (see stepPlayer):
+// a brief visible web line toward an aimed virtual point, purely cosmetic,
+// so a ground-tap with nothing to grab still READS as a grapple pull
+// (Alex: "I was imagining we'd have a little pull that happens like a
+// grappling hook when we're on the ground") instead of an invisible hop.
+let phantomGrappleT = 0;
+const phantomGrappleTarget = new THREE.Vector3();
 addEventListener('keydown', e => {
   keys[e.code] = true;
   if (e.code === 'Space') { webHeld = true; e.preventDefault(); }
@@ -1420,6 +1522,9 @@ function stepPlayer(dt) {
       const f2 = new THREE.Vector3(); camera.getWorldDirection(f2); f2.y = 0; f2.normalize();
       p.vel.addScaledVector(f2, 3.5);
       p.onGround = false;
+      sfxThwip(p.pos);   // same web-fire sound the real attach gets -- this IS a grapple, just against nothing specific
+      phantomGrappleT = 0.22;
+      phantomGrappleTarget.copy(p.pos).addScaledVector(f2, 3).add(new THREE.Vector3(0, 4.2, 0));
     }
   }
   prevWebHeld = webHeld;
@@ -1461,7 +1566,12 @@ function stepPlayer(dt) {
       }
     }
     webLine.visible = true;
-    webLine.geometry.setFromPoints([p.pos, p.anchor]);
+    webLineGeo.setPositions([p.pos.x, p.pos.y, p.pos.z, p.anchor.x, p.anchor.y, p.anchor.z]);
+  } else if (phantomGrappleT > 0) {
+    phantomGrappleT -= dt;
+    webLine.visible = true;
+    webLineGeo.setPositions([p.pos.x, p.pos.y, p.pos.z,
+      phantomGrappleTarget.x, phantomGrappleTarget.y, phantomGrappleTarget.z]);
   } else webLine.visible = false;
 
   // ground + building AABB collisions
@@ -1495,16 +1605,29 @@ function stepPlayer(dt) {
   // it. Sphere-based, not full oriented-box: cars are small and this reads
   // fine at the distances involved, and it's far cheaper than rotated-AABB
   // math against 100+ moving objects every frame.
+  if (carBumpCooldown > 0) carBumpCooldown -= dt;
   const sp0 = p.vel.length();
   resolveCarCollisions(p, sp0);
 
-  // OUT OF BOUNDS: fly past the city edge (or fall through the world) and
-  // it's ALWAYS game over -- explode() fires here, the overlay shows after
-  // a beat so the burst is visible first. WORLD_BOUND is the exact radius
-  // the visible boundary wall sits at, so this always matches what you saw.
-  if (Math.abs(p.pos.x) > WORLD_BOUND || Math.abs(p.pos.z) > WORLD_BOUND || p.pos.y < -25) {
-    triggerGameOver();
-    return;
+  // OUT OF BOUNDS, WITH A GRACE PERIOD (Alex: "a little more margin area...
+  // maybe glow red when you're about to explode so you have 2 seconds to
+  // get to a safe area"). Falling through the world (y<-25) is still
+  // instant -- there's no "safe area" to get back to from underneath the
+  // map. Crossing the boundary wall now starts a countdown instead of
+  // killing immediately: a red vignette grows in as the timer runs, and
+  // stepping back inside WORLD_BOUND at any point cancels it clean.
+  const beyondWall = Math.abs(p.pos.x) > WORLD_BOUND || Math.abs(p.pos.z) > WORLD_BOUND;
+  if (p.pos.y < -25) { triggerGameOver(); return; }
+  if (beyondWall) {
+    oobTimer += dt;
+    const urgency = Math.min(1, oobTimer / OUT_OF_BOUNDS_GRACE);
+    warnVignetteEl.style.opacity = (0.1 + urgency * 0.7).toFixed(2);
+    warnTextEl.style.opacity = '1';
+    if (oobTimer >= OUT_OF_BOUNDS_GRACE) { triggerGameOver(); return; }
+  } else if (oobTimer > 0) {
+    oobTimer = 0;
+    warnVignetteEl.style.opacity = '0';
+    warnTextEl.style.opacity = '0';
   }
 
   checkKnocks(p, p.vel.length());
@@ -1522,6 +1645,11 @@ function stepPlayer(dt) {
   ).multiplyScalar(8.5);
   const target = p.pos.clone().add(camOff).add(new THREE.Vector3(0, 2.2, 0));
   camera.position.lerp(target, Math.min(1, dt * 7));
+  // "Camera should not be able to go below the ground" -- steep downward
+  // pitch (looking down at yourself from above) could put the lerped
+  // camera position underneath the ground plane; hard-clamp it above the
+  // surface (ground top is y=0) regardless of what the orbit math wants.
+  camera.position.y = Math.max(camera.position.y, 0.35);
   camera.lookAt(p.pos.x, p.pos.y + 1.2, p.pos.z);
 
   document.getElementById('webstate').textContent =
@@ -1576,6 +1704,7 @@ function loop(now) {
   stepPlayer(playerDt);
   if (!gameOver) stepPickups(simT, player);
   stepExplosion(dt);
+  stepSparkles(dt);
   stepWeather(worldDt);
   stepRain(player.pos, simT);
   updateBloom(player.pos.y);
@@ -1602,7 +1731,14 @@ window.__sw = { THREE, player, cars, parkedCars, pickups, colliders, EDGE, WORLD
                 set rainTarget(v) { rainTarget = v; },
                 get fallMusicPhase() { return fallMusicPhase; },
                 get webHeld() { return webHeld; },
-                set webHeld(v) { webHeld = v; } };
+                set webHeld(v) { webHeld = v; },
+                webLine, webLineGeo, camera,
+                get phantomGrappleT() { return phantomGrappleT; },
+                phantomGrappleTarget,
+                get oobTimer() { return oobTimer; },
+                stepSparkles, pickupBurst, sparkleParts,
+                get carBumpCooldown() { return carBumpCooldown; },
+                set carBumpCooldown(v) { carBumpCooldown = v; } };
 </script>
 </body>
 </html>
