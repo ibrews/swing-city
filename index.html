@@ -49,6 +49,10 @@
     color: #ff3355; font: 22px/1.4 ui-monospace, Menlo, monospace; text-shadow: 0 0 14px #ff3355;
     z-index: 10; display: none; user-select: none; pointer-events: none; text-align: center;
     letter-spacing: 3px; }
+  #combotext { position: fixed; left: 50%; top: 30%; transform: translateX(-50%) scale(1);
+    color: #ffd23b; font: 22px/1.4 ui-monospace, Menlo, monospace; text-shadow: 0 0 12px #ff8c00;
+    z-index: 14; opacity: 0; pointer-events: none; letter-spacing: 2px; text-align: center;
+    transition: opacity 0.12s linear, transform 0.12s ease-out; }
 </style>
 </head>
 <body>
@@ -58,7 +62,8 @@
   trouble you can cause before the night's over.<br><br>
   <b>click to enter</b><br><br>
   mouse — look &nbsp;·&nbsp; <b>hold LMB or SPACE</b> — shoot a web and swing (let go to release)<br>
-  <b>tap LMB or SPACE</b> — no jump button: a quick tap pulls you up like a web-assisted hop<br>
+  <b>tap LMB or SPACE</b> — jump (in the air, tap again to fire a web instead) &nbsp;·&nbsp;
+  <b>hold against a wall</b> — crawl up it<br>
   WASD — run / steer in the air &nbsp;·&nbsp; shift — sprint &nbsp;·&nbsp; R — respawn<br><br>
   <b>HOW TO WIN:</b> there's no ending — just a high score. Smash into cars while swinging to send
   them flying (+25), grab the glowing orbs for points (+10) — a few unusual-looking ones do
@@ -77,6 +82,7 @@
 <div id="score">score: <b id="scoretotal">0</b><br>cars knocked: <b id="knocked">0</b><br>orbs: <b id="orbs">0</b>/<b id="orbstotal">0</b></div>
 <div id="powerups"></div>
 <div id="zombiewarn">ZOMBIES INBOUND</div>
+<div id="combotext"></div>
 <div id="center"></div>
 
 <script>
@@ -146,7 +152,9 @@ const OUT_OF_BOUNDS_MARGIN = 16;
 const OUT_OF_BOUNDS_GRACE = 2.0;   // seconds you can survive past the wall before exploding
 const KNOCK_SPEED = 6.0, KNOCK_RADIUS = 1.5;   // min player speed / range to knock a car over
 const PICKUP_PER_BLOCK = 1, PICKUP_SCORE = 10, KNOCK_SCORE = 25;
+const COMBO_WINDOW = 1.6;   // seconds since the last knock that still counts as the same combo chain
 const JUMP_VEL_NORMAL = 12, JUMP_VEL_BOOSTED = 20, JUMP_BOOST_DURATION = 9;
+const CLIMB_SPEED = 7.0;   // wall-crawl vertical speed while holding the web button against a building
 const NOIR_DURATION = 10;
 const SLOWTIME_DURATION = 6, SLOWTIME_WORLD_SCALE = 0.32, SLOWTIME_PLAYER_SCALE = 0.8;
 const ZOMBIE_SPEED = 3.0, ZOMBIE_WAVE_DURATION = 26, ZOMBIE_COUNT = 12, ZOMBIE_KILL_TIME = 0.5;
@@ -435,8 +443,11 @@ function makeCarMesh(color) {
   add(new THREE.BoxGeometry(1.1, 0.5, 0.85), -0.1, 0.68, 0, body);
   const head = new THREE.MeshBasicMaterial({ color: new THREE.Color(2.2, 2.2, 1.9) });
   const tail = new THREE.MeshBasicMaterial({ color: new THREE.Color(2.2, 0.15, 0.1) });
-  add(new THREE.BoxGeometry(0.12, 0.18, 0.7), 1.05, 0.30, 0, head);
-  add(new THREE.BoxGeometry(0.10, 0.16, 0.7), -1.05, 0.34, 0, tail);
+  add(new THREE.BoxGeometry(0.12, 0.18, 0.7), 1.06, 0.30, 0, head);
+  // tail light pulled out from -1.05 -- its outer face sat exactly coplanar
+  // with the body box's back face at x=-1.1, z-fighting under most view
+  // angles (Alex: "the red on the back of the cars has z-fighting").
+  add(new THREE.BoxGeometry(0.10, 0.16, 0.7), -1.09, 0.34, 0, tail);
   scene.add(g);
   return g;
 }
@@ -602,7 +613,7 @@ rainGeo.setAttribute('position', new THREE.BufferAttribute(rainPos, 3));
 const rainDrops = [];
 for (let i = 0; i < RAIN_COUNT; i++) {
   rainDrops.push({ dx: uniform(-20, 20), dz: uniform(-20, 20),
-                   z0: uniform(0, 40), spd: uniform(34, 56), len: uniform(0.35, 0.9) });
+                   z0: uniform(0, 40), spd: uniform(46, 74), len: uniform(0.5, 1.15) });
 }
 const rainMat = new THREE.LineBasicMaterial({ color: 0x8fb8d8, transparent: true, opacity: 0 });
 const rain = new THREE.LineSegments(rainGeo, rainMat);
@@ -617,6 +628,12 @@ scene.add(rain);
 // actually "live" -- the rest get parked at a degenerate point so they
 // don't draw, which fakes a variable particle count without touching the
 // buffer geometry's size.
+//
+// ROUND 2 (Alex: "the rain always seems a little too gentle when it
+// happens"): both bands raised -- a "light" rain now starts at what used to
+// be roughly the low end of "heavy," and heavy rain caps higher. Paired
+// with the opacity multiplier bump and the faster/longer drops above, so it
+// reads as heavier both in density and in motion, not just more opaque.
 let rainIntensity = 0, rainTarget = 0, rainRetimer = uniform(5, 12);
 let lightningTimer = uniform(10, 24);
 function stepWeather(dt) {
@@ -624,10 +641,11 @@ function stepWeather(dt) {
   if (rainRetimer <= 0) {
     rainRetimer = uniform(14, 34);
     const r = rng();
-    rainTarget = r < 0.3 ? 0 : r < 0.6 ? uniform(0.12, 0.4) : uniform(0.55, 1.0);
+    rainTarget = r < 0.3 ? 0 : r < 0.55 ? uniform(0.35, 0.6) : uniform(0.75, 1.0);
   }
   rainIntensity += (rainTarget - rainIntensity) * Math.min(1, dt * 0.4);
-  rainMat.opacity = 0.42 * rainIntensity;
+  rainMat.opacity = 0.58 * rainIntensity;
+  rainBus.gain.setTargetAtTime(rainIntensity * 0.38, audioCtx.currentTime, 0.6);
 
   lightningTimer -= dt;
   if (lightningTimer <= 0) {
@@ -671,6 +689,23 @@ const listener = new THREE.AudioListener();
 camera.add(listener);
 const noiseBuffer = audioCtx.createBuffer(1, audioCtx.sampleRate, audioCtx.sampleRate);
 { const d = noiseBuffer.getChannelData(0); for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1; }
+
+// Ambient rain hiss (Alex: "we need sound for the rain"). Unlike the SFX
+// above this is a single PERSISTENT looping source, not a one-shot spun up
+// per call -- it starts immediately (silent, gain 0) and its gain is just
+// ramped live by stepWeather() to track rainIntensity, the same way the
+// music buses fade. Bandpassed noise reads as hiss/patter rather than a
+// flat static wash. Not spatial -- rain is everywhere, like the thunder.
+const rainBus = audioCtx.createGain();
+rainBus.gain.value = 0;
+rainBus.connect(audioCtx.destination);
+{
+  const src = audioCtx.createBufferSource(); src.buffer = noiseBuffer; src.loop = true;
+  const filt = audioCtx.createBiquadFilter(); filt.type = 'bandpass';
+  filt.frequency.value = 3400; filt.Q.value = 0.5;
+  src.connect(filt); filt.connect(rainBus);
+  src.start(0);
+}
 
 function playSpatialAt(pos, build) {
   const holder = new THREE.Object3D();
@@ -733,6 +768,22 @@ function sfxHonk(pos) {
     o1.connect(g); o2.connect(g);
     o1.start(now); o2.start(now); o1.stop(now + 0.36); o2.stop(now + 0.36);
     return { node: g, stopAt: now + 0.36 };
+  });
+}
+// A brief, much quieter honk -- traffic-jam ambience between cars rather
+// than something aimed at the player, so it should read as background
+// texture, not a cue.
+function sfxHonkTiny(pos) {
+  playSpatialAt(pos, (ctx, now) => {
+    const o1 = ctx.createOscillator(); o1.type = 'square'; o1.frequency.value = 440;
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0.0001, now);
+    g.gain.exponentialRampToValueAtTime(0.05, now + 0.02);
+    g.gain.setValueAtTime(0.05, now + 0.09);
+    g.gain.exponentialRampToValueAtTime(0.0001, now + 0.16);
+    o1.connect(g);
+    o1.start(now); o1.stop(now + 0.18);
+    return { node: g, stopAt: now + 0.18 };
   });
 }
 function sfxPing(pos) {
@@ -812,15 +863,33 @@ function sfxThunder() {
   rumble.start(now); rumble.stop(now + 2.4);
 }
 
-// Light, occasional honking from random moving traffic -- not constant, just
-// ambience. Rolled in the main loop off a countdown timer.
-let honkTimer = uniform(4, 9);
+// Ambient honking (Alex: "tiny honks every so often when the cars get in
+// each other's way") -- rather than a random car honking for no reason,
+// pick a car that's actually stuck close behind another car in the same
+// lane (a cheap re-derivation of stepTraffic's own "ahead" gap check,
+// since that result isn't persisted on the car object) and give it a
+// quiet, short-range honk. Rolled in the main loop off a countdown timer.
+let honkTimer = uniform(3, 7);
+function findQueuedCar() {
+  for (let tries = 0; tries < 6; tries++) {
+    const c = choice(cars);
+    if (!c || c.knocked || c.arc) continue;
+    let closestAhead = Infinity;
+    for (const o of cars) {
+      if (o === c || o.knocked || o.axis !== c.axis || o.lane !== c.lane) continue;
+      const d = c.dirn * (o.s - c.s);
+      if (d > 0.1 && d < closestAhead) closestAhead = d;
+    }
+    if (closestAhead < 3.2) return c;
+  }
+  return null;
+}
 function stepHonks(dt, p) {
   honkTimer -= dt;
   if (honkTimer > 0) return;
-  honkTimer = uniform(5, 11);
-  const c = choice(cars);
-  if (c && !c.knocked && p.pos.distanceTo(c.obj.position) < 70) sfxHonk(c.obj.position);
+  honkTimer = uniform(4, 9);
+  const c = findQueuedCar();
+  if (c && p.pos.distanceTo(c.obj.position) < 55) sfxHonkTiny(c.obj.position);
 }
 
 // ------------------------------------------------------------ CHIPTUNE FX --
@@ -955,15 +1024,33 @@ function updatePowerupHud() {
 // Shared tumble physics for any knocked car (moving or parked): simple
 // ballistic + spin, settle on the ground, then hand back to whichever
 // system owns it (moving cars rejoin traffic; parked cars reset in place).
-function knockCar(entry, hitDir, isParked) {
+//
+// `speed` is the player's momentum at impact (Alex: "knock the car over and
+// see it roll a bunch of times, based on my momentum") -- scales both the
+// launch velocity and the spin rate, so a glancing knock tumbles once or
+// twice while a full-sprint hit sends it cartwheeling. Also drives a combo
+// chain: consecutive knocks within COMBO_WINDOW of each other stack a
+// score multiplier (Alex: "bonus points for hitting more cars").
+function knockCar(entry, hitDir, isParked, speed) {
   if (entry.knocked) return;
+  const momentum = Math.min(2.2, Math.max(1, (speed || KNOCK_SPEED) / KNOCK_SPEED));
   entry.knocked = {
-    vel: hitDir.clone().multiplyScalar(uniform(5, 8)).add(new THREE.Vector3(0, uniform(4, 7), 0)),
-    ang: new THREE.Vector3(uniform(-6, 6), uniform(-4, 4), uniform(-6, 6)),
-    timer: 2.6, grounded: false,
+    vel: hitDir.clone().multiplyScalar(uniform(5, 8) * momentum).add(new THREE.Vector3(0, uniform(4, 7) * momentum, 0)),
+    ang: new THREE.Vector3(uniform(-6, 6), uniform(-4, 4), uniform(-6, 6)).multiplyScalar(momentum),
+    timer: 2.6 * Math.min(1.5, momentum), grounded: false,
   };
   knockedCount++; knockedEl.textContent = knockedCount;
-  addScore(KNOCK_SCORE);
+  comboCount = comboTimer > 0 ? comboCount + 1 : 1;
+  comboTimer = COMBO_WINDOW;
+  addScore(KNOCK_SCORE * comboCount);
+  if (comboCount >= 2) {
+    comboTextEl.textContent = `COMBO x${comboCount}!`;
+    comboTextEl.style.opacity = '1';
+    comboTextEl.style.transform = 'translateX(-50%) scale(1.15)';
+    setTimeout(() => { comboTextEl.style.transform = 'translateX(-50%) scale(1)'; }, 30);
+    clearTimeout(comboTextEl._hideT);
+    comboTextEl._hideT = setTimeout(() => { comboTextEl.style.opacity = '0'; }, 900);
+  }
   sfxKnock(entry.obj.position);
   if (isParked) { entry.origPos = entry.obj.position.clone(); entry.origRot = entry.obj.rotation.y; }
 }
@@ -1064,7 +1151,7 @@ function checkKnocks(p, speed) {
   for (const list of [cars, parkedCars]) {
     for (const entry of list) {
       if (entry.knocked) continue;
-      if (p.pos.distanceTo(entry.obj.position) < KNOCK_RADIUS) knockCar(entry, dir, list === parkedCars);
+      if (p.pos.distanceTo(entry.obj.position) < KNOCK_RADIUS) knockCar(entry, dir, list === parkedCars, speed);
     }
   }
 }
@@ -1211,6 +1298,8 @@ function stepZombies(dt, p) {
 let gameOver = false;
 const flashEl = document.getElementById('flash'), goEl = document.getElementById('gameover');
 const warnVignetteEl = document.getElementById('warnvignette'), warnTextEl = document.getElementById('warntext');
+const comboTextEl = document.getElementById('combotext');
+let comboCount = 0, comboTimer = 0;
 let oobTimer = 0;
 const explosionParts = [];
 const explodeMat = new THREE.MeshBasicMaterial({ color: 0xffaa33 });
@@ -1262,6 +1351,7 @@ function resetGame() {
   for (const part of explosionParts) part.mesh.visible = false;
   for (const part of sparkleParts) part.mesh.visible = false;
   oobTimer = 0; warnVignetteEl.style.opacity = '0'; warnTextEl.style.opacity = '0';
+  comboCount = 0; comboTimer = 0; comboTextEl.style.opacity = '0';
   noirTimer = 0; jumpBoostTimer = 0; slowTimeTimer = 0;
   noirPass.uniforms.uSat.value = 1.0;
   zombieWaveTimer = 0; zombieContact = 0;
@@ -1430,6 +1520,25 @@ function tryAttach() {
   }
   return true;
 }
+// The "web thwip" half of a hold: try to attach to a real building; if
+// nothing's in range, fall back to the cosmetic phantom-grapple flourish.
+// `boosted` distinguishes the two calling contexts: a fresh press while
+// ALREADY airborne (no jump just gave you lift, so the phantom fallback
+// still needs its own forward+up push) vs. the follow-through after a
+// grounded jump (jump already supplied the lift -- this is sound+visual
+// only, so two liftoffs don't stack into a de-facto super-jump).
+function fireWeb(boosted) {
+  const found = tryAttach();
+  if (found) return;
+  const f2 = new THREE.Vector3(); camera.getWorldDirection(f2); f2.y = 0; f2.normalize();
+  if (boosted) {
+    player.vel.y = jumpBoostTimer > 0 ? JUMP_VEL_BOOSTED * 0.85 : JUMP_VEL_NORMAL;
+    player.vel.addScaledVector(f2, 3.5);
+  }
+  sfxThwip(player.pos);
+  phantomGrappleT = 0.22;
+  phantomGrappleTarget.copy(player.pos).addScaledVector(f2, 3).add(new THREE.Vector3(0, 4.2, 0));
+}
 
 // ----------------------------------------------------------------- INPUT --
 const keys = {};
@@ -1441,6 +1550,12 @@ let webHeld = false, prevWebHeld = false, yaw = 0, pitch = -0.15;
 // grappling hook when we're on the ground") instead of an invisible hop.
 let phantomGrappleT = 0;
 const phantomGrappleTarget = new THREE.Vector3();
+// Armed the instant a grounded press turns into a real jump; consumed on
+// the very next airborne frame (while still held) to fire the web-thwip
+// flourish/attach -- see stepPlayer. Makes "jump" and "web thwip" read as
+// one continuous gesture from a single hold (Alex: "it's a jump, and then
+// if you're still holding spacebar, a web thwip").
+let pendingAirWeb = false;
 addEventListener('keydown', e => {
   keys[e.code] = true;
   if (e.code === 'Space') { webHeld = true; e.preventDefault(); }
@@ -1495,36 +1610,42 @@ function stepPlayer(dt) {
   if (keys.KeyA) inDir.sub(r);
   if (inDir.lengthSq() > 0) inDir.normalize();
 
-  // WEB ATTACH / TAP-ZIP / RELEASE (Alex: "tough to start swinging from the
-  // ground, if I hold spacebar I just keep hopping... let's basically get
-  // rid of standard jumping, all upward movement can be web-based, and a
-  // tap of the swing button should basically register like a jump."
+  // WEB ATTACH / JUMP / RELEASE (Alex, this round: "let's bring jump back
+  // but holding spacebar doesn't make you continuously jump, it's a jump
+  // [and then if you're still holding spacebar, a web thwip]."
   //
-  // Root cause of the hopping: the old code re-applied jump velocity EVERY
-  // SINGLE FRAME Space was held AND the player was grounded -- go up an
-  // inch, gravity brings you right back down, onGround flips true again,
-  // jump re-fires immediately. A stutter-hop, not a jump.
+  // Jump is back as a REAL discrete jump, but still edge-triggered
+  // (webPressed = true only on the up-to-down transition, via prevWebHeld)
+  // so holding never re-fires it -- that's what fixed the old stutter-hop,
+  // and it still applies here: only a fresh press jumps.
   //
-  // Redesign: there is no separate "jump" anymore. Pressing the web button
-  // is EDGE-TRIGGERED (webPressed = true only on the frame it goes from up
-  // to down, tracked via prevWebHeld) -- so holding does nothing extra,
-  // only a fresh press does. On press: try to find a real building
-  // (tryAttach); if one's found, you swing. If NOT (tapped from open
-  // ground, or just nothing in range), you still get a brief self-
-  // propelled pull upward -- same idea as a swing, just against nothing in
-  // particular, which is exactly "pulling myself for a moment into the
-  // air" rather than a generic jump.
+  // pendingAirWeb's follow-through is checked FIRST, using p.onGround/
+  // p.anchor as they stood at the END of the PREVIOUS frame -- deliberately
+  // BEFORE this frame's own webPressed handling can arm it. First cut of
+  // this had the check running right after arming it in the same call,
+  // which meant a jump next to any building (i.e. almost anywhere in this
+  // city) got instantly hijacked into a swing attach before the jump ever
+  // rendered a single frame on its own -- verified via the debug hook
+  // (vel.y came out negative, not the expected +12, because the rope
+  // constraint math ran on the very same tick and clamped it). Checking
+  // yesterday's state first guarantees the jump gets at least one full
+  // frame to itself before the web mechanic can take over.
+  if (pendingAirWeb) {
+    if (!webHeld) pendingAirWeb = false;   // let go before it fired -- no thwip
+    else if (!p.onGround && !p.anchor && !p.onWall) { pendingAirWeb = false; fireWeb(false); }
+  }
+  // On a grounded press: jump, and arm pendingAirWeb so the SAME hold also
+  // fires the web mechanic next frame, once airborne. On an already-
+  // airborne press: skip the jump (can't jump on nothing) and go straight
+  // to the web mechanic, same as before.
   const webPressed = webHeld && !prevWebHeld;
   if (webPressed && !p.anchor) {
-    const found = tryAttach();
-    if (!found) {
-      p.vel.y = jumpBoostTimer > 0 ? JUMP_VEL_BOOSTED * 0.85 : JUMP_VEL_NORMAL;
-      const f2 = new THREE.Vector3(); camera.getWorldDirection(f2); f2.y = 0; f2.normalize();
-      p.vel.addScaledVector(f2, 3.5);
+    if (p.onGround) {
+      p.vel.y = jumpBoostTimer > 0 ? JUMP_VEL_BOOSTED : JUMP_VEL_NORMAL;
       p.onGround = false;
-      sfxThwip(p.pos);   // same web-fire sound the real attach gets -- this IS a grapple, just against nothing specific
-      phantomGrappleT = 0.22;
-      phantomGrappleTarget.copy(p.pos).addScaledVector(f2, 3).add(new THREE.Vector3(0, 4.2, 0));
+      pendingAirWeb = true;
+    } else {
+      fireWeb(true);
     }
   }
   prevWebHeld = webHeld;
@@ -1576,8 +1697,19 @@ function stepPlayer(dt) {
 
   // ground + building AABB collisions
   p.onGround = false;
+  p.onWall = false;
   if (p.pos.y < 0.9) { p.pos.y = 0.9; if (p.vel.y < 0) p.vel.y = 0; p.onGround = true; }
   const R = 0.4;
+  // WALL-CRAWL (Alex: "if I'm holding spacebar and I come to a vertical
+  // surface, I should crawl up it like spiderman"). A horizontal-axis push
+  // (0/1/4/5, i.e. an actual wall face, not the floor/ceiling axes 2/3) IS
+  // wall contact -- if the web button is held and we're not mid-swing,
+  // override the vertical velocity to a steady climb instead of letting
+  // gravity keep eroding it. Re-triggers every frame contact holds, so it
+  // reads as a constant climb speed, not a decaying one. Letting go of the
+  // button (or losing contact) just stops the override and you fall/walk
+  // off normally -- no separate "let go of wall" logic needed.
+  const wallCrawling = webHeld && !p.anchor;
   for (const c of colliders) {
     if (p.pos.x < c.min[0] - R || p.pos.x > c.max[0] + R ||
         p.pos.z < c.min[2] - R || p.pos.z > c.max[2] + R ||
@@ -1595,6 +1727,11 @@ function stepPlayer(dt) {
     if (axis === 3) { p.pos.y = c.max[1] + 0.9; if (p.vel.y < 0) p.vel.y = 0; p.onGround = true; }
     if (axis === 4) { p.pos.z = c.min[2] - R; if (p.vel.z > 0) p.vel.z = 0; }
     if (axis === 5) { p.pos.z = c.max[2] + R; if (p.vel.z < 0) p.vel.z = 0; }
+    if ((axis === 0 || axis === 1 || axis === 4 || axis === 5) && wallCrawling &&
+        p.pos.y < c.max[1] + 0.9) {   // don't climb past the roofline -- just walk onto it instead
+      p.onWall = true;
+      p.vel.y = CLIMB_SPEED;
+    }
   }
 
   // CAR COLLISION (Alex: "is there any collision or physics on the cars?"
@@ -1631,6 +1768,7 @@ function stepPlayer(dt) {
   }
 
   checkKnocks(p, p.vel.length());
+  if (comboTimer > 0) { comboTimer -= dt; if (comboTimer <= 0) comboCount = 0; }
 
   // visuals: lean the body into the velocity
   spidey.position.copy(p.pos);
@@ -1738,7 +1876,13 @@ window.__sw = { THREE, player, cars, parkedCars, pickups, colliders, EDGE, WORLD
                 get oobTimer() { return oobTimer; },
                 stepSparkles, pickupBurst, sparkleParts,
                 get carBumpCooldown() { return carBumpCooldown; },
-                set carBumpCooldown(v) { carBumpCooldown = v; } };
+                set carBumpCooldown(v) { carBumpCooldown = v; },
+                get pendingAirWeb() { return pendingAirWeb; },
+                fireWeb, tryAttach,
+                get comboCount() { return comboCount; },
+                get comboTimer() { return comboTimer; },
+                rainBus, audioCtx, findQueuedCar, stepHonks,
+                get CLIMB_SPEED() { return CLIMB_SPEED; }, KNOCK_SPEED };
 </script>
 </body>
 </html>
