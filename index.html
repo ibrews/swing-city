@@ -190,20 +190,28 @@ const PALETTE = [[0.0, 0.85, 1.0], [1.0, 0.10, 0.6], [0.6, 0.20, 1.0], [0.1, 1.0
 // gameplay
 // OUT_OF_BOUNDS_MARGIN history: was 14 with an oversized ground plane (a
 // real bug -- "I've walked very far and haven't exploded," see the ground
-// mesh comment below), tightened to 5 to fix that. Alex's follow-up:
-// "a little more margin area... maybe glow red when you're about to
-// explode so you have 2 seconds to get to a safe area." So: margin opened
-// back up (5->16, more open space before ANY danger), AND death is no
-// longer instant on crossing it -- OUT_OF_BOUNDS_GRACE gives a countdown
-// (with a growing red vignette) to get back before it's fatal. See the OOB
-// handling in stepPlayer for the grace-period logic.
+// mesh comment below), tightened to 5 to fix that, then opened back up to
+// 16 for more open space before the boundary matters at all. Originally
+// crossing WORLD_BOUND started a countdown-to-death (with a growing red
+// vignette); Alex's follow-up killed that entirely: "it's too easy to get
+// out of the city and die -- let's just make the border walls bounce you
+// hard back toward the middle." So now the boundary behaves like a solid,
+// springy wall -- BOUNCE_FLASH_DURATION is just how long the red vignette
+// lingers as impact feedback, not a survival window. See the OOB handling
+// in stepPlayer.
 const OUT_OF_BOUNDS_MARGIN = 16;
-const OUT_OF_BOUNDS_GRACE = 2.0;   // seconds you can survive past the wall before exploding
+const BOUNCE_FLASH_DURATION = 0.35;   // seconds the red vignette lingers after bouncing off the border wall
+const BOUNCE_SPEED = 34, BOUNCE_UP = 8;   // velocity kick back toward center on hitting the border wall
 const KNOCK_SPEED = 6.0, KNOCK_RADIUS = 1.5;   // min player speed / range to knock a car over
 const PICKUP_PER_BLOCK = 1, PICKUP_SCORE = 10, KNOCK_SCORE = 25;
 const COMBO_WINDOW = 1.6;   // seconds since the last knock that still counts as the same combo chain
 const JUMP_VEL_NORMAL = 12, JUMP_VEL_BOOSTED = 20, JUMP_BOOST_DURATION = 9;
 const CLIMB_SPEED = 7.0;   // wall-crawl vertical speed while holding the web button against a building
+// Perpendicular pawn-facing yaw per wall-contact axis (0/1/4/5 from the
+// collider push-out logic), and how close to the roofline the climb starts
+// easing the player onto the roof -- see wall-crawl handling in stepPlayer.
+const WALL_FACE_YAW = { 0: Math.PI / 2, 1: -Math.PI / 2, 4: 0, 5: Math.PI };
+const MANTLE_ZONE = 2.0, MANTLE_SPEED = 5.0;
 const NOIR_DURATION = 10;
 const SLOWTIME_DURATION = 6, SLOWTIME_WORLD_SCALE = 0.32, SLOWTIME_PLAYER_SCALE = 0.8;
 const ZOMBIE_SPEED = 3.0, ZOMBIE_WAVE_DURATION = 26, ZOMBIE_COUNT = 12, ZOMBIE_KILL_TIME = 0.5;
@@ -2285,6 +2293,7 @@ function stepPlayer(dt) {
   // off normally -- no separate "let go of wall" logic needed.
   const wallCrawling = webHeld && !p.anchor;
   let buildingHit = false;
+  let wallFaceAxis = null;   // which wall face we're pressed against this frame, for pawn rotation
   for (const c of colliders) {
     if (p.pos.x < c.min[0] - R || p.pos.x > c.max[0] + R ||
         p.pos.z < c.min[2] - R || p.pos.z > c.max[2] + R ||
@@ -2307,6 +2316,21 @@ function stepPlayer(dt) {
         p.pos.y < c.max[1] + 0.9) {   // don't climb past the roofline -- just walk onto it instead
       p.onWall = true;
       p.vel.y = CLIMB_SPEED;
+      wallFaceAxis = axis;
+      // Ease onto the roof as the climb nears the top, so cresting a
+      // building doesn't need a release-and-re-press of the web button.
+      // Without this, the player straddles the wall/roof corner where the
+      // push-out flips between the wall axis and axis 3 (roof) frame to
+      // frame depending on which penetration is marginally smaller, which
+      // reads as getting stuck right at the ledge.
+      const distToTop = (c.max[1] + 0.9) - p.pos.y;
+      if (distToTop < MANTLE_ZONE) {
+        const t = 1 - distToTop / MANTLE_ZONE;   // 0 at zone entry -> 1 at roofline
+        if (axis === 0) p.pos.x += MANTLE_SPEED * t * dt;
+        if (axis === 1) p.pos.x -= MANTLE_SPEED * t * dt;
+        if (axis === 4) p.pos.z += MANTLE_SPEED * t * dt;
+        if (axis === 5) p.pos.z -= MANTLE_SPEED * t * dt;
+      }
     }
   }
   if (buildingHit && buildingBumpCooldown <= 0) { sfxBuildingBump(p.pos); buildingBumpCooldown = 0.4; }
@@ -2325,35 +2349,51 @@ function stepPlayer(dt) {
   const sp0 = p.vel.length();
   resolveCarCollisions(p, sp0);
 
-  // OUT OF BOUNDS, WITH A GRACE PERIOD (Alex: "a little more margin area...
-  // maybe glow red when you're about to explode so you have 2 seconds to
-  // get to a safe area"). Falling through the world (y<-25) is still
-  // instant -- there's no "safe area" to get back to from underneath the
-  // map. Crossing the boundary wall now starts a countdown instead of
-  // killing immediately: a red vignette grows in as the timer runs, and
-  // stepping back inside WORLD_BOUND at any point cancels it clean.
+  // BORDER WALL BOUNCE (Alex: "it's too easy to get out of the city and
+  // die -- let's just make the border walls bounce you hard back toward
+  // the middle"). Replaces the old grace-period countdown-to-death: the
+  // boundary now behaves like a solid, springy wall -- crossing it
+  // immediately reflects velocity hard back toward city center (0,0) and
+  // clamps the player just inside WORLD_BOUND so the same frame doesn't
+  // re-trigger. A rope, if taut, is dropped so it can't fight the kickback.
+  // Falling through the world floor (y<-25) is unrelated and stays an
+  // instant death -- there's no "safe area" to bounce back to from
+  // underneath the map.
   const beyondWall = Math.abs(p.pos.x) > WORLD_BOUND || Math.abs(p.pos.z) > WORLD_BOUND;
   if (p.pos.y < -25) { triggerGameOver(); return; }
   if (beyondWall) {
-    oobTimer += dt;
-    const urgency = Math.min(1, oobTimer / OUT_OF_BOUNDS_GRACE);
-    warnVignetteEl.style.opacity = (0.1 + urgency * 0.7).toFixed(2);
-    warnTextEl.style.opacity = '1';
-    if (oobTimer >= OUT_OF_BOUNDS_GRACE) { triggerGameOver(); return; }
-  } else if (oobTimer > 0) {
-    oobTimer = 0;
-    warnVignetteEl.style.opacity = '0';
-    warnTextEl.style.opacity = '0';
+    const toCenter = new THREE.Vector3(-p.pos.x, 0, -p.pos.z);
+    if (toCenter.lengthSq() > 0) toCenter.normalize();
+    p.vel.x = toCenter.x * BOUNCE_SPEED;
+    p.vel.z = toCenter.z * BOUNCE_SPEED;
+    p.vel.y = Math.max(p.vel.y, BOUNCE_UP);
+    p.anchor = null;
+    if (Math.abs(p.pos.x) > WORLD_BOUND) p.pos.x = Math.sign(p.pos.x) * (WORLD_BOUND - 0.5);
+    if (Math.abs(p.pos.z) > WORLD_BOUND) p.pos.z = Math.sign(p.pos.z) * (WORLD_BOUND - 0.5);
+    oobTimer = BOUNCE_FLASH_DURATION;
+  }
+  if (oobTimer > 0) {
+    oobTimer = Math.max(0, oobTimer - dt);
+    const urgency = oobTimer / BOUNCE_FLASH_DURATION;
+    warnVignetteEl.style.opacity = (urgency * 0.6).toFixed(2);
+    warnTextEl.style.opacity = urgency > 0.05 ? '1' : '0';
   }
 
   checkKnocks(p, p.vel.length());
   if (comboTimer > 0) { comboTimer -= dt; if (comboTimer <= 0) comboCount = 0; }
 
-  // visuals: lean the body into the velocity
+  // visuals: lean the body into the velocity, or face square into the wall
+  // while climbing (horizontal speed is ~0 mid-climb, so the velocity-facing
+  // rotation below would otherwise leave spidey facing a stale direction).
   spidey.position.copy(p.pos);
   const sp = Math.hypot(p.vel.x, p.vel.z);
-  if (sp > 0.5) spidey.rotation.y = Math.atan2(p.vel.x, p.vel.z);
-  spidey.rotation.x = THREE.MathUtils.clamp(sp * 0.02 * (p.anchor ? 1.6 : 0.4), 0, 0.9);
+  if (p.onWall && wallFaceAxis !== null) {
+    spidey.rotation.y = WALL_FACE_YAW[wallFaceAxis];
+    spidey.rotation.x = 0;
+  } else {
+    if (sp > 0.5) spidey.rotation.y = Math.atan2(p.vel.x, p.vel.z);
+    spidey.rotation.x = THREE.MathUtils.clamp(sp * 0.02 * (p.anchor ? 1.6 : 0.4), 0, 0.9);
+  }
   stepCoat(p);
 
   // third-person camera -- in an XR session this steers cameraRig (the
