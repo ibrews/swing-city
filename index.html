@@ -98,6 +98,8 @@
   <h1>SWING CITY</h1>
   A living neon city at night. Sling a web, swing between skyscrapers, and see how much
   trouble you can cause before the night's over.<br><br>
+  <span id="initialsRow">callsign (optional, 3 letters): <input id="initialsInput" maxlength="3"
+    placeholder="AAA" autocomplete="off" spellcheck="false"></span><br><br>
   <b>click to enter</b><br><br>
   mouse — look &nbsp;·&nbsp; <b>hold LMB or SPACE</b> — shoot a web and swing (let go to release)<br>
   <b>tap LMB or SPACE</b> — jump (in the air, tap again to fire a web instead) &nbsp;·&nbsp;
@@ -2509,6 +2511,7 @@ function connectMultiplayer() {
       playerCountEl.style.display = 'block';
       updatePlayerCount();
       leaderboardEl.style.display = 'block';
+      updateLeaderboard();
     } else if (msg.type === 'join' && msg.id !== myId) {
       // Someone connected but hasn't sent a position yet -- count them
       // immediately rather than waiting for their first 'state' (which is
@@ -2578,6 +2581,12 @@ function connectMultiplayer() {
       player.anchor = null;
       player.onGround = false;
       sfxKnock(player.pos);
+    } else if (msg.type === 'leader') {
+      // Broadcast WITHOUT exclude in worker.js (same as jousted/knocked) --
+      // the newly-leading player sees their own banner too, which reads
+      // naturally ("YOU just became the leader" looks the same as everyone
+      // else's view of it).
+      showLeaderBanner(msg.initials, msg.score);
     }
   });
   mpSocket.addEventListener('close', () => { mpSocket = null; setTimeout(connectMultiplayer, 3000); });
