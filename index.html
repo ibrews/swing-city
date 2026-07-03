@@ -1676,6 +1676,17 @@ function respawn() {
 // that consistency IS what reads as "the same pawn."
 const suitGlow = new THREE.MeshBasicMaterial({ color: 0xf2f6ff });
 const suitRed = new THREE.MeshBasicMaterial({ color: 0xff2a3a });
+// JOUSTING STICK (Alex, family playtest: "all players are carrying a thin
+// jousting stick"). Purely cosmetic -- lives on the shared pawn factory (see
+// "PAWN FACTORY" above) so both the local player and every remote player get
+// it for free, no separate wiring. A thin cylinder rotated to point along the
+// body's local +Z (the same "forward" the eyes/chest mark already establish
+// as the front of the pawn, and what spidey.rotation.y aims at the direction
+// of travel), held slightly to one side and mostly extending out in front --
+// the far end is what the stick-poke hit-check (see STICK_POKE_* below)
+// treats as the business end.
+const stickMat = new THREE.MeshStandardMaterial({ color: 0x8a5a2b, roughness: 0.7, metalness: 0.05 });
+const STICK_LEN = 1.15;
 function makePawnBody(suitColor) {
   const suitMat = new THREE.MeshStandardMaterial({ color: suitColor, roughness: 0.4, metalness: 0.1 });
   const body = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.9, 0.35), suitMat);
@@ -1689,6 +1700,10 @@ function makePawnBody(suitColor) {
   const chestMark = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.28, 0.02), suitRed);
   chestMark.position.set(0, 0.05, 0.18);
   body.add(chestMark);
+  const stick = new THREE.Mesh(new THREE.CylinderGeometry(0.035, 0.045, STICK_LEN, 6), stickMat);
+  stick.rotation.x = Math.PI / 2;   // cylinder's local +Y -> body-local +Z (forward)
+  stick.position.set(0.2, 0.18, 0.35);
+  body.add(stick);
   return body;
 }
 const spidey = makePawnBody(0x12172c);
@@ -2533,7 +2548,27 @@ const MP_SEND_INTERVAL = 1 / 15;
 // narrowed the height band to just that range. XZ stays (and grows a touch)
 // generous since "fairly generous hitbox" was specifically about forgiving
 // aim, not a bigger kill zone vertically.
-const JOUST_RADIUS = 1.3, JOUST_HEIGHT_MIN = 1.1, JOUST_HEIGHT_MAX = 2.0, JOUST_MIN_FALL_SPEED = -3;
+// JOUST, ROUND 3 (family playtest 2026-07-03, Alex: "essentially never
+// triggers" in real chaotic play, "same mechanic, possibly currently broken
+// -- could be hitbox is too small"). Root-caused via the debug hook: a
+// STATIONARY mocked victim jousts reliably, a MOVING real one almost never
+// does -- so the bug scales with victim velocity, not with any fixed
+// constant. The old remote-position code (see stepMultiplayer below) just
+// exponentially lerped toward whichever position last arrived over the
+// network (~15x/sec), which makes the RENDERED avatar (the same object the
+// joust hit-check reads -- render and hitbox were never out of sync with
+// EACH OTHER, just both lagging the true player) trail the real position by
+// roughly velocity * 0.1s in steady state. At sprint speed (RUN*1.7 =~
+// 18.7u/s) that's ~1.9 units of lag -- already bigger than the entire old
+// 1.3-unit radius -- and a hard swing runs faster still. A perfectly still
+// target has zero velocity, so this error is exactly zero there, which is
+// exactly why the isolated stationary test passed. Fixed at the source
+// (see the netVel/predictedRemotePos dead-reckoning below) rather than
+// papering over it with a much bigger hitbox alone, but per Alex's explicit
+// "fairly generous hitbox" ask the XZ radius also grows a bit as margin for
+// residual jitter; height stays a real head-sized band, just with a touch
+// more slack top and bottom for the same reason.
+const JOUST_RADIUS = 1.7, JOUST_HEIGHT_MIN = 1.0, JOUST_HEIGHT_MAX = 2.15, JOUST_MIN_FALL_SPEED = -3;
 // Player-vs-player BODY collision/knock (Alex: "we should be able to knock
 // each other around just like cars... knocking another player out of the
 // map should be possible"). Same two-tier shape as car collision: close
@@ -2544,6 +2579,19 @@ const JOUST_RADIUS = 1.3, JOUST_HEIGHT_MIN = 1.1, JOUST_HEIGHT_MAX = 2.0, JOUST_
 // head-stomp doesn't ALSO fire a body knock in the same frame.
 const PLAYER_SOLID_RADIUS = 0.85, PLAYER_HEIGHT_GATE = 1.6, PLAYER_KNOCK_SPEED = KNOCK_SPEED;
 const playerKnockCooldowns = new Map();   // victim id -> seconds remaining
+// STICK POKE (Alex, same playtest: "all players are carrying a thin
+// jousting stick... this allows players to explode each other directly").
+// A FOURTH distinct trigger, not a proximity check that just wins over the
+// other three whenever players are close -- it has to feel like a deliberate
+// jab, not an accidental brush. Gated on the ATTACKER: (1) actually moving
+// with real intent (not idly standing next to someone), (2) roughly FACING
+// the victim -- the check point is offset out in front along the attacker's
+// own facing direction (the stick's tip), not a full-sphere radius around
+// either player, so poking only connects within a narrow forward cone, from
+// any angle the attacker chooses to approach from. Same "attacker detects,
+// victim applies it to itself" relay shape as joust/knock.
+const STICK_POKE_REACH = 1.5, STICK_POKE_RADIUS = 0.75, STICK_POKE_MIN_SPEED = 3.5, STICK_POKE_HEIGHT_GATE = 1.4;
+const playerPokeCooldowns = new Map();   // victim id -> seconds remaining
 
 function makeRemotePlayerMesh(color) {
   // Same pawn every player uses (Alex: "all players should use the same
@@ -2589,6 +2637,7 @@ function connectMultiplayer() {
       knownPlayerIds.add(msg.id);
       updatePlayerCount();
     } else if (msg.type === 'state' && msg.id !== myId) {
+      const nowMs = performance.now();
       let rp = remotePlayers.get(msg.id);
       if (!rp) {
         // color comes from the server (assigned once, at connect time --
@@ -2597,6 +2646,7 @@ function connectMultiplayer() {
         // ITS OWN random color instead of one shared placeholder.
         rp = Object.assign({
           targetPos: new THREE.Vector3(msg.pos[0], msg.pos[1], msg.pos[2]),
+          netVel: new THREE.Vector3(), lastStateTime: nowMs,
           targetYaw: 0, prevPos: new THREE.Vector3(msg.pos[0], msg.pos[1], msg.pos[2]),
           vel: new THREE.Vector3(), anchorPos: null, color: msg.color, initials: '', score: 0,
         }, makeRemotePlayerMesh(msg.color));
@@ -2604,6 +2654,20 @@ function connectMultiplayer() {
         remotePlayers.set(msg.id, rp);
         knownPlayerIds.add(msg.id);
         updatePlayerCount();
+      } else {
+        // Dead reckoning (head-stomp reliability fix -- see JOUST comment
+        // above): estimate this player's actual velocity from consecutive
+        // state packets, so stepMultiplayer can extrapolate where they
+        // REALLY are between packets instead of always chasing a stale
+        // last-known point. Guard against a first-ever update (dtNet from
+        // object creation would be huge) and against a stalled connection
+        // (a long gap between packets shouldn't produce a wild velocity
+        // spike once it resumes).
+        const dtNet = (nowMs - rp.lastStateTime) / 1000;
+        if (dtNet > 0.02 && dtNet < 0.5) {
+          rp.netVel.set(msg.pos[0], msg.pos[1], msg.pos[2]).sub(rp.targetPos).divideScalar(dtNet);
+        }
+        rp.lastStateTime = nowMs;
       }
       rp.targetPos.set(msg.pos[0], msg.pos[1], msg.pos[2]);
       rp.targetYaw = msg.yaw;
@@ -2626,7 +2690,10 @@ function connectMultiplayer() {
       knownPlayerIds.delete(msg.id);
       updatePlayerCount();
       updateLeaderboard();   // departed player should vanish from the board immediately, and a new #1 may now apply
-    } else if (msg.type === 'jousted') {
+    } else if (msg.type === 'jousted' || msg.type === 'poked') {
+      // Same instakill/explode effect regardless of which of the two
+      // trigger tiers caused it -- head-stomp or stick-poke, the victim's
+      // client can't tell the difference and doesn't need to.
       if (msg.victimId === myId) {
         triggerGameOver();
       } else {
@@ -2663,20 +2730,37 @@ function connectMultiplayer() {
 }
 connectMultiplayer();
 
+const predictedRemotePos = new THREE.Vector3();   // scratch, reused every rp every frame -- avoid per-frame GC churn
+const REMOTE_EXTRAPOLATION_CAP = 0.25;   // seconds -- cap dead-reckoning so a stalled/dropped connection doesn't send the ghost running off
 function stepMultiplayer(dt, p) {
   if (!MULTIPLAYER_URL) return;
   for (const id of playerKnockCooldowns.keys()) {
     const t = playerKnockCooldowns.get(id) - dt;
     if (t <= 0) playerKnockCooldowns.delete(id); else playerKnockCooldowns.set(id, t);
   }
-  // Updates arrive at MP_SEND_INTERVAL, not every frame -- lerp toward the
-  // last-known state so remote players glide instead of stepping. Velocity
-  // is derived from the ACTUAL lerped motion (not the raw network target),
-  // so the coat streams correctly during the smoothed glide, not just at
-  // the moment a new packet arrives.
+  for (const id of playerPokeCooldowns.keys()) {
+    const t = playerPokeCooldowns.get(id) - dt;
+    if (t <= 0) playerPokeCooldowns.delete(id); else playerPokeCooldowns.set(id, t);
+  }
+  // Updates arrive at MP_SEND_INTERVAL, not every frame. Rather than lerping
+  // toward the raw last-known packet (which trails a genuinely moving player
+  // by roughly velocity * smoothing-time-constant -- see the JOUST comment
+  // above, this was the actual cause of head-stomp misses in real play),
+  // dead-reckon a PREDICTED current position from the last known point plus
+  // however long it's been since that packet times the estimated network
+  // velocity (netVel, computed on packet arrival above), then lerp toward
+  // THAT. The predicted point itself already advances every frame, so the
+  // lerp factor can be tighter than before without reintroducing jitter --
+  // it's converging on a continuously-updating estimate, not repeatedly
+  // snapping to a stale one. Velocity for the coat trail is derived from the
+  // ACTUAL rendered motion (not netVel directly), so the coat streams
+  // correctly during the smoothed glide, not just at the moment a new packet
+  // arrives.
   for (const rp of remotePlayers.values()) {
     rp.prevPos.copy(rp.body.position);
-    rp.body.position.lerp(rp.targetPos, Math.min(1, dt * 10));
+    const sinceUpdate = Math.min((performance.now() - rp.lastStateTime) / 1000, REMOTE_EXTRAPOLATION_CAP);
+    predictedRemotePos.copy(rp.targetPos).addScaledVector(rp.netVel, sinceUpdate);
+    rp.body.position.lerp(predictedRemotePos, Math.min(1, dt * 16));
     rp.body.rotation.y = rp.targetYaw;
     rp.vel.copy(rp.body.position).sub(rp.prevPos).divideScalar(Math.max(dt, 1e-4));
     stepCoatFor(rp.coatSegs, rp.body.position, rp.vel);
@@ -2699,6 +2783,27 @@ function stepMultiplayer(dt, p) {
       }
       p.vel.y = JUMP_VEL_NORMAL * 0.6;   // a little bounce off the kill, Mario-stomp style
       continue;   // a head-stomp this frame shouldn't ALSO resolve as a body knock below
+    }
+    // STICK POKE: a deliberate jab, not a brush -- only connects if I'm
+    // actually moving with intent AND roughly facing them. The check point
+    // is the stick's tip (my position projected forward along my own facing
+    // direction, the same direction spidey.rotation.y already tracks --
+    // see stepPlayer), not a radius around either player, so this only
+    // fires within a narrow forward cone in front of me, from whatever
+    // angle I approach at.
+    const spHoriz = Math.hypot(p.vel.x, p.vel.z);
+    if (spHoriz > STICK_POKE_MIN_SPEED && Math.abs(heightAbove) < STICK_POKE_HEIGHT_GATE && !playerPokeCooldowns.has(id)) {
+      const fwdX = Math.sin(spidey.rotation.y), fwdZ = Math.cos(spidey.rotation.y);
+      const tipX = p.pos.x + fwdX * STICK_POKE_REACH, tipZ = p.pos.z + fwdZ * STICK_POKE_REACH;
+      const tipDist = Math.hypot(tipX - rp.body.position.x, tipZ - rp.body.position.z);
+      if (tipDist < STICK_POKE_RADIUS) {
+        playerPokeCooldowns.set(id, 0.6);
+        if (mpSocket && mpSocket.readyState === WebSocket.OPEN) {
+          mpSocket.send(JSON.stringify({ type: 'poke', victimId: id }));
+        }
+        sfxKnock(rp.body.position);
+        continue;   // a poke this frame shouldn't ALSO resolve as a body knock below
+      }
     }
     // BODY: regular contact -- soft push if slow, a real knock if fast.
     if (dist < PLAYER_SOLID_RADIUS && Math.abs(heightAbove) < PLAYER_HEIGHT_GATE) {
@@ -2853,7 +2958,10 @@ window.__sw = { THREE, player, cars, parkedCars, pickups, colliders, EDGE, WORLD
                 MULTIPLAYER_URL,
                 get myColor() { return myColor; }, webLine, spidey,
                 playerKnockCooldowns, makePawnBody, makeCoat, stepCoatFor,
-                knownPlayerIds, updatePlayerCount, playerCountEl, composer };
+                knownPlayerIds, updatePlayerCount, playerCountEl, composer,
+                JOUST_RADIUS, JOUST_HEIGHT_MIN, JOUST_HEIGHT_MAX, JOUST_MIN_FALL_SPEED,
+                STICK_POKE_REACH, STICK_POKE_RADIUS, STICK_POKE_MIN_SPEED, STICK_POKE_HEIGHT_GATE,
+                playerPokeCooldowns, predictedRemotePos };
 </script>
 </body>
 </html>

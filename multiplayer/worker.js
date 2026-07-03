@@ -4,15 +4,18 @@
 // server-side physics or state authority. Every connected client sends its
 // own position/state ~15x/sec; the DO fans that out to everyone else
 // as-is. "Joust" hits (Alex: "landing on top of another player makes them
-// explode") and regular player-to-player "knocks" (Alex: "we should be
-// able to knock each other around just like cars") are both detected
-// CLIENT-SIDE by the ATTACKING player (same as every other collision in
-// this game -- it has no server-authoritative physics anywhere, so this
-// matches the existing architecture rather than introducing a new one) and
-// reported as a single message ({type:'joust'} / {type:'knock'}); the DO
-// just re-broadcasts that as {type:'jousted'} / {type:'knocked'} so every
-// client (including the victim) finds out at the same time, and only the
-// named victim's OWN client applies the resulting death/impulse to itself.
+// explode"), stick "poke" hits (Alex: "carrying a jousting stick ... allows
+// players to explode each other directly" -- a second, distinct way to
+// trigger the same kill), and regular player-to-player "knocks" (Alex: "we
+// should be able to knock each other around just like cars") are all
+// detected CLIENT-SIDE by the ATTACKING player (same as every other
+// collision in this game -- it has no server-authoritative physics anywhere,
+// so this matches the existing architecture rather than introducing a new
+// one) and reported as a single message ({type:'joust'} / {type:'poke'} /
+// {type:'knock'}); the DO just re-broadcasts that as {type:'jousted'} /
+// {type:'poked'} / {type:'knocked'} so every client (including the victim)
+// finds out at the same time, and only the named victim's OWN client
+// applies the resulting death/impulse to itself.
 //
 // Uses the WebSocket Hibernation API (state.acceptWebSocket, not the older
 // addEventListener pattern) so an idle room with open-but-silent sockets
@@ -84,6 +87,13 @@ export class Room {
       }, ws);
     } else if (msg.type === 'joust' && typeof msg.victimId === 'string') {
       this.broadcast({ type: 'jousted', victimId: msg.victimId, byId: id });
+    } else if (msg.type === 'poke' && typeof msg.victimId === 'string') {
+      // Stick-poke (Alex: "all players are carrying a thin jousting stick
+      // ... this allows players to explode each other directly") -- a
+      // second, distinct way to trigger the same instakill/explode effect
+      // as a joust, same "attacker reports, only the named victim acts on
+      // it" shape.
+      this.broadcast({ type: 'poked', victimId: msg.victimId, byId: id });
     } else if (msg.type === 'knock' && typeof msg.victimId === 'string' && Array.isArray(msg.dir)) {
       // Regular body-to-body contact (Alex: "we should be able to knock
       // each other around just like cars") -- same "attacker reports, only
