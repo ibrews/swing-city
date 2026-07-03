@@ -23,6 +23,16 @@
     font: 16px/1.8 ui-monospace, Menlo, monospace; text-align: center;
   }
   #start { cursor: pointer; }
+  /* Callsign input (Alex: "the box for typing your name... too small and
+     hard to click"). No rule existed before this -- it was rendering at
+     the browser's tiny default input size against a page full of large
+     monospace text. */
+  #initialsInput {
+    font: 22px ui-monospace, Menlo, monospace; letter-spacing: 4px; text-align: center;
+    width: 3.4em; padding: 8px 6px; border-radius: 4px; border: 2px solid #9fe8ff;
+    background: #04101c; color: #ffe27a; text-transform: uppercase;
+  }
+  #initialsInput.blocked { border-color: #ff5566; }
   #start h1, #gameover h1 { color: #ff64c8; font-size: 28px; text-shadow: 0 0 18px #f0a; }
   #gameover { display: none; background: #200005ee; }
   #gameover h1 { font-size: 38px; letter-spacing: 2px; }
@@ -1160,10 +1170,10 @@ const EFFECT_NAMES = {
   zombiesummon: 'ZOMBIE SUMMON', disco: 'DISCO CITY', slow: 'SLOW-MO',
   shrinktag: 'SHRINK TOUCH', shrunk: 'SHRUNKEN', torusext: 'DURATION UP',
 };
-// Player identity is color-only (see makePawnBody/"same pawn... different
-// colors") -- no name-entry UI exists, so the banner names players by their
-// assigned color, falling back to "YOU" for the local player in solo play
-// (myColor is only ever set once the 'welcome' message arrives).
+// Still used by the shrinktag banner (a targeted player-vs-player attack,
+// not a self/everyone power-up effect -- out of scope for the initials
+// rework below). Power-up effect banners now use initials instead; see
+// announceEffect/announceRemoteEffect.
 const COLOR_NAMES = { 0xff5566: 'RED', 0x55ddff: 'CYAN', 0xffe066: 'YELLOW', 0x8fff8f: 'GREEN', 0xc98fff: 'PURPLE', 0xff9f4d: 'ORANGE' };
 function colorLabel(hex) { return hex == null ? 'YOU' : (COLOR_NAMES[hex] || ('PLAYER-' + hex.toString(16))); }
 
@@ -1176,11 +1186,22 @@ function showPowerBanner(text) {
   clearTimeout(powerBannerEl._hideT);
   powerBannerEl._hideT = setTimeout(() => { powerBannerEl.style.opacity = '0'; }, 2200);
 }
-function announceEffect(name, isSelf) {
-  showPowerBanner(`${isSelf ? 'YOU' : colorLabel(myColor)} TRIGGERED ${EFFECT_NAMES[name] || name.toUpperCase()}!!`);
+// Alex: "when an action is triggered just for you, still have the text
+// say what you did [but bare, no attribution] -- if it's something for
+// everyone: '___ TRIGGERED NOIR MODE!'; if it's just for me: 'NOIR
+// MODE!'". So the format is keyed on WHETHER THE EFFECT AFFECTS EVERYONE,
+// not on who's watching -- a world effect gets attribution even in the
+// triggering player's own view (their own client reaches this same code
+// path via the server's broadcast round-trip, see triggerWorldEffect),
+// while a solo effect never gets attribution for the person it happened
+// to, even though bystanders seeing someone ELSE'S solo trigger still get
+// attribution (that's still "not just for me" from their seat).
+function announceEffect(name, isWorld) {
+  const label = EFFECT_NAMES[name] || name.toUpperCase();
+  showPowerBanner(isWorld ? `${myInitials || 'YOU'} TRIGGERED ${label}!!` : `${label}!!`);
 }
-function announceRemoteEffect(name, byColor) {
-  showPowerBanner(`${colorLabel(byColor)} TRIGGERED ${EFFECT_NAMES[name] || name.toUpperCase()}!!`);
+function announceRemoteEffect(name, initials) {
+  showPowerBanner(`${initials || 'PLAYER'} TRIGGERED ${EFFECT_NAMES[name] || name.toUpperCase()}!!`);
 }
 // SOLO trigger: applies instantly (no network round-trip -- your own buff
 // shouldn't wait on a WebSocket) and, if in multiplayer, tells everyone else
@@ -1188,10 +1209,10 @@ function announceRemoteEffect(name, byColor) {
 // them -- "player-visible distinction," solid orb = you-only).
 function triggerSoloEffect(name) {
   activeEffects[name] = EFFECT_DURATION;
-  announceEffect(name, true);
+  announceEffect(name, false);
   onEffectTriggered(name, false);
   if (mpSocket && mpSocket.readyState === WebSocket.OPEN) {
-    mpSocket.send(JSON.stringify({ type: 'effect', name, world: false }));
+    mpSocket.send(JSON.stringify({ type: 'effect', name, world: false, initials: myInitials || '' }));
   }
 }
 // EVERYONE trigger: reported to the relay, which rebroadcasts to ALL
@@ -1203,7 +1224,7 @@ function triggerWorldEffect(name) {
   // trigger point") -- every other world effect just needs the name.
   const pos = name === 'magnet' ? [player.pos.x, player.pos.y, player.pos.z] : null;
   if (mpSocket && mpSocket.readyState === WebSocket.OPEN) {
-    mpSocket.send(JSON.stringify({ type: 'effect', name, world: true, pos }));
+    mpSocket.send(JSON.stringify({ type: 'effect', name, world: true, pos, initials: myInitials || '' }));
   } else {
     // single-player: no relay round-trip to wait for, apply directly
     worldEffects[name] = EFFECT_DURATION;
@@ -3198,6 +3219,12 @@ function stepPlayer(dt) {
   const p = player;
   if (gameOver) return;   // frozen behind the game-over overlay until Try Again
   if (paused) return;   // frozen behind the reopened menu overlay -- see openMenu/closeMenu
+  // Alex: "don't start the fall of the level until you enter." respawn()
+  // runs once at module init (setting up the initial drop position/
+  // velocity) before the player has clicked past the start overlay --
+  // without this guard, gravity was already integrating the fall behind
+  // the overlay, so the drop was partway done the instant you clicked in.
+  if (!entered) return;
   // camera-relative input direction on the ground plane
   const f = new THREE.Vector3(-Math.sin(yaw), 0, -Math.cos(yaw));
   const r = new THREE.Vector3(-f.z, 0, f.x);
@@ -3818,7 +3845,11 @@ function connectMultiplayer() {
         if (msg.name === 'magnet' && msg.pos) worldMagnetOrigin = new THREE.Vector3(msg.pos[0], msg.pos[1], msg.pos[2]);
         onEffectTriggered(msg.name, true);
       }
-      announceRemoteEffect(msg.name, msg.color);
+      // A world effect's broadcast reaches the ORIGIN player too (no
+      // server-side exclude, see worker.js) -- prefer "YOU" over an empty
+      // initials string for that specific case, same fallback the old
+      // color-based version used.
+      announceRemoteEffect(msg.name, msg.byId === myId ? (myInitials || 'YOU') : msg.initials);
     } else if (msg.type === 'powerkilled') {
       // Energy blast / pong / bomber instakill -- same "attacker reports,
       // victim applies to itself" shape as jousted.
@@ -4096,7 +4127,9 @@ window.__sw = { THREE, player, cars, parkedCars, pickups, colliders, EDGE, WORLD
                 get entered() { return entered; },
                 set entered(v) { entered = v; },
                 openMenu, closeMenu, get paused() { return paused; }, wallMat, WALL_CYCLE_SECONDS,
-                xrArms, xrGrips, updateXRArms,
+                xrArms, xrGrips, updateXRArms, announceEffect, announceRemoteEffect,
+                get myInitials() { return myInitials; }, set myInitials(v) { myInitials = v; },
+                powerBannerEl,
                 get xrMenuHoldTime() { return xrMenuHoldTime; },
                 kbKeyDown, aimDir, fpStick,
                 stepXR, xrKeys, get xrWebHeld() { return xrWebHeld; },

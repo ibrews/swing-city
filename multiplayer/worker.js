@@ -167,10 +167,13 @@ export class Room {
       // ALL sockets including the sender, same no-exclude shape as
       // joust/knock, so every client (sender included) applies it from one
       // consistent code path.
+      // initials rides along so the banner can attribute "who" instead of
+      // just a color name (Alex: "It should use my initials, not green").
+      const effectInitials = typeof msg.initials === 'string' ? msg.initials.slice(0, 3).toUpperCase() : '';
       if (msg.world) {
-        this.broadcast({ type: 'poweractivated', name: msg.name, world: true, byId: id, color: Number(colorStr), pos: Array.isArray(msg.pos) ? msg.pos : null });
+        this.broadcast({ type: 'poweractivated', name: msg.name, world: true, byId: id, color: Number(colorStr), initials: effectInitials, pos: Array.isArray(msg.pos) ? msg.pos : null });
       } else {
-        this.broadcast({ type: 'poweractivated', name: msg.name, world: false, byId: id, color: Number(colorStr) }, ws);
+        this.broadcast({ type: 'poweractivated', name: msg.name, world: false, byId: id, color: Number(colorStr), initials: effectInitials }, ws);
       }
     }
   }
