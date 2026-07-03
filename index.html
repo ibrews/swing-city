@@ -320,11 +320,34 @@ const EN_ONSETS = ['B', 'BR', 'D', 'DR', 'F', 'FL', 'FR', 'G', 'GL', 'GR', 'H', 
 const EN_VOWELS = ['A', 'E', 'I', 'O', 'U', 'AI', 'EE', 'OO', 'OA', 'IE', 'AU'];
 const EN_CODAS = ['', '', 'B', 'D', 'F', 'G', 'K', 'L', 'M', 'N', 'P', 'R', 'S', 'T', 'X',
   'Z', 'SH', 'TH', 'NG', 'CK'];
+function titleCase(s) { return s.charAt(0) + s.slice(1).toLowerCase(); }
+// SHORTER, EASIER-TO-PRONOUNCE NAMES (Alex: "the names of the buildings
+// should be shorter and easier to pronounce phonetically -- put easy real
+// words and fake words and sounds together Kiumpt or Rosewood or Starchair
+// or OzCorp etc"). The old genEnglishName() below chained 2-3 syllables of
+// pure onset+vowel+coda soup (KRAUSHFEEBOL-style) -- unpronounceable and
+// nothing like a real building name. Replaced with three blended styles
+// matching Alex's own examples exactly: real-word compounds (Rosewood,
+// Starchair), a real word + corporate suffix (OzCorp), and a short
+// single-syllable invented blend (Kiumpt) -- all Title Case, not all-caps.
+const NAME_ROOTS = ['Rose', 'Star', 'Oz', 'Iron', 'Silver', 'Gold', 'North', 'West', 'Sun',
+  'Moon', 'Grand', 'Union', 'Crown', 'Amber', 'Cedar', 'Bridge', 'Harbor', 'Vista', 'Ridge',
+  'Stone', 'River', 'Frost', 'Ember', 'Marsh', 'Birch', 'Elm', 'Maple', 'Coral', 'Onyx',
+  'Quartz', 'Nova', 'Echo', 'Halo', 'Zephyr', 'Vault', 'Anchor', 'Summit', 'Beacon'];
+const NAME_COMPOUND_SUFFIXES = ['wood', 'chair', 'gate', 'view', 'field', 'mark', 'hall',
+  'spire', 'yard', 'house', 'court', 'park', 'ford', 'side', 'crest', 'vale', 'well',
+  'stead', 'light', 'glass', 'line', 'peak'];
+const NAME_CORP_SUFFIXES = ['Corp', 'Tower', 'Point', 'Group', 'Labs', 'Co', 'Works',
+  'Plaza', 'Center', 'Hall'];
+// Kept short (ONE syllable, not 2-3) so it stays pronounceable, e.g. Kiumpt.
+function genInventedName() {
+  return titleCase(choice(EN_ONSETS) + choice(EN_VOWELS) + choice(EN_CODAS));
+}
 function genEnglishName() {
-  const n = 2 + Math.floor(rng() * 2);   // 2-3 syllables, e.g. KINKABOBBA-style
-  let s = '';
-  for (let i = 0; i < n; i++) s += choice(EN_ONSETS) + choice(EN_VOWELS) + choice(EN_CODAS);
-  return s;
+  const style = rng();
+  if (style < 0.4) return choice(NAME_ROOTS) + choice(NAME_COMPOUND_SUFFIXES);
+  if (style < 0.75) return choice(NAME_ROOTS) + choice(NAME_CORP_SUFFIXES);
+  return genInventedName();
 }
 // Plain katakana mora (no small-kana digraphs -- kept simple), plus the small-tsu (ッ,
 // consonant doubling) and long-vowel mark (ー) for texture/flourish, both used sparingly.
@@ -1250,7 +1273,12 @@ for (let i = 0; i < GRID_N; i++) for (let j = 0; j < GRID_N; j++) {
       g.add(mesh, ring);
       mesh = g;
     }
-    const baseY = uniform(6, 15);
+    // GROUND ORBS (Alex: "there should be some orbs on the ground") --
+    // previously every pickup floated at swing height (6-15), collectible
+    // only by actually swinging. ~25% now spawn near ground level instead,
+    // so there's always something to grab just by running/jumping around
+    // too, not only while airborne on a web.
+    const baseY = rng() < 0.25 ? uniform(0.8, 1.6) : uniform(6, 15);
     mesh.position.set(blockCenter(i) + uniform(-4, 4), baseY, blockCenter(j) + uniform(-4, 4));
     scene.add(mesh);
     pickups.push({ mesh, ring, baseY, phase: uniform(0, 6.28), got: false, type: type.key, color: type.color, world: !!type.world });
@@ -2654,6 +2682,22 @@ webLine.visible = false;
 scene.add(webLine);
 
 const raycaster = new THREE.Raycaster();
+// Physical proximity check against the SAME `colliders` AABBs the wall-crawl
+// collision branch (in stepPlayer) uses -- deliberately independent of look
+// direction (unlike findAnchor's cone-cast), since wall contact can be on
+// any side of the player regardless of where the camera happens to be
+// aimed. Used to skip swing-attach attempts when a wall-crawl is what's
+// actually wanted (see the pendingAirWeb/webPressed block).
+function touchingWallNow() {
+  const WALL_TOUCH_MARGIN = 0.6;
+  for (const c of colliders) {
+    if (player.pos.x < c.min[0] - WALL_TOUCH_MARGIN || player.pos.x > c.max[0] + WALL_TOUCH_MARGIN ||
+        player.pos.z < c.min[2] - WALL_TOUCH_MARGIN || player.pos.z > c.max[2] + WALL_TOUCH_MARGIN ||
+        player.pos.y < c.min[1] - 0.5 || player.pos.y > c.max[1] + 0.9) continue;
+    return true;
+  }
+  return false;
+}
 // Forgiving anchor search: instead of one thin ray (which whiffs between
 // buildings constantly and made webbing feel broken), sample a cone of rays
 // around look-direction-tilted-up and take the highest hit. Then clamp the
@@ -3129,7 +3173,21 @@ function stepPlayer(dt) {
   // frame to itself before the web mechanic can take over.
   if (pendingAirWeb) {
     if (!webHeld) pendingAirWeb = false;   // let go before it fired -- no thwip
-    else if (!p.onGround && !p.anchor && !p.onWall) { pendingAirWeb = false; fireWeb(false); }
+    else if (!p.onGround && !p.anchor && !p.onWall) {
+      pendingAirWeb = false;
+      // WALL-CRAWL WAS GETTING HIJACKED (Alex: "climbing up a building
+      // still isn't working... doesn't trigger at all"). fireWeb() runs
+      // BEFORE the collider-based wall-crawl check further down, and
+      // findAnchor()'s cone-cast happily finds an anchor point on the very
+      // wall you just walked up to -- so holding the web button next to a
+      // building attached a (short, awkward) swing instead of ever
+      // reaching the physical-contact wall-crawl branch, since
+      // `wallCrawling = webHeld && !p.anchor` is already false the moment
+      // fireWeb() sets p.anchor. Skip the swing-attach attempt entirely
+      // when already touching a wall -- let the collider loop's wall-crawl
+      // branch claim it instead.
+      if (!touchingWallNow()) fireWeb(false);
+    }
   }
   // On a grounded press: jump, and arm pendingAirWeb so the SAME hold also
   // fires the web mechanic next frame, once airborne. On an already-
@@ -3141,7 +3199,7 @@ function stepPlayer(dt) {
       p.vel.y = (jumpBoostTimer > 0 ? JUMP_VEL_BOOSTED : JUMP_VEL_NORMAL) * (myEffectActive('superjump') ? SUPERJUMP_MULT : 1);
       p.onGround = false;
       pendingAirWeb = true;
-    } else {
+    } else if (!touchingWallNow()) {
       fireWeb(true);
     }
   }
@@ -3921,7 +3979,7 @@ renderer.setAnimationLoop(loop);
 
 // Debug hook -- lets anyone poke at live state from devtools without
 // needing a build step (e.g. `__sw.player.pos.set(x,y,z)` to teleport).
-window.__sw = { THREE, player, cars, parkedCars, pickups, colliders, EDGE, WORLD_BOUND,
+window.__sw = { THREE, player, cars, parkedCars, pickups, colliders, EDGE, WORLD_BOUND, touchingWallNow,
                 GRID_N, VEHICLE_TYPES, buildingLabels, buildingLabelSprites, segs, cylSegs,
                 genBuildingName, isBlocked, PROFANITY_EN, PROFANITY_KATAKANA,
                 rooftopCoins, stepRooftopCoins,
