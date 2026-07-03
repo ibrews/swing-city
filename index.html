@@ -59,6 +59,20 @@
     color: #ffd23b; font: 22px/1.4 ui-monospace, Menlo, monospace; text-shadow: 0 0 12px #ff8c00;
     z-index: 14; opacity: 0; pointer-events: none; letter-spacing: 2px; text-align: center;
     transition: opacity 0.12s linear, transform 0.12s ease-out; }
+  /* Session leaderboard (Alex: "a leaderboard for everyone to see at all
+     times") -- left side, mirroring #score/#playercount's right-side HUD
+     block. Hidden until multiplayer actually connects, same pattern as
+     #playercount. */
+  #leaderboard { position: fixed; left: 14px; top: 12px; color: #9fe8ff; z-index: 10;
+    font: 12px/1.6 ui-monospace, Menlo, monospace; text-shadow: 0 0 6px #08a;
+    user-select: none; pointer-events: none; display: none; background: #04101c99;
+    border: 1px solid #1e3a52; border-radius: 4px; padding: 6px 10px; min-width: 150px; }
+  #leaderboard b { color: #ff64c8; letter-spacing: 1px; }
+  #leaderboard .row { display: flex; justify-content: space-between; gap: 10px; }
+  #leaderbanner { position: fixed; left: 50%; top: 20%; transform: translateX(-50%);
+    color: #ffe27a; font: 20px/1.4 ui-monospace, Menlo, monospace; text-shadow: 0 0 14px #ff8c00;
+    z-index: 14; opacity: 0; pointer-events: none; letter-spacing: 1px; text-align: center;
+    transition: opacity 0.3s linear; }
   /* Touch controls -- hidden by default, shown only on touch-capable devices
      (see the 'touch-active' class toggle in the INPUT section below). */
   #touchjoyBase, #touchjoyThumb, #touchweb, #touchrespawn { display: none; z-index: 20;
@@ -109,6 +123,8 @@
 <div id="powerups"></div>
 <div id="zombiewarn">ZOMBIES INBOUND</div>
 <div id="combotext"></div>
+<div id="leaderboard"></div>
+<div id="leaderbanner"></div>
 <div id="touchjoyBase"></div>
 <div id="touchjoyThumb"></div>
 <div id="touchweb">WEB</div>
@@ -394,6 +410,13 @@ function pickHeight() {
 
 // Pass 1 — generate building segment transforms (so we know instance counts).
 const segs = [], crowns = [], antennas = [];
+// Tracks the best rooftop for the leaderboard billboard while buildings
+// generate anyway (Alex: "somewhere prominent... e.g. a tall building or
+// the city center") -- prominence favors height AND proximity to the city
+// center over pure height, so it lands somewhere a swinging player is
+// likely to actually pass, not just whichever hero tower happened to roll
+// tallest out at the map edge.
+let billboardSpot = null, billboardProminence = -Infinity;
 for (let i = 0; i < GRID_N; i++) for (let j = 0; j < GRID_N; j++) {
   const cx = blockCenter(i), cz = blockCenter(j);
   const interior = BLOCK_SIZE - 2 * SIDEWALK_W, lot = interior / LOTS_PER_SIDE;
@@ -415,6 +438,9 @@ for (let i = 0; i < GRID_N; i++) for (let j = 0; j < GRID_N; j++) {
       const ah = h * uniform(0.18, 0.35);
       antennas.push({ x: lx, y: y + ah / 2, z: lz, sy: ah, color });
     }
+    const distFromCenter = Math.hypot(lx, lz);
+    const prominence = h - distFromCenter * 0.5;
+    if (prominence > billboardProminence) { billboardProminence = prominence; billboardSpot = { x: lx, z: lz, topY: y, wx, wz }; }
   }
 }
 
@@ -464,6 +490,52 @@ const crownMat = new THREE.ShaderMaterial({
 });
 instancedBoxes(crowns, crownMat, 2.2);
 instancedBoxes(antennas.map(a => ({ ...a, sx: 0.12, sz: 0.12 })), crownMat, 3.0);
+
+// SESSION LEADERBOARD BILLBOARD (Alex: "represented in 3D space in the
+// city on a billboard") -- mounted on whichever rooftop scored highest on
+// prominence above (see billboardSpot). makeCanvasPanel is a hoisted
+// function declaration further down this module, so calling it here (at
+// top-level module init, before its textual definition) is fine.
+function drawLeaderboardPanel(entries) {
+  return (ctx, w, h) => {
+    ctx.fillStyle = '#040a18e6';
+    ctx.fillRect(0, 0, w, h);
+    ctx.strokeStyle = '#4dff88';
+    ctx.lineWidth = 6;
+    ctx.strokeRect(3, 3, w - 6, h - 6);
+    ctx.textAlign = 'center';
+    ctx.font = 'bold 34px ui-monospace, Menlo, monospace';
+    ctx.fillStyle = '#ff64c8';
+    ctx.shadowColor = '#f0a'; ctx.shadowBlur = 12;
+    ctx.fillText('LEADERBOARD', w / 2, 48);
+    ctx.shadowBlur = 0;
+    ctx.font = '28px ui-monospace, Menlo, monospace';
+    ctx.textAlign = 'left';
+    const rows = entries.slice(0, 8);
+    rows.forEach((e, i) => {
+      const y = 96 + i * 38;
+      ctx.fillStyle = '#ffe27a';
+      ctx.fillText(`${i + 1}.`, 24, y);
+      ctx.fillStyle = '#' + new THREE.Color(e.color).getHexString();
+      ctx.fillText(e.initials || '???', 70, y);
+      ctx.fillStyle = '#9fe8ff';
+      ctx.textAlign = 'right';
+      ctx.fillText(String(e.score), w - 24, y);
+      ctx.textAlign = 'left';
+    });
+    if (!rows.length) {
+      ctx.fillStyle = '#6bd4ff';
+      ctx.textAlign = 'center';
+      ctx.fillText('waiting for players...', w / 2, h / 2);
+      ctx.textAlign = 'left';
+    }
+  };
+}
+const BILLBOARD_W = 7, BILLBOARD_H = 5.2;
+const billboardPanel = makeCanvasPanel(512, 384, BILLBOARD_W, BILLBOARD_H);
+billboardPanel.mesh.position.set(billboardSpot.x, billboardSpot.topY + BILLBOARD_H / 2 + 0.6, billboardSpot.z);
+billboardPanel.redraw(drawLeaderboardPanel([]));
+scene.add(billboardPanel.mesh);
 
 // Ground, roads, sidewalks, dashes
 // Ground now sized to just past WORLD_BOUND (not CITY_EXTENT*2) -- see the
@@ -1174,7 +1246,7 @@ let knockedCount = 0, score = 0;
 const knockedEl = document.getElementById('knocked'), orbsEl = document.getElementById('orbs');
 const scoreEl = document.getElementById('scoretotal');
 const powerupsEl = document.getElementById('powerups');
-function addScore(n) { score += n; scoreEl.textContent = score; }
+function addScore(n) { score += n; scoreEl.textContent = score; if (MULTIPLAYER_URL) updateLeaderboard(); }
 
 // Powerup timers -- all just count down in the main loop; whichever are >0
 // are "active." See stepPickups() for what picks them up, applyPowerupFX()
@@ -1604,6 +1676,13 @@ function makePawnBody(suitColor) {
 }
 const spidey = makePawnBody(0x12172c);
 scene.add(spidey);
+// Own name tag -- defined here (before makeNameTag's textual declaration
+// further down) is fine: it's a hoisted function declaration in this
+// module's scope. Redrawn from refreshMyNameTag() whenever myInitials or
+// myColor changes (typing a callsign, or the 'welcome' message assigning a
+// color once connected).
+const myNameTag = makeNameTag(spidey, '', 0x12172c);
+function refreshMyNameTag() { myNameTag.redraw(drawNameTag(myInitials, myColor != null ? myColor : 0x12172c)); }
 
 // TRENCHCOAT (Alex: "basic groom physics of wearing a dark blue trench-
 // coat?") -- a cheap spring-chain approximation, not real cloth sim: N
@@ -1919,10 +1998,12 @@ initialsInput.addEventListener('input', () => {
     initialsInput.value = '';
     initialsInput.classList.add('blocked');
     setTimeout(() => initialsInput.classList.remove('blocked'), 500);
+    refreshMyNameTag();
     return;
   }
   initialsInput.value = v;
   myInitials = v.length === 3 ? v : '';
+  refreshMyNameTag();
 });
 // Entering VR via the VRButton is its own "start the game" gesture -- run
 // the same unlock/hide-overlay/start-music side effects the desktop click
@@ -2326,6 +2407,49 @@ const remotePlayers = new Map();   // id -> { body, coatSegs, webLine, webLineGe
 const knownPlayerIds = new Set();
 const playerCountEl = document.getElementById('playercount');
 const playerCountTotalEl = document.getElementById('playercounttotal');
+
+// SESSION LEADERBOARD (Alex: "a leaderboard for everyone to see at all
+// times but also represented in 3D space... whenever someone becomes a new
+// leader, everyone should see text"). Session-only by design -- it's just
+// derived from whatever's currently in remotePlayers + the local score, so
+// it naturally resets when the room empties, matching the relay's
+// stateless architecture (no persistent backend needed).
+const leaderboardEl = document.getElementById('leaderboard');
+const leaderbannerEl = document.getElementById('leaderbanner');
+let lastLeaderId = null;
+function getLeaderboardEntries() {
+  const entries = [{ id: myId, initials: myInitials, score, color: myColor != null ? myColor : 0x12172c, isMe: true }];
+  for (const [id, rp] of remotePlayers) entries.push({ id, initials: rp.initials, score: rp.score, color: rp.color, isMe: false });
+  entries.sort((a, b) => b.score - a.score);
+  return entries;
+}
+function updateLeaderboard() {
+  if (!MULTIPLAYER_URL) return;
+  const entries = getLeaderboardEntries();
+  leaderboardEl.innerHTML = '<b>LEADERBOARD</b>' + entries.slice(0, 8).map((e, i) =>
+    `<div class="row"><span>${i + 1}. ${e.initials || '???'}${e.isMe ? ' (you)' : ''}</span><span>${e.score}</span></div>`
+  ).join('');
+  billboardPanel.redraw(drawLeaderboardPanel(entries));
+  // Only the client that JUST became #1 reports it (same "attacker/newly-
+  // true-condition reports once" shape as joust/knock in worker.js) --
+  // every other client just renders whatever banner arrives. Guarded on
+  // score > 0 so the game's opening instant (everyone tied at 0) doesn't
+  // fire a hollow "X is the new leader with 0 points!" the moment two
+  // players connect.
+  const leader = entries[0];
+  if (leader && leader.score > 0 && leader.id !== lastLeaderId) {
+    lastLeaderId = leader.id;
+    if (leader.isMe && mpSocket && mpSocket.readyState === WebSocket.OPEN) {
+      mpSocket.send(JSON.stringify({ type: 'leader', initials: myInitials || '???', score: leader.score }));
+    }
+  }
+}
+function showLeaderBanner(name, points) {
+  leaderbannerEl.textContent = `${name} is the new leader with ${points} points!`;
+  leaderbannerEl.style.opacity = '1';
+  clearTimeout(leaderbannerEl._hideT);
+  leaderbannerEl._hideT = setTimeout(() => { leaderbannerEl.style.opacity = '0'; }, 3200);
+}
 function updatePlayerCount() { playerCountTotalEl.textContent = knownPlayerIds.size + 1; }
 let mpSocket = null, myId = null, myColor = null, mpSendTimer = 0;
 const MP_SEND_INTERVAL = 1 / 15;
@@ -2364,7 +2488,8 @@ function makeRemotePlayerMesh(color) {
   const webLine2 = new Line2(webLineGeo2, webLineMat2);
   webLine2.visible = false;
   scene.add(webLine2);
-  return { body, coatSegs, webLine: webLine2, webLineGeo: webLineGeo2, webLineMat: webLineMat2 };
+  const nameTag = makeNameTag(body, '', color);
+  return { body, coatSegs, webLine: webLine2, webLineGeo: webLineGeo2, webLineMat: webLineMat2, nameTag };
 }
 
 function connectMultiplayer() {
@@ -2380,8 +2505,10 @@ function connectMultiplayer() {
       // white only in single player").
       webLineMat.color.setHex(myColor);
       spidey.material.color.setHex(myColor);   // body AND head share this one material (see makePawnBody)
+      refreshMyNameTag();   // name tag was drawn in the default suit color until now
       playerCountEl.style.display = 'block';
       updatePlayerCount();
+      leaderboardEl.style.display = 'block';
     } else if (msg.type === 'join' && msg.id !== myId) {
       // Someone connected but hasn't sent a position yet -- count them
       // immediately rather than waiting for their first 'state' (which is
@@ -2426,6 +2553,7 @@ function connectMultiplayer() {
       }
       knownPlayerIds.delete(msg.id);
       updatePlayerCount();
+      updateLeaderboard();   // departed player should vanish from the board immediately, and a new #1 may now apply
     } else if (msg.type === 'jousted') {
       if (msg.victimId === myId) {
         triggerGameOver();
@@ -2597,6 +2725,7 @@ renderer.setAnimationLoop(loop);
 // Debug hook -- lets anyone poke at live state from devtools without
 // needing a build step (e.g. `__sw.player.pos.set(x,y,z)` to teleport).
 window.__sw = { THREE, player, cars, parkedCars, pickups, colliders, EDGE, WORLD_BOUND,
+                rooftopCoins, stepRooftopCoins,
                 triggerGameOver, resetGame, checkKnocks, knockCar, respawn,
                 stepPickups, stepPlayer, stepTraffic, stepKnocked, stepExplosion,
                 zombies, spawnZombieWave, stepZombies, scene, spidey, coatSegs, camera,
