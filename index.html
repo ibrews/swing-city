@@ -2114,7 +2114,6 @@ for (const seg of coatSegs) seg.pos.copy(player.pos);   // avoid a first-frame u
 camera.position.copy(player.pos).add(new THREE.Vector3(0, 3, 10));
 let last = performance.now(), simT = 0, worldT = 0;
 function loop(now) {
-  requestAnimationFrame(loop);
   let dt = Math.min(0.033, (now - last) / 1000);
   last = now;
   simT += dt;
