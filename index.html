@@ -479,10 +479,52 @@ document.body.appendChild(VRButton.createButton(renderer));
 // controller model lines up with the real controller in the player's hand
 // with zero manual per-frame plumbing.
 const xrControllerModelFactory = new XRControllerModelFactory();
+const xrGrips = [];
 for (let i = 0; i < 2; i++) {
   const grip = renderer.xr.getControllerGrip(i);
   grip.add(xrControllerModelFactory.createControllerModel(grip));
   cameraRig.add(grip);
+  xrGrips.push(grip);
+}
+// BASIC ARM REPRESENTATION (Alex, VR playtest: "it's good to see the
+// controllers -- could you give us in VR two arms that are stretched cubes
+// that extend the same distance as the controllers and live a little under
+// them"). Each arm is a unit cube stretched (scale.z) between a fixed
+// shoulder anchor and the live controller-grip position, re-oriented every
+// frame -- not parented to anything, since the length/orientation has to
+// be recomputed from two independently-moving world points every frame
+// regardless. Shoulder anchors sit a bit below and in front of the camera
+// (chest-height, not eye-height), so an idle arm resting near the body
+// naturally angles down-and-out to the hand instead of sitting level with
+// the head -- the "live a little under them" part.
+const XR_ARM_THICKNESS = 0.11;
+const xrArmMat = new THREE.MeshStandardMaterial({ color: 0x12172c, roughness: 0.5 });
+const xrArms = [0, 1].map(() => {
+  const m = new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), xrArmMat);
+  m.visible = false;
+  scene.add(m);
+  return m;
+});
+const XR_SHOULDER_OFFSETS = [
+  new THREE.Vector3(-0.22, -0.35, -0.05),   // left
+  new THREE.Vector3(0.22, -0.35, -0.05),    // right
+];
+const xrArmHandWorld = new THREE.Vector3(), xrArmShoulderWorld = new THREE.Vector3(), xrArmMid = new THREE.Vector3();
+function updateXRArms() {
+  const presenting = renderer.xr.isPresenting;
+  for (let i = 0; i < 2; i++) {
+    const arm = xrArms[i];
+    arm.visible = presenting;
+    if (!presenting) continue;
+    xrGrips[i].getWorldPosition(xrArmHandWorld);
+    xrArmShoulderWorld.copy(XR_SHOULDER_OFFSETS[i]);
+    camera.localToWorld(xrArmShoulderWorld);
+    xrArmMid.copy(xrArmShoulderWorld).add(xrArmHandWorld).multiplyScalar(0.5);
+    const length = xrArmShoulderWorld.distanceTo(xrArmHandWorld);
+    arm.position.copy(xrArmMid);
+    arm.scale.set(XR_ARM_THICKNESS, XR_ARM_THICKNESS, Math.max(0.05, length));
+    arm.lookAt(xrArmHandWorld);
+  }
 }
 
 const composer = new EffectComposer(renderer);
@@ -3094,7 +3136,7 @@ function stepTouch(dt) {
 // controller's stick drives look (yaw/pitch, directly -- there's no
 // separate "xr look" primitive to combine, same as how the desktop
 // gamepad's right stick works). Either trigger fires the web/jump action.
-let xrWebHeld = false, xrMenuPrevPressed = false;
+let xrWebHeld = false, xrMenuPrevPressed = false, xrMenuHoldTime = 0;
 const xrKeys = {};
 function stepXR(dt) {
   const session = renderer.xr.getSession && renderer.xr.getSession();
@@ -3103,27 +3145,42 @@ function stepXR(dt) {
     xrKeys.KeyW = xrKeys.KeyS = xrKeys.KeyA = xrKeys.KeyD = xrKeys.ShiftLeft = false;
     return;
   }
-  let held = false, moveX = 0, moveY = 0, lookX = 0, lookY = 0, menuPressed = false;
+  let held = false, moveX = 0, moveY = 0, lookX = 0, lookY = 0, gripCount = 0;
   for (const src of session.inputSources) {
     const gp = src.gamepad;
     if (!gp) continue;
     if (gp.buttons[0] && gp.buttons[0].pressed) held = true;
-    // buttons[4]/[5] are the face buttons (A/X, B/Y) on the standard
-    // xr-standard mapping -- unused elsewhere, so either one doubles as
-    // "return to menu" (Alex: "we need a button to return to the main menu
-    // ... in non-VR and VR"). HTML overlays like #start don't composite
-    // into the WebXR framebuffer, so there's nothing to actually SHOW in
-    // headset -- the practical version of "open the menu" in VR is ending
-    // the immersive session, which drops back to the flat page where the
-    // (already-open) menu is visible, with score/position untouched.
-    if ((gp.buttons[4] && gp.buttons[4].pressed) || (gp.buttons[5] && gp.buttons[5].pressed)) menuPressed = true;
-    const ax = gp.axes[2] !== undefined ? gp.axes[2] : gp.axes[0];
-    const ay = gp.axes[3] !== undefined ? gp.axes[3] : gp.axes[1];
+    // Grip (squeeze), buttons[1] -- BOTH held together, not any single face
+    // button, doubles as "return to menu" (Alex: "we need a button to
+    // return to the main menu"). A face button (buttons[4]/[5]) firing
+    // instantly on its own turned out to be way too easy to bump by
+    // accident mid-play (Alex: "too many buttons kick you out of the
+    // experience") -- requiring BOTH grips together, held (see
+    // xrMenuHoldTime below), is a much more deliberate, hard-to-fumble
+    // gesture. HTML overlays like #start don't composite into the WebXR
+    // framebuffer, so there's nothing to actually SHOW in headset -- the
+    // practical version of "open the menu" in VR is ending the immersive
+    // session, which drops back to the flat page where the (already-open)
+    // menu is visible, with score/position untouched.
+    if (gp.buttons[1] && gp.buttons[1].pressed) gripCount++;
+    // xr-standard mapping: axes[2]/[3] are the thumbstick. Real-hardware
+    // playtest (Alex: "you made the joysticks all backwards -- up is down
+    // and down is up and left is right and right is left") found both
+    // axes inverted from what this mapping assumed -- negated here rather
+    // than re-deriving the "why" from spec, since the empirical report is
+    // unambiguous and covers all four directions on both sticks.
+    const ax = -(gp.axes[2] !== undefined ? gp.axes[2] : gp.axes[0]);
+    const ay = -(gp.axes[3] !== undefined ? gp.axes[3] : gp.axes[1]);
     if (src.handedness === 'right') { lookX = ax || 0; lookY = ay || 0; }
     else { moveX = ax || 0; moveY = ay || 0; }   // 'left' or 'none' -- default to movement
   }
-  if (menuPressed && !xrMenuPrevPressed) { openMenu(); session.end().catch(() => {}); }
-  xrMenuPrevPressed = menuPressed;
+  if (gripCount >= 2) {
+    xrMenuHoldTime += dt;
+    if (xrMenuHoldTime > 0.8 && !xrMenuPrevPressed) { xrMenuPrevPressed = true; openMenu(); session.end().catch(() => {}); }
+  } else {
+    xrMenuHoldTime = 0;
+    xrMenuPrevPressed = false;
+  }
   xrWebHeld = held;
   xrKeys.KeyW = moveY < -GAMEPAD_DEADZONE;
   xrKeys.KeyS = moveY > GAMEPAD_DEADZONE;
@@ -3422,6 +3479,19 @@ function stepPlayer(dt) {
   );
   const camTarget = renderer.xr.isPresenting ? cameraRig : camera;
   const eyeY = p.pos.y + 1.2;   // same head-height constant third-person already aimed at
+  // XR HEIGHT (Alex, VR playtest: "am I the right height? I feel tall").
+  // Three.js's WebXR manager defaults to the 'local-floor' reference
+  // space, which reports the headset's REAL height above the physical
+  // floor -- so the rig only needs to mark where the ground is; adding
+  // the synthetic `eyeY` (p.pos.y + 1.2) on top double-counts height,
+  // stacking a real ~1.6-1.8m human eye height on top of an extra ~2.1
+  // game units, making everyone almost twice as tall as intended.
+  // p.pos.y always sits exactly 0.9 above whatever surface the player is
+  // standing on (see the ground/roof collision clamps below), so
+  // `p.pos.y - 0.9` is the actual world-space ground level under the
+  // player -- the correct XR rig height, letting the real headset pose
+  // supply the rest.
+  const xrGroundY = p.pos.y - 0.9;
   // First-person sits the camera exactly at the pawn's own head position, so
   // the pawn mesh itself (body + head) is now surrounding the camera from
   // the inside -- render it and every frame is "seeing your own pawn from
@@ -3436,7 +3506,7 @@ function stepPlayer(dt) {
     // Sit exactly at head height, no offset -- first-person tracks the
     // head 1:1 (no lerp lag), which matters doubly in VR where any
     // positional lag on your own head reads as nausea, not smoothing.
-    camTarget.position.set(p.pos.x, eyeY, p.pos.z);
+    camTarget.position.set(p.pos.x, renderer.xr.isPresenting ? xrGroundY : eyeY, p.pos.z);
     camTarget.lookAt(camTarget.position.x + lookDir.x, camTarget.position.y + lookDir.y, camTarget.position.z + lookDir.z);
   } else {
     const camOff = lookDir.clone().multiplyScalar(-8.5);
@@ -3953,6 +4023,7 @@ function loop(now) {
     keys[k] = !!(kbKeyDown(k) || gpKeys[k] || tKeys[k] || xrKeys[k]);
   }
   stepPlayer(playerDt);
+  updateXRArms();
   stepMultiplayer(playerDt, player);
   if (!gameOver) stepPickups(simT, player);
   stepExplosion(dt);
@@ -4025,6 +4096,8 @@ window.__sw = { THREE, player, cars, parkedCars, pickups, colliders, EDGE, WORLD
                 get entered() { return entered; },
                 set entered(v) { entered = v; },
                 openMenu, closeMenu, get paused() { return paused; }, wallMat, WALL_CYCLE_SECONDS,
+                xrArms, xrGrips, updateXRArms,
+                get xrMenuHoldTime() { return xrMenuHoldTime; },
                 kbKeyDown, aimDir, fpStick,
                 stepXR, xrKeys, get xrWebHeld() { return xrWebHeld; },
                 cameraRig, renderer, enterGame,
