@@ -39,7 +39,13 @@
   #warntext { position: fixed; left: 50%; bottom: 18%; transform: translateX(-50%);
     color: #ff3b4d; font: 16px/1.4 ui-monospace, Menlo, monospace; text-shadow: 0 0 10px #ff1a2e;
     z-index: 14; opacity: 0; pointer-events: none; letter-spacing: 2px; text-align: center; }
-  #score { position: fixed; right: 14px; top: 12px; color: #ffe27a; z-index: 10;
+  #playercount { position: fixed; right: 14px; top: 12px; color: #6bd4ff; z-index: 10;
+    font: 12px ui-monospace, Menlo, monospace; text-shadow: 0 0 6px #08a; letter-spacing: 1px;
+    user-select: none; pointer-events: none; text-align: right; display: none; }
+  /* #score sits below #playercount's slot unconditionally -- simpler than
+     conditionally repositioning it in JS based on multiplayer state, at
+     the cost of a small unused gap above the score box in single-player. */
+  #score { position: fixed; right: 14px; top: 34px; color: #ffe27a; z-index: 10;
     font: 13px/1.5 ui-monospace, Menlo, monospace; text-shadow: 0 0 6px #a80;
     user-select: none; pointer-events: none; text-align: right; }
   #powerups { position: fixed; right: 14px; top: 76px; z-index: 10; text-align: right;
@@ -97,6 +103,7 @@
 <div id="warnvignette"></div>
 <div id="warntext">LEAVING THE CITY &mdash; GET BACK</div>
 <div id="hud">web: <b id="webstate">ready</b> · speed: <b id="speed">0</b></div>
+<div id="playercount">PLAYERS: <b id="playercounttotal">1</b></div>
 <div id="score">score: <b id="scoretotal">0</b><br>cars knocked: <b id="knocked">0</b><br>orbs: <b id="orbs">0</b>/<b id="orbstotal">0</b></div>
 <div id="powerups"></div>
 <div id="zombiewarn">ZOMBIES INBOUND</div>
@@ -1132,7 +1139,17 @@ function stepKnocked(list, dt, isParked) {
         if (axis === 5) { pos.z = c.max[2] + CR; if (k.vel.z < 0) k.vel.z *= -0.2; }
       }
 
-      if (entry.obj.position.y < 0.25) {
+      // ROOT CAUSE of "cars don't ever flip or roll -- they just stop"
+      // (Alex): cars always spawn at y=0, so the very first frame of ANY
+      // knock only climbs to ~vel.y*dt (a fraction of a unit) -- nowhere
+      // near clearing the 0.25 ground threshold below on its own. Without
+      // the vel.y<=0 guard, that first ascending frame read as "already
+      // below ground level," snapped straight to grounded+zero-velocity,
+      // and the launch never got a chance to actually happen. Every single
+      // knock silently died on frame one. Now only settles while FALLING
+      // back down (mirrors how the player's own ground clamp already
+      // guards on vel.y<0 elsewhere in this file).
+      if (entry.obj.position.y < 0.25 && k.vel.y <= 0) {
         entry.obj.position.y = 0.25; k.vel.set(0, 0, 0); k.ang.multiplyScalar(0.15); k.grounded = true;
       }
     }
@@ -2051,6 +2068,13 @@ function stepPlayer(dt) {
 // that report back out to everyone, including the victim.
 const MULTIPLAYER_URL = new URLSearchParams(location.search).get('mp') || '';
 const remotePlayers = new Map();   // id -> { body, coatSegs, webLine, webLineGeo, targetPos, targetYaw, prevPos, vel, anchorPos, color }
+// Separate from remotePlayers.size -- a player counts toward the total the
+// moment they JOIN, not only once their avatar actually spawns on the
+// first 'state' message (which can lag a beat behind connecting).
+const knownPlayerIds = new Set();
+const playerCountEl = document.getElementById('playercount');
+const playerCountTotalEl = document.getElementById('playercounttotal');
+function updatePlayerCount() { playerCountTotalEl.textContent = knownPlayerIds.size + 1; }
 let mpSocket = null, myId = null, myColor = null, mpSendTimer = 0;
 const MP_SEND_INTERVAL = 1 / 15;
 // JOUST, ROUND 2 (Alex: "only landing on their head, fairly generous hitbox,
@@ -2104,6 +2128,15 @@ function connectMultiplayer() {
       // white only in single player").
       webLineMat.color.setHex(myColor);
       spidey.material.color.setHex(myColor);   // body AND head share this one material (see makePawnBody)
+      playerCountEl.style.display = 'block';
+      updatePlayerCount();
+    } else if (msg.type === 'join' && msg.id !== myId) {
+      // Someone connected but hasn't sent a position yet -- count them
+      // immediately rather than waiting for their first 'state' (which is
+      // what actually spawns their avatar). Total should reflect who's in
+      // the room, not just who's currently rendered.
+      knownPlayerIds.add(msg.id);
+      updatePlayerCount();
     } else if (msg.type === 'state' && msg.id !== myId) {
       let rp = remotePlayers.get(msg.id);
       if (!rp) {
@@ -2118,6 +2151,8 @@ function connectMultiplayer() {
         }, makeRemotePlayerMesh(msg.color));
         rp.body.position.copy(rp.targetPos);
         remotePlayers.set(msg.id, rp);
+        knownPlayerIds.add(msg.id);
+        updatePlayerCount();
       }
       rp.targetPos.set(msg.pos[0], msg.pos[1], msg.pos[2]);
       rp.targetYaw = msg.yaw;
@@ -2130,6 +2165,8 @@ function connectMultiplayer() {
         for (const seg of rp.coatSegs) scene.remove(seg.mesh);
         remotePlayers.delete(msg.id);
       }
+      knownPlayerIds.delete(msg.id);
+      updatePlayerCount();
     } else if (msg.type === 'jousted') {
       if (msg.victimId === myId) {
         triggerGameOver();
@@ -2340,7 +2377,8 @@ window.__sw = { THREE, player, cars, parkedCars, pickups, colliders, EDGE, WORLD
                 get myId() { return myId; }, set myId(v) { myId = v; },
                 MULTIPLAYER_URL,
                 get myColor() { return myColor; }, webLine, spidey,
-                playerKnockCooldowns, makePawnBody, makeCoat, stepCoatFor };
+                playerKnockCooldowns, makePawnBody, makeCoat, stepCoatFor,
+                knownPlayerIds, updatePlayerCount, playerCountEl };
 </script>
 </body>
 </html>
