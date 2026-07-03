@@ -1439,20 +1439,31 @@ function respawn() {
 // bolder: white eyes stay, but the chest mark is now red (not white) and
 // bigger, and the coat gets a red lining that peeks from behind it -- Alex's
 // "maybe we get some red in there."
-const suitMat = new THREE.MeshStandardMaterial({ color: 0x12172c, roughness: 0.4, metalness: 0.1 });
+// PAWN FACTORY (Alex, multiplayer round: "all players should use the same
+// pawn, just with different colors") -- the suit box+head+eyes+chest-mark
+// rig is now a function of a suit color instead of a one-off singleton, so
+// the exact same character can be instantiated once for the local player
+// and once per remote player, each tinted to its assigned color. Eyes
+// (white) and chest mark (red) stay fixed accents on every instance --
+// that consistency IS what reads as "the same pawn."
 const suitGlow = new THREE.MeshBasicMaterial({ color: 0xf2f6ff });
 const suitRed = new THREE.MeshBasicMaterial({ color: 0xff2a3a });
-const spidey = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.9, 0.35), suitMat);
-const spideyHead = new THREE.Mesh(new THREE.BoxGeometry(0.32, 0.3, 0.3), suitMat);
-spideyHead.position.y = 0.62; spidey.add(spideyHead);
-for (const ex of [-0.09, 0.09]) {
-  const eye = new THREE.Mesh(new THREE.BoxGeometry(0.09, 0.05, 0.02), suitGlow);
-  eye.position.set(ex, 0.66, 0.16);
-  spidey.add(eye);
+function makePawnBody(suitColor) {
+  const suitMat = new THREE.MeshStandardMaterial({ color: suitColor, roughness: 0.4, metalness: 0.1 });
+  const body = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.9, 0.35), suitMat);
+  const head = new THREE.Mesh(new THREE.BoxGeometry(0.32, 0.3, 0.3), suitMat);
+  head.position.y = 0.62; body.add(head);
+  for (const ex of [-0.09, 0.09]) {
+    const eye = new THREE.Mesh(new THREE.BoxGeometry(0.09, 0.05, 0.02), suitGlow);
+    eye.position.set(ex, 0.66, 0.16);
+    body.add(eye);
+  }
+  const chestMark = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.28, 0.02), suitRed);
+  chestMark.position.set(0, 0.05, 0.18);
+  body.add(chestMark);
+  return body;
 }
-const chestMark = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.28, 0.02), suitRed);
-chestMark.position.set(0, 0.05, 0.18);
-spidey.add(chestMark);
+const spidey = makePawnBody(0x12172c);
 scene.add(spidey);
 
 // TRENCHCOAT (Alex: "basic groom physics of wearing a dark blue trench-
@@ -1467,29 +1478,39 @@ scene.add(spidey);
 // read as a separate object. Also added a thin red lining peeking from
 // behind each panel (his "maybe we get some red in there") -- a child mesh
 // on each segment, so it inherits the same lerp/lookAt transform for free.
+// Coat is also now a factory (same "same pawn" multiplayer reasoning as
+// makePawnBody above) -- design stays fixed per instance (blue + red
+// lining is Alex's established look, not something that should vary by
+// player color and clash), but each pawn needs its OWN independent chain
+// of segments since they're positioned per-instance every frame.
 const COAT_N = 5;
 const coatMat = new THREE.MeshStandardMaterial({ color: 0x3f72e8, roughness: 0.6, metalness: 0.05 });
 const coatLiningMat = new THREE.MeshBasicMaterial({ color: 0xdd1f2f });
-const coatSegs = [];
-for (let i = 0; i < COAT_N; i++) {
-  const mesh = new THREE.Mesh(new THREE.BoxGeometry(0.46 - i * 0.03, 0.34, 0.05), coatMat);
-  const lining = new THREE.Mesh(new THREE.BoxGeometry(0.5 - i * 0.03, 0.38, 0.02), coatLiningMat);
-  lining.position.z = -0.045;
-  mesh.add(lining);
-  scene.add(mesh);
-  coatSegs.push({ mesh, pos: new THREE.Vector3() });
-}
-function stepCoat(p) {
-  let prev = p.pos.clone().add(new THREE.Vector3(0, 0.55, 0));
+function makeCoat() {
+  const segs = [];
   for (let i = 0; i < COAT_N; i++) {
-    const seg = coatSegs[i];
-    const target = prev.clone().add(new THREE.Vector3(0, -0.33, 0)).addScaledVector(p.vel, -0.028);
+    const mesh = new THREE.Mesh(new THREE.BoxGeometry(0.46 - i * 0.03, 0.34, 0.05), coatMat);
+    const lining = new THREE.Mesh(new THREE.BoxGeometry(0.5 - i * 0.03, 0.38, 0.02), coatLiningMat);
+    lining.position.z = -0.045;
+    mesh.add(lining);
+    scene.add(mesh);
+    segs.push({ mesh, pos: new THREE.Vector3() });
+  }
+  return segs;
+}
+function stepCoatFor(segs, pos, vel) {
+  let prev = pos.clone().add(new THREE.Vector3(0, 0.55, 0));
+  for (let i = 0; i < COAT_N; i++) {
+    const seg = segs[i];
+    const target = prev.clone().add(new THREE.Vector3(0, -0.33, 0)).addScaledVector(vel, -0.028);
     seg.pos.lerp(target, 0.4);
     seg.mesh.position.copy(seg.pos);
     seg.mesh.lookAt(prev);
     prev = seg.pos;
   }
 }
+const coatSegs = makeCoat();
+function stepCoat(p) { stepCoatFor(coatSegs, p.pos, p.vel); }
 // WEB LINE VISIBILITY FIX (Alex: "sometimes I can't see the web"): the old
 // webLine was a plain THREE.Line, which draws via WebGL's native gl.LINE_WIDTH
 // -- and most GPU drivers (ANGLE/Windows especially, but plenty of others
@@ -2029,21 +2050,45 @@ function stepPlayer(dt) {
 // collision in this file uses, and reported once; the server just fans
 // that report back out to everyone, including the victim.
 const MULTIPLAYER_URL = new URLSearchParams(location.search).get('mp') || '';
-const remotePlayers = new Map();   // id -> { mesh, targetPos, targetYaw }
-let mpSocket = null, myId = null, mpSendTimer = 0;
+const remotePlayers = new Map();   // id -> { body, coatSegs, webLine, webLineGeo, targetPos, targetYaw, prevPos, vel, anchorPos, color }
+let mpSocket = null, myId = null, myColor = null, mpSendTimer = 0;
 const MP_SEND_INTERVAL = 1 / 15;
-const JOUST_RADIUS = 1.1, JOUST_HEIGHT_MIN = 0.3, JOUST_HEIGHT_MAX = 1.6, JOUST_MIN_FALL_SPEED = -3;
+// JOUST, ROUND 2 (Alex: "only landing on their head, fairly generous hitbox,
+// should instakill"). Round 1's height band (0.3-1.6) covered nearly the
+// entire body -- landing anywhere on someone insta-killed them, not just
+// the head. The pawn's head box is a child at local y=0.62 +/-0.15 off the
+// body origin (see makePawnBody), so a grounded target's head spans roughly
+// world y = pos.y+1.1 to pos.y+2.0 once you add their ground-clamp height --
+// narrowed the height band to just that range. XZ stays (and grows a touch)
+// generous since "fairly generous hitbox" was specifically about forgiving
+// aim, not a bigger kill zone vertically.
+const JOUST_RADIUS = 1.3, JOUST_HEIGHT_MIN = 1.1, JOUST_HEIGHT_MAX = 2.0, JOUST_MIN_FALL_SPEED = -3;
+// Player-vs-player BODY collision/knock (Alex: "we should be able to knock
+// each other around just like cars... knocking another player out of the
+// map should be possible"). Same two-tier shape as car collision: close
+// contact under knock speed = soft push-out (self-only, no network message
+// needed -- both clients independently see and react to the same
+// proximity, so it's naturally symmetric); at or above knock speed = a
+// real launch. Deliberately excludes the joust height band above so a
+// head-stomp doesn't ALSO fire a body knock in the same frame.
+const PLAYER_SOLID_RADIUS = 0.85, PLAYER_HEIGHT_GATE = 1.6, PLAYER_KNOCK_SPEED = KNOCK_SPEED;
+const playerKnockCooldowns = new Map();   // victim id -> seconds remaining
 
 function makeRemotePlayerMesh(color) {
-  const g = new THREE.Group();
-  const mat = new THREE.MeshStandardMaterial({ color, roughness: 0.5, metalness: 0.2, emissive: color, emissiveIntensity: 0.15 });
-  const body = new THREE.Mesh(new THREE.CapsuleGeometry(0.32, 0.9, 4, 8), mat);
-  body.position.y = 0.75;
-  const head = new THREE.Mesh(new THREE.SphereGeometry(0.26, 10, 8), mat);
-  head.position.y = 1.5;
-  g.add(body, head);
-  scene.add(g);
-  return g;
+  // Same pawn every player uses (Alex: "all players should use the same
+  // pawn, just with different colors") -- the exact factories the local
+  // player is built from, just tinted and given their own coat instance.
+  const body = makePawnBody(color);
+  scene.add(body);
+  const coatSegs = makeCoat();
+  const webLineMat2 = new LineMaterial({ color, linewidth: 3, transparent: true, opacity: 0.95 });
+  webLineMat2.resolution.set(innerWidth, innerHeight);
+  const webLineGeo2 = new LineGeometry();
+  webLineGeo2.setPositions([0, 0, 0, 0, 0, 0]);
+  const webLine2 = new Line2(webLineGeo2, webLineMat2);
+  webLine2.visible = false;
+  scene.add(webLine2);
+  return { body, coatSegs, webLine: webLine2, webLineGeo: webLineGeo2, webLineMat: webLineMat2 };
 }
 
 function connectMultiplayer() {
@@ -2053,6 +2098,12 @@ function connectMultiplayer() {
     let msg; try { msg = JSON.parse(e.data); } catch { return; }
     if (msg.type === 'welcome') {
       myId = msg.id;
+      myColor = msg.color;
+      // Own web line switches from the single-player white to the color
+      // everyone else now sees you as -- WYSIWYG (Alex: "color coded --
+      // white only in single player").
+      webLineMat.color.setHex(myColor);
+      spidey.material.color.setHex(myColor);   // body AND head share this one material (see makePawnBody)
     } else if (msg.type === 'state' && msg.id !== myId) {
       let rp = remotePlayers.get(msg.id);
       if (!rp) {
@@ -2060,15 +2111,25 @@ function connectMultiplayer() {
         // see multiplayer/worker.js) and rides along on every state
         // broadcast for that player, so each remote avatar renders in
         // ITS OWN random color instead of one shared placeholder.
-        rp = { mesh: makeRemotePlayerMesh(msg.color), targetPos: new THREE.Vector3(), targetYaw: 0 };
+        rp = Object.assign({
+          targetPos: new THREE.Vector3(msg.pos[0], msg.pos[1], msg.pos[2]),
+          targetYaw: 0, prevPos: new THREE.Vector3(msg.pos[0], msg.pos[1], msg.pos[2]),
+          vel: new THREE.Vector3(), anchorPos: null, color: msg.color,
+        }, makeRemotePlayerMesh(msg.color));
+        rp.body.position.copy(rp.targetPos);
         remotePlayers.set(msg.id, rp);
       }
       rp.targetPos.set(msg.pos[0], msg.pos[1], msg.pos[2]);
       rp.targetYaw = msg.yaw;
-      rp.mesh.visible = msg.alive !== false;
+      rp.anchorPos = msg.anchor ? new THREE.Vector3(msg.anchor[0], msg.anchor[1], msg.anchor[2]) : null;
+      rp.body.visible = msg.alive !== false;
     } else if (msg.type === 'leave') {
       const rp = remotePlayers.get(msg.id);
-      if (rp) { scene.remove(rp.mesh); remotePlayers.delete(msg.id); }
+      if (rp) {
+        scene.remove(rp.body, rp.webLine);
+        for (const seg of rp.coatSegs) scene.remove(seg.mesh);
+        remotePlayers.delete(msg.id);
+      }
     } else if (msg.type === 'jousted') {
       if (msg.victimId === myId) {
         triggerGameOver();
@@ -2078,8 +2139,21 @@ function connectMultiplayer() {
         // -- "the other players explode" should be visible to whoever's
         // watching, not just to the victim.
         const rp = remotePlayers.get(msg.victimId);
-        if (rp) explode(rp.mesh.position);
+        if (rp) explode(rp.body.position);
       }
+    } else if (msg.type === 'knocked' && msg.victimId === myId && !gameOver) {
+      // A knock only ever arrives naming YOU -- the attacker's client
+      // detected the hit (it can't move your physics directly, there's no
+      // server authority here, so it reports and your own client applies
+      // the impulse to itself). Same launch shape as a car knock, scaled
+      // by the attacker-reported momentum.
+      const dir = new THREE.Vector3(msg.dir[0], msg.dir[1], msg.dir[2]);
+      const momentum = Math.min(2.2, Math.max(1, msg.momentum || 1));
+      player.vel.copy(dir).multiplyScalar(uniform(5, 8) * momentum);
+      player.vel.y = uniform(4, 7) * momentum;
+      player.anchor = null;
+      player.onGround = false;
+      sfxKnock(player.pos);
     }
   });
   mpSocket.addEventListener('close', () => { mpSocket = null; setTimeout(connectMultiplayer, 3000); });
@@ -2089,25 +2163,57 @@ connectMultiplayer();
 
 function stepMultiplayer(dt, p) {
   if (!MULTIPLAYER_URL) return;
-  // Updates arrive at MP_SEND_INTERVAL, not every frame -- lerp toward the
-  // last-known state so remote players glide instead of stepping.
-  for (const rp of remotePlayers.values()) {
-    rp.mesh.position.lerp(rp.targetPos, Math.min(1, dt * 10));
-    rp.mesh.rotation.y = rp.targetYaw;
+  for (const id of playerKnockCooldowns.keys()) {
+    const t = playerKnockCooldowns.get(id) - dt;
+    if (t <= 0) playerKnockCooldowns.delete(id); else playerKnockCooldowns.set(id, t);
   }
-  // JOUST: am I currently landing on top of someone? Close enough in XZ,
-  // above them by a small margin, and actually falling with real force
-  // (not just standing adjacent) -- same min-penetration-style proximity
-  // check the rest of this game's collision uses.
-  if (!gameOver && p.vel.y < JOUST_MIN_FALL_SPEED) {
-    for (const [id, rp] of remotePlayers) {
-      const dx = p.pos.x - rp.mesh.position.x, dz = p.pos.z - rp.mesh.position.z;
-      const heightAbove = p.pos.y - rp.mesh.position.y;
-      if (Math.hypot(dx, dz) < JOUST_RADIUS && heightAbove > JOUST_HEIGHT_MIN && heightAbove < JOUST_HEIGHT_MAX) {
+  // Updates arrive at MP_SEND_INTERVAL, not every frame -- lerp toward the
+  // last-known state so remote players glide instead of stepping. Velocity
+  // is derived from the ACTUAL lerped motion (not the raw network target),
+  // so the coat streams correctly during the smoothed glide, not just at
+  // the moment a new packet arrives.
+  for (const rp of remotePlayers.values()) {
+    rp.prevPos.copy(rp.body.position);
+    rp.body.position.lerp(rp.targetPos, Math.min(1, dt * 10));
+    rp.body.rotation.y = rp.targetYaw;
+    rp.vel.copy(rp.body.position).sub(rp.prevPos).divideScalar(Math.max(dt, 1e-4));
+    stepCoatFor(rp.coatSegs, rp.body.position, rp.vel);
+    if (rp.anchorPos) {
+      rp.webLine.visible = true;
+      rp.webLineGeo.setPositions([rp.body.position.x, rp.body.position.y, rp.body.position.z, rp.anchorPos.x, rp.anchorPos.y, rp.anchorPos.z]);
+    } else rp.webLine.visible = false;
+  }
+  if (!gameOver) for (const [id, rp] of remotePlayers) {
+    const dx = p.pos.x - rp.body.position.x, dz = p.pos.z - rp.body.position.z;
+    const dist = Math.hypot(dx, dz);
+    const heightAbove = p.pos.y - rp.body.position.y;
+    // JOUST: am I currently landing on top of someone's HEAD? Close enough
+    // in XZ, in the head's height band specifically, and actually falling
+    // with real force (not just standing adjacent).
+    if (p.vel.y < JOUST_MIN_FALL_SPEED && dist < JOUST_RADIUS &&
+        heightAbove > JOUST_HEIGHT_MIN && heightAbove < JOUST_HEIGHT_MAX) {
+      if (mpSocket && mpSocket.readyState === WebSocket.OPEN) {
+        mpSocket.send(JSON.stringify({ type: 'joust', victimId: id }));
+      }
+      p.vel.y = JUMP_VEL_NORMAL * 0.6;   // a little bounce off the kill, Mario-stomp style
+      continue;   // a head-stomp this frame shouldn't ALSO resolve as a body knock below
+    }
+    // BODY: regular contact -- soft push if slow, a real knock if fast.
+    if (dist < PLAYER_SOLID_RADIUS && Math.abs(heightAbove) < PLAYER_HEIGHT_GATE) {
+      const speed = p.vel.length();
+      if (speed >= PLAYER_KNOCK_SPEED && !playerKnockCooldowns.has(id)) {
+        playerKnockCooldowns.set(id, 0.6);
         if (mpSocket && mpSocket.readyState === WebSocket.OPEN) {
-          mpSocket.send(JSON.stringify({ type: 'joust', victimId: id }));
+          const dir = dist > 1e-4 ? [-dx / dist, 0.15, -dz / dist] : [0, 0.15, 1];
+          mpSocket.send(JSON.stringify({ type: 'knock', victimId: id, dir, momentum: speed / KNOCK_SPEED }));
         }
-        p.vel.y = JUMP_VEL_NORMAL * 0.6;   // a little bounce off the kill, Mario-stomp style
+        sfxKnock(rp.body.position);
+      } else if (dist > 1e-4) {
+        const nx = dx / dist, nz = dz / dist;
+        p.pos.x += nx * (PLAYER_SOLID_RADIUS - dist);
+        p.pos.z += nz * (PLAYER_SOLID_RADIUS - dist);
+        const vIn = p.vel.x * nx + p.vel.z * nz;
+        if (vIn < 0) { p.vel.x -= vIn * nx; p.vel.z -= vIn * nz; }
       }
     }
   }
@@ -2116,7 +2222,7 @@ function stepMultiplayer(dt, p) {
     mpSendTimer = MP_SEND_INTERVAL;
     mpSocket.send(JSON.stringify({
       pos: [p.pos.x, p.pos.y, p.pos.z], type: 'state',
-      yaw: spidey.rotation.y, anchor: !!p.anchor, alive: !gameOver,
+      yaw: spidey.rotation.y, anchor: p.anchor ? [p.anchor.x, p.anchor.y, p.anchor.z] : null, alive: !gameOver,
     }));
   }
 }
@@ -2232,7 +2338,9 @@ window.__sw = { THREE, player, cars, parkedCars, pickups, colliders, EDGE, WORLD
                 remotePlayers, stepMultiplayer, makeRemotePlayerMesh, connectMultiplayer,
                 get mpSocket() { return mpSocket; }, set mpSocket(v) { mpSocket = v; },
                 get myId() { return myId; }, set myId(v) { myId = v; },
-                MULTIPLAYER_URL };
+                MULTIPLAYER_URL,
+                get myColor() { return myColor; }, webLine, spidey,
+                playerKnockCooldowns, makePawnBody, makeCoat, stepCoatFor };
 </script>
 </body>
 </html>
