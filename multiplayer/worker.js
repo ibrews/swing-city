@@ -25,10 +25,31 @@
 
 const COLORS = [0xff5566, 0x55ddff, 0xffe066, 0x8fff8f, 0xc98fff, 0xff9f4d];
 
+// Daily leaderboard (Alex: "a daily leaderboard, separate from the current
+// session... refresh all the scores" at midnight EST). No cron/reset job
+// needed: the board is keyed by the current EST calendar date, so a new day
+// simply reads/writes a fresh, empty key -- storage for old dates is just
+// never touched again (Durable Object storage is cheap enough not to
+// bother expiring it). Uses `state.storage` (not in-memory), so it survives
+// the DO being evicted between bursts of traffic, same as any other
+// Cloudflare Durable Object persistence.
+const EST_FMT = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit' });
+function estDateKey() { return EST_FMT.format(new Date()); }
+
 export class Room {
   constructor(state, env) {
     this.state = state;
     this.env = env;
+  }
+
+  async loadDailyBoard() {
+    const dateKey = estDateKey();
+    const board = (await this.state.storage.get('daily:' + dateKey)) || {};
+    return { dateKey, board };
+  }
+
+  dailyTop(board) {
+    return Object.values(board).sort((a, b) => b.score - a.score).slice(0, 8);
   }
 
   async fetch(request) {
@@ -61,6 +82,9 @@ export class Room {
       // actually appears to others once it sends its first state update.
       ws.send(JSON.stringify({ type: 'join', id, color }));
     }
+
+    const { dateKey, board } = await this.loadDailyBoard();
+    server.send(JSON.stringify({ type: 'dailyboard', date: dateKey, entries: this.dailyTop(board) }));
 
     return new Response(null, { status: 101, webSocket: client });
   }
@@ -108,6 +132,21 @@ export class Room {
       // sees their own banner, same as an attacker sees its own joust
       // resolve.
       this.broadcast({ type: 'leader', id, initials: msg.initials.slice(0, 3).toUpperCase(), score: msg.score });
+    } else if (msg.type === 'dailyscore' && typeof msg.initials === 'string' && typeof msg.score === 'number') {
+      // Daily leaderboard entry -- persisted (unlike everything else in this
+      // file), keyed by EST calendar date so it naturally resets at
+      // midnight EST without a cron job (see estDateKey/loadDailyBoard).
+      // Client sends this only when ITS OWN score just beat its own prior
+      // best (see updateLeaderboard in index.html), so this only ever
+      // ratchets up, never down.
+      const { dateKey, board } = await this.loadDailyBoard();
+      const initials = msg.initials.slice(0, 3).toUpperCase();
+      const prev = board[id];
+      if (!prev || msg.score > prev.score) {
+        board[id] = { initials, score: msg.score };
+        await this.state.storage.put('daily:' + dateKey, board);
+      }
+      this.broadcast({ type: 'dailyboard', date: dateKey, entries: this.dailyTop(board) });
     } else if (msg.type === 'powerkill' && typeof msg.victimId === 'string') {
       // Energy blast / pong / bomber instakill -- generalized joust: one
       // message type instead of three, since the client-side effect (named

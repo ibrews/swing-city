@@ -78,6 +78,16 @@
     border: 1px solid #1e3a52; border-radius: 4px; padding: 6px 10px; min-width: 150px; }
   #leaderboard b { color: #ff64c8; letter-spacing: 1px; }
   #leaderboard .row { display: flex; justify-content: space-between; gap: 10px; }
+  /* Daily leaderboard (Alex: "a daily leaderboard, separate from the
+     current session... refreshed at midnight EST") -- stacks directly
+     under the session board, same left-side HUD column, dimmer accent so
+     the two are readable as separate lists at a glance. */
+  #dailyboard { position: fixed; left: 14px; top: 210px; color: #ffcf6b; z-index: 10;
+    font: 12px/1.6 ui-monospace, Menlo, monospace; text-shadow: 0 0 6px #a60;
+    user-select: none; pointer-events: none; display: none; background: #1c130499;
+    border: 1px solid #52401e; border-radius: 4px; padding: 6px 10px; min-width: 150px; }
+  #dailyboard b { color: #ffe27a; letter-spacing: 1px; }
+  #dailyboard .row { display: flex; justify-content: space-between; gap: 10px; }
   #leaderbanner { position: fixed; left: 50%; top: 20%; transform: translateX(-50%);
     color: #ffe27a; font: 20px/1.4 ui-monospace, Menlo, monospace; text-shadow: 0 0 14px #ff8c00;
     z-index: 14; opacity: 0; pointer-events: none; letter-spacing: 1px; text-align: center;
@@ -136,6 +146,7 @@
 <div id="combotext"></div>
 <div id="powerbanner"></div>
 <div id="leaderboard"></div>
+<div id="dailyboard"></div>
 <div id="leaderbanner"></div>
 <div id="touchjoyBase"></div>
 <div id="touchjoyThumb"></div>
@@ -2052,7 +2063,17 @@ beamLineMat.resolution.set(innerWidth, innerHeight);
 const beamLine = new Line2(beamLineGeo, beamLineMat);
 scene.add(beamLine);
 
-function aimDir() { const d = new THREE.Vector3(); camera.getWorldDirection(d); return d; }
+// Desktop/third-person: camera look direction IS travel direction, so aim
+// off the camera itself. In XR the headset can look off-axis from where
+// you're actually traveling (e.g. a sideways glance while moving straight
+// ahead) -- aiming pong balls/energy blasts/webs off raw head gaze then
+// fires them off to the side of your actual heading. Aim off the rig's
+// forward instead: it tracks yaw, the move-stick-driven heading.
+function aimDir() {
+  const d = new THREE.Vector3();
+  (renderer.xr.isPresenting ? cameraRig : camera).getWorldDirection(d);
+  return d;
+}
 
 // ENERGY BLAST: auto-fires forward every ~0.6s while active (no new input
 // binding introduced -- the manifest didn't specify a trigger key, so this
@@ -2549,8 +2570,7 @@ const raycaster = new THREE.Raycaster();
 // rope so the BOTTOM of the swing arc clears the street — an unclamped rope
 // longer than your altitude slams you into the pavement mid-swing.
 function findAnchor() {
-  const fwd = new THREE.Vector3();
-  camera.getWorldDirection(fwd);
+  const fwd = aimDir();
   const up = new THREE.Vector3(0, 1, 0);
   const right = fwd.clone().cross(up).normalize();
   let best = null;
@@ -2572,7 +2592,7 @@ function tryAttach() {
   // point as a REAL anchor when nothing's actually in range -- "always
   // finds a phantom attach point even with nothing real to grab."
   if (!a && myEffectActive('webanywhere')) {
-    const f2 = new THREE.Vector3(); camera.getWorldDirection(f2); f2.y = 0; f2.normalize();
+    const f2 = aimDir(); f2.y = 0; f2.normalize();
     a = player.pos.clone().addScaledVector(f2, 3).add(new THREE.Vector3(0, 4.2, 0));
   }
   if (!a) return false;
@@ -2595,7 +2615,7 @@ function tryAttach() {
   // always MOVES you instead of leaving you dangling
   const hSpeed = Math.hypot(player.vel.x, player.vel.z);
   if (hSpeed < 7) {
-    const f = new THREE.Vector3(); camera.getWorldDirection(f);
+    const f = aimDir();
     f.y = 0; f.normalize();
     player.vel.addScaledVector(f, 7 - hSpeed);
   }
@@ -2611,7 +2631,7 @@ function tryAttach() {
 function fireWeb(boosted) {
   const found = tryAttach();
   if (found) return;
-  const f2 = new THREE.Vector3(); camera.getWorldDirection(f2); f2.y = 0; f2.normalize();
+  const f2 = aimDir(); f2.y = 0; f2.normalize();
   if (boosted) {
     player.vel.y = (jumpBoostTimer > 0 ? JUMP_VEL_BOOSTED * 0.85 : JUMP_VEL_NORMAL) * (myEffectActive('superjump') ? SUPERJUMP_MULT : 1);
     player.vel.addScaledVector(f2, 3.5);
@@ -3271,12 +3291,31 @@ function updateLeaderboard() {
       mpSocket.send(JSON.stringify({ type: 'leader', initials: myInitials || '???', score: leader.score }));
     }
   }
+  // Daily leaderboard entry: report OUR OWN score only when it just beat our
+  // own prior-reported best (never on every tick -- that'd spam the DO's
+  // persisted storage with writes for no reason since only the max matters).
+  if (score > 0 && score > lastDailyScoreSent && mpSocket && mpSocket.readyState === WebSocket.OPEN) {
+    lastDailyScoreSent = score;
+    mpSocket.send(JSON.stringify({ type: 'dailyscore', initials: myInitials || '???', score }));
+  }
 }
 function showLeaderBanner(name, points) {
   leaderbannerEl.textContent = `${name} is the new leader with ${points} points!`;
   leaderbannerEl.style.opacity = '1';
   clearTimeout(leaderbannerEl._hideT);
   leaderbannerEl._hideT = setTimeout(() => { leaderbannerEl.style.opacity = '0'; }, 3200);
+}
+// DAILY LEADERBOARD (Alex: "a daily leaderboard, separate from the current
+// session... refreshed at midnight EST"). Unlike the session board, this is
+// server-persisted (worker.js keys it by EST calendar date) -- the client
+// only renders whatever the DO sends in 'dailyboard' messages, it never
+// computes this list locally.
+const dailyboardEl = document.getElementById('dailyboard');
+let lastDailyScoreSent = 0;
+function renderDailyboard(entries) {
+  dailyboardEl.innerHTML = '<b>TODAY</b>' + entries.slice(0, 8).map((e, i) =>
+    `<div class="row"><span>${i + 1}. ${e.initials || '???'}</span><span>${e.score}</span></div>`
+  ).join('');
 }
 function updatePlayerCount() { playerCountTotalEl.textContent = knownPlayerIds.size + 1; }
 let mpSocket = null, myId = null, myColor = null, mpSendTimer = 0;
@@ -3371,6 +3410,7 @@ function connectMultiplayer() {
       updatePlayerCount();
       leaderboardEl.style.display = 'block';
       updateLeaderboard();
+      dailyboardEl.style.display = 'block';
     } else if (msg.type === 'join' && msg.id !== myId) {
       // Someone connected but hasn't sent a position yet -- count them
       // immediately rather than waiting for their first 'state' (which is
@@ -3465,6 +3505,8 @@ function connectMultiplayer() {
       // naturally ("YOU just became the leader" looks the same as everyone
       // else's view of it).
       showLeaderBanner(msg.initials, msg.score);
+    } else if (msg.type === 'dailyboard') {
+      renderDailyboard(msg.entries);
     } else if (msg.type === 'poweractivated') {
       // Solo announcements are excluded-from-sender server-side (the
       // trigger already applied+announced locally, see triggerSoloEffect),
