@@ -53,6 +53,24 @@
     color: #ffd23b; font: 22px/1.4 ui-monospace, Menlo, monospace; text-shadow: 0 0 12px #ff8c00;
     z-index: 14; opacity: 0; pointer-events: none; letter-spacing: 2px; text-align: center;
     transition: opacity 0.12s linear, transform 0.12s ease-out; }
+  /* Touch controls -- hidden by default, shown only on touch-capable devices
+     (see the 'touch-active' class toggle in the INPUT section below). */
+  #touchjoyBase, #touchjoyThumb, #touchweb, #touchrespawn { display: none; z-index: 20;
+    position: fixed; touch-action: none; user-select: none; }
+  body.touch-active #touchjoyBase, body.touch-active #touchjoyThumb,
+  body.touch-active #touchweb, body.touch-active #touchrespawn { display: block; }
+  #touchjoyBase { left: 26px; bottom: 26px; width: 108px; height: 108px; border-radius: 50%;
+    background: rgba(140, 200, 255, 0.10); border: 2px solid rgba(140, 200, 255, 0.35); }
+  #touchjoyThumb { left: 62px; bottom: 62px; width: 52px; height: 52px; margin: -26px 0 0 -26px;
+    border-radius: 50%; background: rgba(180, 220, 255, 0.35); border: 2px solid rgba(200, 235, 255, 0.6); }
+  #touchweb { right: 28px; bottom: 30px; width: 84px; height: 84px; border-radius: 50%;
+    background: rgba(255, 210, 100, 0.18); border: 2px solid rgba(255, 210, 100, 0.55);
+    color: #ffe27a; font: 12px ui-monospace, Menlo, monospace; text-align: center;
+    line-height: 84px; letter-spacing: 1px; }
+  #touchweb.active { background: rgba(255, 210, 100, 0.42); }
+  #touchrespawn { right: 28px; bottom: 128px; width: 46px; height: 46px; border-radius: 50%;
+    background: rgba(255, 255, 255, 0.08); border: 1px solid rgba(255, 255, 255, 0.3);
+    color: #cfd8ea; font: 11px ui-monospace, Menlo, monospace; text-align: center; line-height: 46px; }
 </style>
 </head>
 <body>
@@ -83,6 +101,10 @@
 <div id="powerups"></div>
 <div id="zombiewarn">ZOMBIES INBOUND</div>
 <div id="combotext"></div>
+<div id="touchjoyBase"></div>
+<div id="touchjoyThumb"></div>
+<div id="touchweb">WEB</div>
+<div id="touchrespawn">R</div>
 <div id="center"></div>
 
 <script>
@@ -123,6 +145,7 @@ import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
 import { Line2 } from 'three/addons/lines/Line2.js';
 import { LineGeometry } from 'three/addons/lines/LineGeometry.js';
 import { LineMaterial } from 'three/addons/lines/LineMaterial.js';
+import { VRButton } from 'three/addons/webxr/VRButton.js';
 
 // ---------------------------------------------------------------- CONFIG --
 // Mirrors city_generator.py CONFIG. Change dials here, logic stays put.
@@ -187,7 +210,20 @@ scene.background = new THREE.Color(0x02040c);
 scene.fog = new THREE.FogExp2(0x05070f, 0.008);
 
 const camera = new THREE.PerspectiveCamera(70, innerWidth / innerHeight, 0.1, 900);
+// WebXR "dolly" pattern: the camera is a child of a movable rig, not moved
+// directly. Outside XR the rig just sits at identity (position/rotation
+// zeroed) so camera.position/camera.lookAt below behave EXACTLY as before
+// -- a child's local transform under an identity parent IS its world
+// transform, so desktop play is byte-for-byte unchanged. Only when
+// presenting in XR does the camera-follow code (see the main loop) target
+// the RIG instead of the camera directly: the headset then supplies the
+// player's actual head look within that rig, on top of the same third-
+// person follow-the-player positioning desktop already uses.
+const cameraRig = new THREE.Group();
+scene.add(cameraRig);
+cameraRig.add(camera);
 const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.xr.enabled = true;
 renderer.setSize(innerWidth, innerHeight);
 renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
@@ -198,6 +234,10 @@ renderer.toneMapping = THREE.ACESFilmicToneMapping;
 // the old exposure. Paired with the ambient-light bump below.
 renderer.toneMappingExposure = 1.05;
 document.body.appendChild(renderer.domElement);
+// VRButton.createButton() self-detects support (navigator.xr /
+// isSessionSupported) and renders as a disabled "VR NOT SUPPORTED" button
+// if unavailable -- safe to always append, no feature-detect needed here.
+document.body.appendChild(VRButton.createButton(renderer));
 
 const composer = new EffectComposer(renderer);
 composer.addPass(new RenderPass(scene, camera));
@@ -1332,7 +1372,7 @@ function triggerGameOver() {
   if (gameOver) return;
   gameOver = true;
   explode(player.pos);
-  webHeld = false; player.anchor = null;
+  kbMouseWebHeld = webHeld = false; player.anchor = null;
   setTimeout(() => {
     document.getElementById('finalscore').textContent =
       `score: ${score}  ·  cars knocked: ${knockedCount}  ·  orbs: ${orbsEl.textContent}/${document.getElementById('orbstotal').textContent}`;
@@ -1542,6 +1582,13 @@ function fireWeb(boosted) {
 
 // ----------------------------------------------------------------- INPUT --
 const keys = {};
+// webHeld is now a per-frame OR of every input device that can fire the
+// web/jump action (keyboard+mouse, gamepad, touch) -- combined once per
+// frame in the main loop, right before stepPlayer. Each device sets ONLY
+// its own flag, never `webHeld` directly, so a connected-but-idle gamepad
+// (or a touch button that isn't currently pressed) can't stomp a mouse
+// click to "released" just by polling its own all-false state every frame.
+let kbMouseWebHeld = false, gamepadWebHeld = false, touchWebHeld = false;
 let webHeld = false, prevWebHeld = false, yaw = 0, pitch = -0.15;
 // Grapple-flourish state for the no-anchor-found self-zip (see stepPlayer):
 // a brief visible web line toward an aimed virtual point, purely cosmetic,
@@ -1556,32 +1603,47 @@ const phantomGrappleTarget = new THREE.Vector3();
 // one continuous gesture from a single hold (Alex: "it's a jump, and then
 // if you're still holding spacebar, a web thwip").
 let pendingAirWeb = false;
+// Raw keyboard state lives in kbKeys, not `keys` -- `keys` (what stepPlayer
+// actually reads) is a per-frame OR-combine of kbKeys/gpKeys/tKeys, same
+// reasoning as the webHeld combine above: gamepad/touch poll their state
+// EVERY frame, so if they wrote straight into `keys` they'd stomp a real,
+// currently-held keyboard key back to false the instant a gamepad happens
+// to be connected (even idle) or a touch joystick is momentarily centered.
+const kbKeys = {}, gpKeys = {}, tKeys = {};
 addEventListener('keydown', e => {
-  keys[e.code] = true;
-  if (e.code === 'Space') { webHeld = true; e.preventDefault(); }
+  kbKeys[e.code] = true;
+  if (e.code === 'Space') { kbMouseWebHeld = true; e.preventDefault(); }
   if (e.code === 'KeyR') respawn();
 });
 addEventListener('keyup', e => {
-  keys[e.code] = false;
-  if (e.code === 'Space') webHeld = false;
+  kbKeys[e.code] = false;
+  if (e.code === 'Space') kbMouseWebHeld = false;
 });
-addEventListener('mousedown', e => { if (e.button === 0) webHeld = true; });
-addEventListener('mouseup', e => { if (e.button === 0) webHeld = false; });
+addEventListener('mousedown', e => { if (e.button === 0) kbMouseWebHeld = true; });
+addEventListener('mouseup', e => { if (e.button === 0) kbMouseWebHeld = false; });
 // Enter the game on click. Pointer lock gives the best mouse-look, but it's
 // DENIED inside sandboxed iframes (e.g. embedded preview panels) — so treat
 // it as an enhancement: the click always starts the game, and if lock isn't
 // granted we fall back to raw mouse-look (movementX/Y works unlocked too).
 const startEl = document.getElementById('start');
 let entered = false;
-startEl.addEventListener('click', () => {
+function enterGame() {
   if (entered) return;
   entered = true;
   startEl.style.display = 'none';
-  try { renderer.domElement.requestPointerLock(); } catch (e) { /* fallback look */ }
   if (audioCtx.state === 'suspended') audioCtx.resume();
   startMusic();
   startHype();
+}
+startEl.addEventListener('click', () => {
+  enterGame();
+  try { renderer.domElement.requestPointerLock(); } catch (e) { /* fallback look */ }
 });
+// Entering VR via the VRButton is its own "start the game" gesture -- run
+// the same unlock/hide-overlay/start-music side effects the desktop click
+// handler does (minus pointer lock, meaningless once the headset owns
+// head tracking).
+renderer.xr.addEventListener('sessionstart', enterGame);
 document.addEventListener('pointerlockerror', () => {
   document.getElementById('webstate').textContent = 'no pointer lock (embedded?) — mouse-look fallback on';
 });
@@ -1593,6 +1655,150 @@ addEventListener('mousemove', e => {
   yaw -= e.movementX * 0.0024;
   pitch = Math.max(-1.35, Math.min(0.9, pitch - e.movementY * 0.0022));
 });
+
+// --------------------------------------------------------------- GAMEPAD --
+// Maps a connected gamepad onto the SAME primitives keyboard/mouse already
+// drive (keys.KeyW/A/S/D, keys.ShiftLeft, gamepadWebHeld, yaw/pitch)
+// instead of adding a parallel input path through stepPlayer -- so gamepad
+// support works everywhere keyboard already does, no separate code paths
+// to keep in sync. Sticks are treated as digital (threshold, not analog
+// magnitude) EXCEPT for sprint, which uses how far the stick is pushed --
+// keeps stepPlayer completely untouched, only feeding it the same booleans
+// it always read.
+const GAMEPAD_DEADZONE = 0.22;
+let gpRespawnPrev = false;
+function stepGamepad(dt) {
+  const pads = navigator.getGamepads ? navigator.getGamepads() : null;
+  const gp = pads && (pads[0] || pads[1] || pads[2] || pads[3]);
+  if (!gp || !gp.connected || !entered) {
+    gamepadWebHeld = false;
+    gpKeys.KeyW = gpKeys.KeyS = gpKeys.KeyA = gpKeys.KeyD = gpKeys.ShiftLeft = false;
+    return;
+  }
+  const lx = gp.axes[0] || 0, ly = gp.axes[1] || 0;
+  const rx = gp.axes[2] || 0, ry = gp.axes[3] || 0;
+  gpKeys.KeyW = ly < -GAMEPAD_DEADZONE;
+  gpKeys.KeyS = ly > GAMEPAD_DEADZONE;
+  gpKeys.KeyA = lx < -GAMEPAD_DEADZONE;
+  gpKeys.KeyD = lx > GAMEPAD_DEADZONE;
+  const stickMag = Math.hypot(lx, ly);
+  gpKeys.ShiftLeft = stickMag > 0.88 || !!(gp.buttons[7] && gp.buttons[7].pressed);   // full deflection or RT
+  if (Math.abs(rx) > GAMEPAD_DEADZONE) yaw -= rx * 2.6 * dt;
+  if (Math.abs(ry) > GAMEPAD_DEADZONE) pitch = Math.max(-1.35, Math.min(0.9, pitch - ry * 2.2 * dt));
+  gamepadWebHeld = !!(gp.buttons[0] && gp.buttons[0].pressed);   // A / Cross
+  const gpRespawn = !!(gp.buttons[2] && gp.buttons[2].pressed);   // X / Square, edge-triggered
+  if (gpRespawn && !gpRespawnPrev) respawn();
+  gpRespawnPrev = gpRespawn;
+}
+
+// --------------------------------------------------------------- TOUCH --
+// Left half of the screen = a virtual joystick (drag from touch-down point,
+// same digital-threshold trick as the gamepad, feeding tKeys instead of
+// gpKeys); right half = drag-to-look (mirrors the mousemove handler); plus
+// a dedicated WEB button and a small respawn button. Only shown on touch-
+// capable devices (feature-detected once at load) so desktop players never
+// see it.
+const touchCapable = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
+if (touchCapable) document.body.classList.add('touch-active');
+const touchJoyThumb = document.getElementById('touchjoyThumb');
+const touchWebEl = document.getElementById('touchweb');
+const TOUCH_JOY_RADIUS = 46;
+let touchJoyId = null, touchJoyOrigin = { x: 0, y: 0 }, touchJoyVec = { x: 0, y: 0 };
+let touchLookId = null, touchLookPrev = { x: 0, y: 0 };
+
+function touchJoyUpdate(dx, dy) {
+  const mag = Math.min(1, Math.hypot(dx, dy) / TOUCH_JOY_RADIUS);
+  const ang = Math.atan2(dy, dx);
+  touchJoyVec.x = mag > 0.001 ? Math.cos(ang) * mag : 0;
+  touchJoyVec.y = mag > 0.001 ? Math.sin(ang) * mag : 0;
+  const clampedR = Math.min(TOUCH_JOY_RADIUS, Math.hypot(dx, dy));
+  touchJoyThumb.style.transform = `translate(${Math.cos(ang) * clampedR}px, ${Math.sin(ang) * clampedR}px)`;
+}
+function touchJoyReset() {
+  touchJoyId = null; touchJoyVec.x = 0; touchJoyVec.y = 0;
+  touchJoyThumb.style.transform = 'translate(0px, 0px)';
+}
+addEventListener('pointerdown', e => {
+  if (!entered || !touchCapable || e.pointerType !== 'touch') return;
+  if (e.target === touchWebEl) {
+    touchWebHeld = true; touchWebEl.classList.add('active');
+    try { touchWebEl.setPointerCapture(e.pointerId); } catch (err) {}
+    return;
+  }
+  if (e.target.id === 'touchrespawn') { respawn(); return; }
+  const leftHalf = e.clientX < innerWidth / 2;
+  if (leftHalf && touchJoyId === null) {
+    touchJoyId = e.pointerId;
+    touchJoyOrigin = { x: e.clientX, y: e.clientY };
+    touchJoyUpdate(0, 0);
+  } else if (!leftHalf && touchLookId === null) {
+    touchLookId = e.pointerId;
+    touchLookPrev = { x: e.clientX, y: e.clientY };
+  }
+});
+addEventListener('pointermove', e => {
+  if (e.pointerId === touchJoyId) {
+    touchJoyUpdate(e.clientX - touchJoyOrigin.x, e.clientY - touchJoyOrigin.y);
+  } else if (e.pointerId === touchLookId) {
+    const dx = e.clientX - touchLookPrev.x, dy = e.clientY - touchLookPrev.y;
+    touchLookPrev = { x: e.clientX, y: e.clientY };
+    yaw -= dx * 0.0055;
+    pitch = Math.max(-1.35, Math.min(0.9, pitch - dy * 0.0050));
+  }
+});
+function touchEnd(e) {
+  if (e.pointerId === touchJoyId) touchJoyReset();
+  if (e.pointerId === touchLookId) touchLookId = null;
+  if (e.target === touchWebEl) { touchWebHeld = false; touchWebEl.classList.remove('active'); }
+}
+addEventListener('pointerup', touchEnd);
+addEventListener('pointercancel', touchEnd);
+
+function stepTouch(dt) {
+  if (!touchCapable) { tKeys.KeyW = tKeys.KeyS = tKeys.KeyA = tKeys.KeyD = tKeys.ShiftLeft = false; return; }
+  tKeys.KeyW = touchJoyVec.y < -0.28;
+  tKeys.KeyS = touchJoyVec.y > 0.28;
+  tKeys.KeyA = touchJoyVec.x < -0.28;
+  tKeys.KeyD = touchJoyVec.x > 0.28;
+  tKeys.ShiftLeft = Math.hypot(touchJoyVec.x, touchJoyVec.y) > 0.88;
+}
+
+// ----------------------------------------------------------------- XR --
+// Standard "xr-standard" controller mapping: axes[2]/[3] are the thumbstick
+// (axes[0]/[1] are a touchpad on controllers that have one, not used here),
+// buttons[0] is the trigger. Left controller's stick drives movement (same
+// digital-threshold trick as gamepad/touch, into xrKeys), right
+// controller's stick drives look (yaw/pitch, directly -- there's no
+// separate "xr look" primitive to combine, same as how the desktop
+// gamepad's right stick works). Either trigger fires the web/jump action.
+let xrWebHeld = false;
+const xrKeys = {};
+function stepXR(dt) {
+  const session = renderer.xr.getSession && renderer.xr.getSession();
+  if (!session) {
+    xrWebHeld = false;
+    xrKeys.KeyW = xrKeys.KeyS = xrKeys.KeyA = xrKeys.KeyD = xrKeys.ShiftLeft = false;
+    return;
+  }
+  let held = false, moveX = 0, moveY = 0, lookX = 0, lookY = 0;
+  for (const src of session.inputSources) {
+    const gp = src.gamepad;
+    if (!gp) continue;
+    if (gp.buttons[0] && gp.buttons[0].pressed) held = true;
+    const ax = gp.axes[2] !== undefined ? gp.axes[2] : gp.axes[0];
+    const ay = gp.axes[3] !== undefined ? gp.axes[3] : gp.axes[1];
+    if (src.handedness === 'right') { lookX = ax || 0; lookY = ay || 0; }
+    else { moveX = ax || 0; moveY = ay || 0; }   // 'left' or 'none' -- default to movement
+  }
+  xrWebHeld = held;
+  xrKeys.KeyW = moveY < -GAMEPAD_DEADZONE;
+  xrKeys.KeyS = moveY > GAMEPAD_DEADZONE;
+  xrKeys.KeyA = moveX < -GAMEPAD_DEADZONE;
+  xrKeys.KeyD = moveX > GAMEPAD_DEADZONE;
+  xrKeys.ShiftLeft = Math.hypot(moveX, moveY) > 0.88;
+  if (Math.abs(lookX) > GAMEPAD_DEADZONE) yaw -= lookX * 2.6 * dt;
+  if (Math.abs(lookY) > GAMEPAD_DEADZONE) pitch = Math.max(-1.35, Math.min(0.9, pitch - lookY * 2.2 * dt));
+}
 
 // ----------------------------------------------------------- PLAYER STEP --
 const GRAV = 26, RUN = 11, AIR_CTRL = 11;
@@ -1777,18 +1983,23 @@ function stepPlayer(dt) {
   spidey.rotation.x = THREE.MathUtils.clamp(sp * 0.02 * (p.anchor ? 1.6 : 0.4), 0, 0.9);
   stepCoat(p);
 
-  // third-person camera
+  // third-person camera -- in an XR session this steers cameraRig (the
+  // camera's parent), not the camera directly, since the headset owns the
+  // camera's local transform once presenting. Outside XR the rig is never
+  // touched and stays at identity, so this branch changes nothing about
+  // desktop behavior.
   const camOff = new THREE.Vector3(
     Math.sin(yaw) * Math.cos(pitch), -Math.sin(pitch), Math.cos(yaw) * Math.cos(pitch)
   ).multiplyScalar(8.5);
   const target = p.pos.clone().add(camOff).add(new THREE.Vector3(0, 2.2, 0));
-  camera.position.lerp(target, Math.min(1, dt * 7));
+  const camTarget = renderer.xr.isPresenting ? cameraRig : camera;
+  camTarget.position.lerp(target, Math.min(1, dt * 7));
   // "Camera should not be able to go below the ground" -- steep downward
   // pitch (looking down at yourself from above) could put the lerped
   // camera position underneath the ground plane; hard-clamp it above the
   // surface (ground top is y=0) regardless of what the orbit math wants.
-  camera.position.y = Math.max(camera.position.y, 0.35);
-  camera.lookAt(p.pos.x, p.pos.y + 1.2, p.pos.z);
+  camTarget.position.y = Math.max(camTarget.position.y, 0.35);
+  camTarget.lookAt(p.pos.x, p.pos.y + 1.2, p.pos.z);
 
   document.getElementById('webstate').textContent =
     p.anchor ? 'SWINGING' : (webHeld ? 'no anchor in range' : 'ready');
@@ -1802,6 +2013,98 @@ function stepPlayer(dt) {
     const el = document.getElementById('center');
     el.style.background = ok ? '#4dff88' : '#9fe8ff55';
     el.style.boxShadow = ok ? '0 0 10px #4f8' : '0 0 4px #0af6';
+  }
+}
+
+// ------------------------------------------------------------ MULTIPLAYER --
+// Off by default -- pass ?mp=wss://your-worker.workers.dev/ws to enable.
+// See multiplayer/worker.js + multiplayer/README.md for the Cloudflare
+// Worker + Durable Object this talks to and how to deploy your own. A pure
+// relay: every client sends its own state ~15x/sec and renders whatever
+// the server relays back for everyone else -- no server-side physics or
+// authority, matching how every other system in this game already works
+// (there's no server at all outside of this). "Joust" (Alex: "landing on
+// top of another player makes them explode") is detected locally by the
+// STOMPING player using the same proximity-check style every other
+// collision in this file uses, and reported once; the server just fans
+// that report back out to everyone, including the victim.
+const MULTIPLAYER_URL = new URLSearchParams(location.search).get('mp') || '';
+const remotePlayers = new Map();   // id -> { mesh, targetPos, targetYaw }
+let mpSocket = null, myId = null, mpSendTimer = 0;
+const MP_SEND_INTERVAL = 1 / 15;
+const JOUST_RADIUS = 1.1, JOUST_HEIGHT_MIN = 0.3, JOUST_HEIGHT_MAX = 1.6, JOUST_MIN_FALL_SPEED = -3;
+
+function makeRemotePlayerMesh(color) {
+  const g = new THREE.Group();
+  const mat = new THREE.MeshStandardMaterial({ color, roughness: 0.5, metalness: 0.2, emissive: color, emissiveIntensity: 0.15 });
+  const body = new THREE.Mesh(new THREE.CapsuleGeometry(0.32, 0.9, 4, 8), mat);
+  body.position.y = 0.75;
+  const head = new THREE.Mesh(new THREE.SphereGeometry(0.26, 10, 8), mat);
+  head.position.y = 1.5;
+  g.add(body, head);
+  scene.add(g);
+  return g;
+}
+
+function connectMultiplayer() {
+  if (!MULTIPLAYER_URL) return;
+  mpSocket = new WebSocket(MULTIPLAYER_URL);
+  mpSocket.addEventListener('message', e => {
+    let msg; try { msg = JSON.parse(e.data); } catch { return; }
+    if (msg.type === 'welcome') {
+      myId = msg.id;
+    } else if (msg.type === 'state' && msg.id !== myId) {
+      let rp = remotePlayers.get(msg.id);
+      if (!rp) {
+        rp = { mesh: makeRemotePlayerMesh(0x66ccff), targetPos: new THREE.Vector3(), targetYaw: 0 };
+        remotePlayers.set(msg.id, rp);
+      }
+      rp.targetPos.set(msg.pos[0], msg.pos[1], msg.pos[2]);
+      rp.targetYaw = msg.yaw;
+      rp.mesh.visible = msg.alive !== false;
+    } else if (msg.type === 'leave') {
+      const rp = remotePlayers.get(msg.id);
+      if (rp) { scene.remove(rp.mesh); remotePlayers.delete(msg.id); }
+    } else if (msg.type === 'jousted' && msg.victimId === myId) {
+      triggerGameOver();
+    }
+  });
+  mpSocket.addEventListener('close', () => { mpSocket = null; setTimeout(connectMultiplayer, 3000); });
+  mpSocket.addEventListener('error', () => { try { mpSocket.close(); } catch (e) {} });
+}
+connectMultiplayer();
+
+function stepMultiplayer(dt, p) {
+  if (!MULTIPLAYER_URL) return;
+  // Updates arrive at MP_SEND_INTERVAL, not every frame -- lerp toward the
+  // last-known state so remote players glide instead of stepping.
+  for (const rp of remotePlayers.values()) {
+    rp.mesh.position.lerp(rp.targetPos, Math.min(1, dt * 10));
+    rp.mesh.rotation.y = rp.targetYaw;
+  }
+  // JOUST: am I currently landing on top of someone? Close enough in XZ,
+  // above them by a small margin, and actually falling with real force
+  // (not just standing adjacent) -- same min-penetration-style proximity
+  // check the rest of this game's collision uses.
+  if (!gameOver && p.vel.y < JOUST_MIN_FALL_SPEED) {
+    for (const [id, rp] of remotePlayers) {
+      const dx = p.pos.x - rp.mesh.position.x, dz = p.pos.z - rp.mesh.position.z;
+      const heightAbove = p.pos.y - rp.mesh.position.y;
+      if (Math.hypot(dx, dz) < JOUST_RADIUS && heightAbove > JOUST_HEIGHT_MIN && heightAbove < JOUST_HEIGHT_MAX) {
+        if (mpSocket && mpSocket.readyState === WebSocket.OPEN) {
+          mpSocket.send(JSON.stringify({ type: 'joust', victimId: id }));
+        }
+        p.vel.y = JUMP_VEL_NORMAL * 0.6;   // a little bounce off the kill, Mario-stomp style
+      }
+    }
+  }
+  mpSendTimer -= dt;
+  if (mpSendTimer <= 0 && mpSocket && mpSocket.readyState === WebSocket.OPEN) {
+    mpSendTimer = MP_SEND_INTERVAL;
+    mpSocket.send(JSON.stringify({
+      pos: [p.pos.x, p.pos.y, p.pos.z], type: 'state',
+      yaw: spidey.rotation.y, anchor: !!p.anchor, alive: !gameOver,
+    }));
   }
 }
 
@@ -1839,7 +2142,15 @@ function loop(now) {
   stepKnocked(parkedCars, worldDt, true);
   stepZombies(worldDt, player);
   stepHonks(worldDt, player);
+  stepGamepad(playerDt);
+  stepTouch(playerDt);
+  stepXR(playerDt);
+  webHeld = kbMouseWebHeld || gamepadWebHeld || touchWebHeld || xrWebHeld;
+  for (const k of ['KeyW', 'KeyA', 'KeyS', 'KeyD', 'ShiftLeft']) {
+    keys[k] = !!(kbKeys[k] || gpKeys[k] || tKeys[k] || xrKeys[k]);
+  }
   stepPlayer(playerDt);
+  stepMultiplayer(playerDt, player);
   if (!gameOver) stepPickups(simT, player);
   stepExplosion(dt);
   stepSparkles(dt);
@@ -1847,9 +2158,20 @@ function loop(now) {
   stepRain(player.pos, simT);
   updateBloom(player.pos.y);
   updateFallMusic(player.pos.y, player.onGround);
-  composer.render();
+  // Post-processing (bloom/noir) is skipped while presenting in XR --
+  // EffectComposer's multi-pass pipeline isn't WebXR-stereo-aware (it
+  // renders one eye's worth of buffers, not the stereo camera array the XR
+  // session provides), so mixing them risks a broken or single-eye render.
+  // A straight renderer.render() is always correct for both eyes; the
+  // tradeoff is no bloom/desaturation while in VR.
+  if (renderer.xr.isPresenting) renderer.render(scene, camera);
+  else composer.render();
 }
-requestAnimationFrame(loop);
+// setAnimationLoop (not requestAnimationFrame) is required for WebXR: it's
+// how Three.js hands control of frame scheduling to the active XRSession
+// once one starts, while transparently falling back to rAF outside of XR --
+// this one call covers both cases, no separate "if presenting" loop needed.
+renderer.setAnimationLoop(loop);
 
 // Debug hook -- lets anyone poke at live state from devtools without
 // needing a build step (e.g. `__sw.player.pos.set(x,y,z)` to teleport).
@@ -1882,7 +2204,23 @@ window.__sw = { THREE, player, cars, parkedCars, pickups, colliders, EDGE, WORLD
                 get comboCount() { return comboCount; },
                 get comboTimer() { return comboTimer; },
                 rainBus, audioCtx, findQueuedCar, stepHonks,
-                get CLIMB_SPEED() { return CLIMB_SPEED; }, KNOCK_SPEED };
+                get CLIMB_SPEED() { return CLIMB_SPEED; }, KNOCK_SPEED,
+                keys, kbKeys, gpKeys, tKeys,
+                get kbMouseWebHeld() { return kbMouseWebHeld; },
+                get gamepadWebHeld() { return gamepadWebHeld; },
+                get touchWebHeld() { return touchWebHeld; },
+                set touchWebHeld(v) { touchWebHeld = v; },
+                stepGamepad, stepTouch, touchJoyVec, touchJoyUpdate,
+                get touchCapable() { return touchCapable; },
+                get yaw() { return yaw; }, get pitch() { return pitch; },
+                get entered() { return entered; },
+                set entered(v) { entered = v; },
+                stepXR, xrKeys, get xrWebHeld() { return xrWebHeld; },
+                cameraRig, renderer, enterGame,
+                remotePlayers, stepMultiplayer, makeRemotePlayerMesh, connectMultiplayer,
+                get mpSocket() { return mpSocket; }, set mpSocket(v) { mpSocket = v; },
+                get myId() { return myId; }, set myId(v) { myId = v; },
+                MULTIPLAYER_URL };
 </script>
 </body>
 </html>
