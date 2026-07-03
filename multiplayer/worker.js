@@ -36,18 +36,24 @@ export class Room {
     const color = COLORS[Math.floor(Math.random() * COLORS.length)];
     // Tags let us recover per-socket metadata after hibernation without
     // keeping a live JS closure around -- see webSocketMessage/Close below.
-    this.state.acceptWebSocket(server, [id]);
+    // Color rides along as a SECOND tag so every future state broadcast for
+    // this player can include it (a player's own color is assigned once,
+    // here, and never changes -- no need for clients to keep re-sending it).
+    this.state.acceptWebSocket(server, [id, String(color)]);
     server.send(JSON.stringify({ type: 'welcome', id, color }));
 
-    // Tell the newcomer about everyone already in the room, and tell
-    // everyone already in the room about the newcomer.
+    // Tell the newcomer about everyone already in the room (with their
+    // colors, so an avatar never has to render in a placeholder color even
+    // for the first frame), and tell everyone already in the room about
+    // the newcomer.
     for (const ws of this.state.getWebSockets()) {
       if (ws === server) continue;
-      const [otherId] = this.state.getTags(ws);
-      // We don't retain last-known position server-side (pure relay, no
-      // state authority -- see file header), so a joiner only appears to
-      // others once IT sends its first state update, not immediately here.
-      ws.send(JSON.stringify({ type: 'join', id }));
+      const [otherId, otherColor] = this.state.getTags(ws);
+      server.send(JSON.stringify({ type: 'join', id: otherId, color: Number(otherColor) }));
+      // We don't retain last-known POSITION server-side (pure relay, no
+      // state authority -- see file header), so a joiner's avatar only
+      // actually appears to others once it sends its first state update.
+      ws.send(JSON.stringify({ type: 'join', id, color }));
     }
 
     return new Response(null, { status: 101, webSocket: client });
@@ -56,9 +62,9 @@ export class Room {
   async webSocketMessage(ws, message) {
     let msg;
     try { msg = JSON.parse(message); } catch { return; }
-    const [id] = this.state.getTags(ws);
+    const [id, colorStr] = this.state.getTags(ws);
     if (msg.type === 'state') {
-      this.broadcast({ type: 'state', id, pos: msg.pos, yaw: msg.yaw, anchor: !!msg.anchor, alive: msg.alive !== false }, ws);
+      this.broadcast({ type: 'state', id, color: Number(colorStr), pos: msg.pos, yaw: msg.yaw, anchor: !!msg.anchor, alive: msg.alive !== false }, ws);
     } else if (msg.type === 'joust' && typeof msg.victimId === 'string') {
       this.broadcast({ type: 'jousted', victimId: msg.victimId, byId: id });
     }

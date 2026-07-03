@@ -2056,7 +2056,11 @@ function connectMultiplayer() {
     } else if (msg.type === 'state' && msg.id !== myId) {
       let rp = remotePlayers.get(msg.id);
       if (!rp) {
-        rp = { mesh: makeRemotePlayerMesh(0x66ccff), targetPos: new THREE.Vector3(), targetYaw: 0 };
+        // color comes from the server (assigned once, at connect time --
+        // see multiplayer/worker.js) and rides along on every state
+        // broadcast for that player, so each remote avatar renders in
+        // ITS OWN random color instead of one shared placeholder.
+        rp = { mesh: makeRemotePlayerMesh(msg.color), targetPos: new THREE.Vector3(), targetYaw: 0 };
         remotePlayers.set(msg.id, rp);
       }
       rp.targetPos.set(msg.pos[0], msg.pos[1], msg.pos[2]);
@@ -2065,8 +2069,17 @@ function connectMultiplayer() {
     } else if (msg.type === 'leave') {
       const rp = remotePlayers.get(msg.id);
       if (rp) { scene.remove(rp.mesh); remotePlayers.delete(msg.id); }
-    } else if (msg.type === 'jousted' && msg.victimId === myId) {
-      triggerGameOver();
+    } else if (msg.type === 'jousted') {
+      if (msg.victimId === myId) {
+        triggerGameOver();
+      } else {
+        // Bystander view: without this, another player's death is just
+        // their avatar silently vanishing next time `alive:false` arrives
+        // -- "the other players explode" should be visible to whoever's
+        // watching, not just to the victim.
+        const rp = remotePlayers.get(msg.victimId);
+        if (rp) explode(rp.mesh.position);
+      }
     }
   });
   mpSocket.addEventListener('close', () => { mpSocket = null; setTimeout(connectMultiplayer, 3000); });
