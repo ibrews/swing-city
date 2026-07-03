@@ -59,6 +59,15 @@
     color: #ffd23b; font: 22px/1.4 ui-monospace, Menlo, monospace; text-shadow: 0 0 12px #ff8c00;
     z-index: 14; opacity: 0; pointer-events: none; letter-spacing: 2px; text-align: center;
     transition: opacity 0.12s linear, transform 0.12s ease-out; }
+  /* Power-up name-announcement banner (Alex's manifest: "PLAYERNAME
+     triggered GIANT MODE!!" visible to everyone in multiplayer). Bigger
+     and higher than #combotext -- it's a rarer, bigger-deal event. Sits
+     ABOVE #leaderbanner (z-index 16 vs 14) since the two can in principle
+     fire close together and a power-up trigger should win the overlap. */
+  #powerbanner { position: fixed; left: 50%; top: 20%; transform: translateX(-50%) scale(1);
+    color: #ffffff; font: bold 24px/1.4 ui-monospace, Menlo, monospace; text-shadow: 0 0 16px #ff2fa0, 0 0 30px #00e5ff;
+    z-index: 16; opacity: 0; pointer-events: none; letter-spacing: 2px; text-align: center;
+    transition: opacity 0.15s linear, transform 0.12s ease-out; }
   /* Session leaderboard (Alex: "a leaderboard for everyone to see at all
      times") -- left side, mirroring #score/#playercount's right-side HUD
      block. Hidden until multiplayer actually connects, same pattern as
@@ -125,6 +134,7 @@
 <div id="powerups"></div>
 <div id="zombiewarn">ZOMBIES INBOUND</div>
 <div id="combotext"></div>
+<div id="powerbanner"></div>
 <div id="leaderboard"></div>
 <div id="leaderbanner"></div>
 <div id="touchjoyBase"></div>
@@ -220,7 +230,9 @@ const OUT_OF_BOUNDS_MARGIN = 16;
 const BOUNCE_FLASH_DURATION = 0.35;   // seconds the red vignette lingers after bouncing off the border wall
 const BOUNCE_SPEED = 34, BOUNCE_UP = 8;   // velocity kick back toward center on hitting the border wall
 const KNOCK_SPEED = 6.0, KNOCK_RADIUS = 1.5;   // min player speed / range to knock a car over
-const PICKUP_PER_BLOCK = 1, PICKUP_SCORE = 10, KNOCK_SCORE = 25;
+// Bumped 1 -> 2 (Alex's power-up manifest): ~35 pickup types now share the
+// roll table, so one per block left most types barely appearing per city.
+const PICKUP_PER_BLOCK = 2, PICKUP_SCORE = 10, KNOCK_SCORE = 25;
 const COMBO_WINDOW = 1.6;   // seconds since the last knock that still counts as the same combo chain
 const JUMP_VEL_NORMAL = 12, JUMP_VEL_BOOSTED = 20, JUMP_BOOST_DURATION = 9;
 const CLIMB_SPEED = 7.0;   // wall-crawl vertical speed while holding the web button against a building
@@ -231,8 +243,22 @@ const WALL_FACE_YAW = { 0: Math.PI / 2, 1: -Math.PI / 2, 4: 0, 5: Math.PI };
 const MANTLE_ZONE = 2.0, MANTLE_SPEED = 5.0;
 const NOIR_DURATION = 10;
 const SLOWTIME_DURATION = 6, SLOWTIME_WORLD_SCALE = 0.32, SLOWTIME_PLAYER_SCALE = 0.8;
-const ZOMBIE_SPEED = 3.0, ZOMBIE_WAVE_DURATION = 26, ZOMBIE_COUNT = 12, ZOMBIE_KILL_TIME = 0.5;
+const ZOMBIE_SPEED = 3.0, ZOMBIE_COUNT = 12, ZOMBIE_KILL_TIME = 0.5;
 const FALL_SPAWN_Y = 240;   // "battle bus" drop height, above city center
+
+// ORB POWER-UP SYSTEM (Alex, 2026-07-03 "Delegation Manifest" item 14 --
+// locked spec). Every effect below lasts EFFECT_DURATION and stacks freely;
+// scattered torus pickups add EFFECT_EXTEND to every one of YOUR
+// currently-active effects.
+const EFFECT_DURATION = 30, EFFECT_EXTEND = 30;
+const GIANT_SCALE = 10, TINY_SCALE = 0.22, SHRINKTAG_SCALE = 0.22;
+const SPEED_MULT = 2, LOWG_GRAV_MULT = 0.28, SUPERJUMP_MULT = 5;
+const MAGNET_RADIUS = 16, MAGNET_PULL = 14;
+const ENERGY_BEAM_SPEED = 90, ENERGY_BEAM_RANGE = 70, ENERGY_BEAM_RADIUS = 0.5;
+const PONG_BALL_SPEED = 16, PONG_BALL_RADIUS = 0.85, PONG_BALL_LIFE = 12;
+const BOMBER_INTERVAL = 0.45, BOMBER_FALL_SPEED = 15, BOMBER_RADIUS = 1.0, BOMBER_BLAST_RADIUS = 3.2;
+const CONFETTI_RATE = 22;
+const DISCO_CYCLE_SPEED = 2.6;
 
 const PITCH = BLOCK_SIZE + STREET_W;
 const HALF = (GRID_N - 1) / 2 * PITCH;
@@ -962,17 +988,162 @@ const parkedCars = [];
   }
 }
 
+// --------------------------------------------------------- POWERUP FX CORE --
+// activeEffects: YOU-only buffs (solid orb). worldEffects: everyone-affecting
+// buffs (halo-ring orb), applied identically by every client to its own
+// local physics (and to every OTHER rendered avatar) once the multiplayer
+// broadcast round-trips back -- same "attacker reports, victim's own client
+// applies it" shape as joust/knock (see multiplayer/worker.js header), just
+// with every connected player as the "victim." Both are plain
+// name -> secondsRemaining maps so stacking/combining is just "still >0."
+const activeEffects = {};
+const worldEffects = {};
+function myEffectActive(name) { return (activeEffects[name] || 0) > 0 || (worldEffects[name] || 0) > 0; }
+
+const EFFECT_NAMES = {
+  giant: 'GIANT MODE', tiny: 'TINY MODE', fly: 'FLIGHT MODE', lowg: 'LOW GRAVITY',
+  speed: 'SPEED BOOST', superjump: 'SUPER JUMP', invincible: 'INVINCIBILITY', fire: 'FIRE TOUCH',
+  energyblast: 'ENERGY BLAST', pong: 'PONG MODE', bomber: 'BOMBER MODE', ghost: 'GHOST MODE',
+  webanywhere: 'WEB ANYWHERE', magnet: 'MAGNET MODE', confetti: 'CONFETTI MODE',
+  zombiesummon: 'ZOMBIE SUMMON', disco: 'DISCO CITY', slow: 'SLOW-MO',
+  shrinktag: 'SHRINK TOUCH', shrunk: 'SHRUNKEN', torusext: 'DURATION UP',
+};
+// Player identity is color-only (see makePawnBody/"same pawn... different
+// colors") -- no name-entry UI exists, so the banner names players by their
+// assigned color, falling back to "YOU" for the local player in solo play
+// (myColor is only ever set once the 'welcome' message arrives).
+const COLOR_NAMES = { 0xff5566: 'RED', 0x55ddff: 'CYAN', 0xffe066: 'YELLOW', 0x8fff8f: 'GREEN', 0xc98fff: 'PURPLE', 0xff9f4d: 'ORANGE' };
+function colorLabel(hex) { return hex == null ? 'YOU' : (COLOR_NAMES[hex] || ('PLAYER-' + hex.toString(16))); }
+
+const powerBannerEl = document.getElementById('powerbanner');
+function showPowerBanner(text) {
+  powerBannerEl.textContent = text;
+  powerBannerEl.style.opacity = '1';
+  powerBannerEl.style.transform = 'translateX(-50%) scale(1.1)';
+  setTimeout(() => { powerBannerEl.style.transform = 'translateX(-50%) scale(1)'; }, 30);
+  clearTimeout(powerBannerEl._hideT);
+  powerBannerEl._hideT = setTimeout(() => { powerBannerEl.style.opacity = '0'; }, 2200);
+}
+function announceEffect(name, isSelf) {
+  showPowerBanner(`${isSelf ? 'YOU' : colorLabel(myColor)} TRIGGERED ${EFFECT_NAMES[name] || name.toUpperCase()}!!`);
+}
+function announceRemoteEffect(name, byColor) {
+  showPowerBanner(`${colorLabel(byColor)} TRIGGERED ${EFFECT_NAMES[name] || name.toUpperCase()}!!`);
+}
+// SOLO trigger: applies instantly (no network round-trip -- your own buff
+// shouldn't wait on a WebSocket) and, if in multiplayer, tells everyone else
+// so THEY see the announcement banner too (the effect itself never reaches
+// them -- "player-visible distinction," solid orb = you-only).
+function triggerSoloEffect(name) {
+  activeEffects[name] = EFFECT_DURATION;
+  announceEffect(name, true);
+  onEffectTriggered(name, false);
+  if (mpSocket && mpSocket.readyState === WebSocket.OPEN) {
+    mpSocket.send(JSON.stringify({ type: 'effect', name, world: false }));
+  }
+}
+// EVERYONE trigger: reported to the relay, which rebroadcasts to ALL
+// sockets including the sender (exactly like joust/knock) -- so every
+// client, this one included, applies worldEffects[name] and shows the
+// banner from the SAME code path once the broadcast lands.
+function triggerWorldEffect(name) {
+  // Magnet needs a spatial trigger point ("pulls everyone toward the
+  // trigger point") -- every other world effect just needs the name.
+  const pos = name === 'magnet' ? [player.pos.x, player.pos.y, player.pos.z] : null;
+  if (mpSocket && mpSocket.readyState === WebSocket.OPEN) {
+    mpSocket.send(JSON.stringify({ type: 'effect', name, world: true, pos }));
+  } else {
+    // single-player: no relay round-trip to wait for, apply directly
+    worldEffects[name] = EFFECT_DURATION;
+    if (name === 'magnet') worldMagnetOrigin = player.pos.clone();
+    announceEffect(name, true);
+    onEffectTriggered(name, true);
+  }
+}
+// Torus extender: "extends the duration of any of YOUR currently-active
+// effects by another 30s" -- every effect timer you personally have running
+// right now (solo or world) gets bumped, purely local (matches this game's
+// existing no-server-authority stance -- pickups themselves aren't
+// multiplayer-synced either).
+function extendActiveEffects() {
+  let any = false;
+  for (const map of [activeEffects, worldEffects]) {
+    for (const k of Object.keys(map)) if (map[k] > 0) { map[k] += EFFECT_EXTEND; any = true; }
+  }
+  return any;
+}
+// One-off side effects that fire the moment an effect ACTIVATES (as opposed
+// to continuous per-frame behavior, which lives in the per-effect stepXxx
+// functions below).
+function onEffectTriggered(name, isWorld) {
+  if (name === 'zombiesummon') spawnZombieWave(player.pos, isWorld);
+}
+function updatePowerupHud() {
+  const rows = [];
+  if (noirTimer > 0) rows.push(`<div style="color:#ddd">NOIR ${noirTimer.toFixed(1)}s</div>`);
+  if (jumpBoostTimer > 0) rows.push(`<div style="color:#6dff7a">JUMP BOOST ${jumpBoostTimer.toFixed(1)}s</div>`);
+  if (slowTimeTimer > 0) rows.push(`<div style="color:#6bd4ff">SLOW-MO ${slowTimeTimer.toFixed(1)}s</div>`);
+  for (const [name, t] of Object.entries(activeEffects)) {
+    if (t > 0) rows.push(`<div style="color:#ffe27a">${EFFECT_NAMES[name] || name} ${t.toFixed(1)}s</div>`);
+  }
+  for (const [name, t] of Object.entries(worldEffects)) {
+    if (t > 0) rows.push(`<div style="color:#ff9f4d">${EFFECT_NAMES[name] || name} (ALL) ${t.toFixed(1)}s</div>`);
+  }
+  powerupsEl.innerHTML = rows.join('');
+}
+
 // ---------------------------------------------------------------- PICKUPS --
 // One pickup per block, floating at swing height so collecting them rewards
 // actually swinging through the city rather than just running. Most are
 // plain score orbs; a handful are special powerups, each with a distinct
 // shape+color so you can tell them apart in the air before you commit.
+// The 16 dual-mode power-ups: each generates a SOLO pickup (key) and an
+// EVERYONE pickup (key+'All', same geometry+color, ring added at spawn
+// time below) -- "player-visible distinction before touching it," per
+// spec, meaning the ring alone is the tell, not a color change.
+// 'jump' and 'zombie' from the original pickup set are folded into
+// 'superjump' and 'zombiesummon' below rather than kept as a separate
+// parallel mechanic (they were early, single-mode versions of exactly
+// these two catalog entries).
+const ORB_EFFECTS = [
+  { key: 'giant',       color: 0xff5533, geo: () => new THREE.BoxGeometry(0.5, 0.5, 0.5) },
+  { key: 'tiny',        color: 0x33ffaa, geo: () => new THREE.SphereGeometry(0.3, 10, 8) },
+  { key: 'fly',         color: 0xdfffff, geo: () => new THREE.ConeGeometry(0.3, 0.7, 6) },
+  { key: 'lowg',        color: 0xb388ff, geo: () => new THREE.OctahedronGeometry(0.4, 1) },
+  { key: 'speed',       color: 0xfff200, geo: () => new THREE.ConeGeometry(0.28, 0.9, 3) },
+  { key: 'superjump',   color: 0x6dff7a, geo: () => new THREE.ConeGeometry(0.34, 0.85, 4) },
+  { key: 'invincible',  color: 0xffd700, geo: () => new THREE.DodecahedronGeometry(0.4) },
+  { key: 'fire',        color: 0xff3300, geo: () => new THREE.TetrahedronGeometry(0.45) },
+  { key: 'energyblast', color: 0x00ffee, geo: () => new THREE.OctahedronGeometry(0.4, 0) },
+  { key: 'pong',        color: 0xff66cc, geo: () => new THREE.SphereGeometry(0.38, 8, 6) },
+  { key: 'bomber',      color: 0x555566, geo: () => new THREE.IcosahedronGeometry(0.42, 0) },
+  { key: 'ghost',       color: 0xccffff, geo: () => new THREE.SphereGeometry(0.4, 6, 5) },
+  { key: 'webanywhere', color: 0xffffff, geo: () => new THREE.OctahedronGeometry(0.44, 1) },
+  { key: 'magnet',      color: 0xff0066, geo: () => new THREE.CylinderGeometry(0.18, 0.18, 0.5, 8) },
+  { key: 'confetti',    color: 0xff99ff, geo: () => new THREE.IcosahedronGeometry(0.4, 1) },
+  { key: 'zombiesummon', color: 0xaa2244, geo: () => new THREE.IcosahedronGeometry(0.5, 1) },
+];
+const DUAL_ODDS = 0.51 / (ORB_EFFECTS.length * 2);
+const DUAL_KEYS = new Set(ORB_EFFECTS.map(e => e.key));
+function makeHaloRing(color) {
+  return new THREE.Mesh(new THREE.TorusGeometry(0.64, 0.045, 6, 20), new THREE.MeshBasicMaterial({ color }));
+}
 const PICKUP_TYPES = [
-  { key: 'orb',    odds: 0.64, color: 0xffe27a, geo: () => new THREE.OctahedronGeometry(0.42) },
-  { key: 'noir',   odds: 0.14, color: 0xd8d8e0, geo: () => new THREE.IcosahedronGeometry(0.46, 0) },
-  { key: 'jump',   odds: 0.11, color: 0x6dff7a, geo: () => new THREE.ConeGeometry(0.34, 0.85, 4) },
-  { key: 'slow',   odds: 0.08, color: 0x6bd4ff, geo: () => new THREE.TorusGeometry(0.34, 0.13, 6, 14) },
-  { key: 'zombie', odds: 0.03, color: 0xaa2244, geo: () => new THREE.IcosahedronGeometry(0.5, 1) },
+  { key: 'orb',       odds: 0.28, color: 0xffe27a, geo: () => new THREE.OctahedronGeometry(0.42) },
+  { key: 'noir',      odds: 0.05, color: 0xd8d8e0, geo: () => new THREE.IcosahedronGeometry(0.46, 0) },
+  // 'slow' (time-freeze) is a locked exception: you-only, no everyone pair
+  // (see spec) -- reskinned off TorusGeometry since torus is now reserved
+  // exclusively for the duration-extender pickups below.
+  { key: 'slow',      odds: 0.05, color: 0x6bd4ff, geo: () => new THREE.CylinderGeometry(0.36, 0.36, 0.14, 8) },
+  { key: 'torusext',  odds: 0.07, color: 0xffffff, geo: () => new THREE.TorusGeometry(0.34, 0.13, 6, 14) },
+  { key: 'disco',     odds: 0.02, color: 0xff2fa0, geo: () => new THREE.IcosahedronGeometry(0.44, 1) },
+  // Shrink-tag is a third mechanic, not a giant/tiny variant: collecting it
+  // grants YOU a 30s "touch to shrink them" charge (see stepMultiplayer).
+  { key: 'shrinktag', odds: 0.02, color: 0x22ff88, geo: () => new THREE.ConeGeometry(0.32, 0.6, 3) },
+  ...ORB_EFFECTS.flatMap(e => [
+    { key: e.key,          odds: DUAL_ODDS, color: e.color, geo: e.geo, world: false },
+    { key: e.key + 'All',  odds: DUAL_ODDS, color: e.color, geo: e.geo, world: true },
+  ]),
 ];
 const pickupMats = Object.fromEntries(PICKUP_TYPES.map(t => [t.key, new THREE.MeshBasicMaterial({ color: t.color })]));
 function rollPickupType() {
@@ -984,11 +1155,18 @@ const pickups = [];
 for (let i = 0; i < GRID_N; i++) for (let j = 0; j < GRID_N; j++) {
   for (let k = 0; k < PICKUP_PER_BLOCK; k++) {
     const type = rollPickupType();
-    const mesh = new THREE.Mesh(type.geo(), pickupMats[type.key]);
+    let mesh = new THREE.Mesh(type.geo(), pickupMats[type.key]);
+    let ring = null;
+    if (type.world) {
+      ring = makeHaloRing(type.color);
+      const g = new THREE.Group();
+      g.add(mesh, ring);
+      mesh = g;
+    }
     const baseY = uniform(6, 15);
     mesh.position.set(blockCenter(i) + uniform(-4, 4), baseY, blockCenter(j) + uniform(-4, 4));
     scene.add(mesh);
-    pickups.push({ mesh, baseY, phase: uniform(0, 6.28), got: false, type: type.key, color: type.color });
+    pickups.push({ mesh, ring, baseY, phase: uniform(0, 6.28), got: false, type: type.key, color: type.color, world: !!type.world });
   }
 }
 document.getElementById('orbstotal').textContent = pickups.length;
@@ -1521,17 +1699,12 @@ const powerupsEl = document.getElementById('powerups');
 function addScore(n) { score += n; scoreEl.textContent = score; if (MULTIPLAYER_URL) updateLeaderboard(); }
 
 // Powerup timers -- all just count down in the main loop; whichever are >0
-// are "active." See stepPickups() for what picks them up, applyPowerupFX()
-// for the HUD, and the main loop for where noir/jump/slow-time actually
-// change behavior (post FX pass, jump velocity, world dt scale).
+// are "active." See stepPickups() for what picks them up, updatePowerupHud()
+// (defined in the POWERUP FX CORE section above, alongside the newer
+// activeEffects/worldEffects) for the HUD, and the main loop for where
+// noir/jump/slow-time actually change behavior (post FX pass, jump
+// velocity, world dt scale).
 let noirTimer = 0, jumpBoostTimer = 0, slowTimeTimer = 0;
-function updatePowerupHud() {
-  const rows = [];
-  if (noirTimer > 0) rows.push(`<div style="color:#ddd">NOIR ${noirTimer.toFixed(1)}s</div>`);
-  if (jumpBoostTimer > 0) rows.push(`<div style="color:#6dff7a">JUMP BOOST ${jumpBoostTimer.toFixed(1)}s</div>`);
-  if (slowTimeTimer > 0) rows.push(`<div style="color:#6bd4ff">SLOW-MO ${slowTimeTimer.toFixed(1)}s</div>`);
-  powerupsEl.innerHTML = rows.join('');
-}
 
 // Shared tumble physics for any knocked car (moving or parked): simple
 // ballistic + spin, settle on the ground, then hand back to whichever
@@ -1730,15 +1903,23 @@ function stepPickups(t, p) {
     pk.mesh.position.y = pk.baseY + Math.sin(t * 1.6 + pk.phase) * 0.6;
     pk.mesh.rotation.y = t * 1.2 + pk.phase;
     pk.mesh.rotation.x = t * 0.7 + pk.phase;
+    if (pk.ring) pk.ring.rotation.z = t * 2.4 + pk.phase;   // halo spins faster/independent of the orb
     if (p.pos.distanceTo(pk.mesh.position) < 1.6) {
       pk.got = true; pk.mesh.visible = false; collectedNow++;
       sfxPing(pk.mesh.position);
       pickupBurst(pk.mesh.position, pk.color);
-      switch (pk.type) {
+      if (DUAL_KEYS.has(pk.type)) {
+        triggerSoloEffect(pk.type);
+      } else if (pk.type.endsWith('All') && DUAL_KEYS.has(pk.type.slice(0, -3))) {
+        triggerWorldEffect(pk.type.slice(0, -3));
+      } else switch (pk.type) {
         case 'noir': noirTimer = NOIR_DURATION; break;
-        case 'jump': jumpBoostTimer = JUMP_BOOST_DURATION; break;
         case 'slow': slowTimeTimer = SLOWTIME_DURATION; break;
-        case 'zombie': spawnZombieWave(p.pos); break;
+        case 'torusext':
+          if (!extendActiveEffects()) addScore(PICKUP_SCORE);   // nothing active to extend -- don't waste the pickup
+          break;
+        case 'disco': triggerWorldEffect('disco'); break;
+        case 'shrinktag': triggerSoloEffect('shrinktag'); break;
         default: addScore(PICKUP_SCORE);   // plain orb -- the effect IS the points
       }
     }
@@ -1768,10 +1949,16 @@ function makeZombie() {
   scene.add(g);
   return g;
 }
-function spawnZombieWave(origin) {
-  zombieWaveTimer = ZOMBIE_WAVE_DURATION;
-  document.getElementById('zombiewarn').style.display = 'block';
-  for (let i = 0; i < ZOMBIE_COUNT; i++) {
+// Zombie summon (Alex's power-up manifest): the SOLO orb spawns just ONE
+// personal chaser targeting the toucher (isWorld=false, tagged `solo`,
+// sinks when the zombiesummon effect timer runs out); the EVERYONE/halo
+// orb triggers the ORIGINAL full-city wave, broadcast so every client
+// spawns its own local wave targeting itself (no server authority to spawn
+// one shared wave -- matches the "each client applies to itself" pattern).
+function spawnZombieWave(origin, isWorld) {
+  const count = isWorld ? ZOMBIE_COUNT : 1;
+  if (isWorld) { zombieWaveTimer = EFFECT_DURATION; document.getElementById('zombiewarn').style.display = 'block'; }
+  for (let i = 0; i < count; i++) {
     const ang = uniform(0, Math.PI * 2), r = uniform(6, 24);
     const gx = origin.x + Math.cos(ang) * r, gz = origin.z + Math.sin(ang) * r;
     let baseY = 0;
@@ -1786,16 +1973,19 @@ function spawnZombieWave(origin) {
     }
     const obj = makeZombie();
     obj.position.set(gx, baseY - 1.4, gz);
-    zombies.push({ obj, baseY, riseT: 0, state: 'rising', wobble: uniform(0, 6.28) });
+    zombies.push({ obj, baseY, riseT: 0, state: 'rising', wobble: uniform(0, 6.28), solo: !isWorld });
   }
 }
 function stepZombies(dt, p) {
   if (zombieWaveTimer > 0) {
     zombieWaveTimer -= dt;
     if (zombieWaveTimer <= 0) {
-      for (const z of zombies) z.state = 'sinking';
+      for (const z of zombies) if (!z.solo) z.state = 'sinking';
       document.getElementById('zombiewarn').style.display = 'none';
     }
+  }
+  if (!myEffectActive('zombiesummon')) {
+    for (const z of zombies) if (z.solo && z.state === 'chasing') z.state = 'sinking';
   }
   let touching = 0;
   for (let i = zombies.length - 1; i >= 0; i--) {
@@ -1820,12 +2010,228 @@ function stepZombies(dt, p) {
       if (z.obj.position.y < z.baseY - 2.5) { scene.remove(z.obj); zombies.splice(i, 1); }
     }
   }
-  if (touching > 0) {
+  if (touching > 0 && !myEffectActive('invincible')) {
     zombieContact += dt * touching;   // stacks: N zombies touching = N x faster toward death
     if (zombieContact >= ZOMBIE_KILL_TIME) triggerGameOver();
   } else {
     zombieContact = Math.max(0, zombieContact - dt * 2);
   }
+}
+
+// ------------------------------------------------------------ POWERUP FX --
+// Continuous/per-frame behavior for the physics-heavy effects (everything
+// that isn't just "scale a number" -- magnet, energy blast, pong, bomber,
+// confetti, disco). Fire and shrink-tag live in stepMultiplayer instead
+// (they're proximity-to-another-player checks, and that loop already
+// computes distance/height to every remote player every frame -- no reason
+// to walk that list twice).
+//
+// Cross-player kills from these effects (energy blast / pong / bomber) all
+// funnel through ONE new message type, `powerkill` -> rebroadcast
+// `powerkilled` -- same "attacker reports, victim's own client applies it"
+// shape as joust/knock, just generalized so 3 new hazards don't need 3 new
+// message types.
+function reportPowerKill(victimId) {
+  if (mpSocket && mpSocket.readyState === WebSocket.OPEN) {
+    mpSocket.send(JSON.stringify({ type: 'powerkill', victimId }));
+  }
+}
+function nearestRemoteHit(pos, radius) {
+  for (const [id, rp] of remotePlayers) {
+    if (pos.distanceTo(rp.body.position.clone().add(new THREE.Vector3(0, 1, 0))) < radius) return id;
+  }
+  return null;
+}
+
+const pongBalls = [], bombs = [];
+let energyBeamTimer = 0, pongTimer = 0, bomberTimer = 0;
+const beamLineGeo = new LineGeometry();
+beamLineGeo.setPositions([0, 0, 0, 0, 0, 0]);
+const beamLineMat = new LineMaterial({ color: 0x00ffee, linewidth: 5, transparent: true, opacity: 0 });
+beamLineMat.resolution.set(innerWidth, innerHeight);
+const beamLine = new Line2(beamLineGeo, beamLineMat);
+scene.add(beamLine);
+
+function aimDir() { const d = new THREE.Vector3(); camera.getWorldDirection(d); return d; }
+
+// ENERGY BLAST: auto-fires forward every ~0.6s while active (no new input
+// binding introduced -- the manifest didn't specify a trigger key, so this
+// reuses the existing "jousting stick" idea as a passive turret instead).
+// Raycasts against buildingMesh first (blocked by buildings) then checks
+// remote players along the same ray, whichever is closer wins.
+function stepEnergyBlast(dt, p) {
+  if (!myEffectActive('energyblast')) { beamLineMat.opacity = Math.max(0, beamLineMat.opacity - dt * 3); return; }
+  energyBeamTimer -= dt;
+  if (energyBeamTimer <= 0) {
+    energyBeamTimer = 0.6;
+    const dir = aimDir();
+    raycaster.set(p.pos, dir);
+    raycaster.far = ENERGY_BEAM_RANGE;
+    const hit = raycaster.intersectObject(buildingMesh, false)[0];
+    let range = hit ? hit.distance : ENERGY_BEAM_RANGE;
+    for (const [id, rp] of remotePlayers) {
+      const toRp = rp.body.position.clone().sub(p.pos);
+      const along = toRp.dot(dir);
+      if (along <= 0 || along > range) continue;
+      const perp = toRp.clone().addScaledVector(dir, -along).length();
+      if (perp < ENERGY_BEAM_RADIUS + 1) { range = along; reportPowerKill(id); }
+    }
+    const end = p.pos.clone().addScaledVector(dir, range);
+    beamLineGeo.setPositions([p.pos.x, p.pos.y, p.pos.z, end.x, end.y, end.z]);
+    beamLineMat.opacity = 1;
+    sfxThwip(end);
+  } else {
+    beamLineMat.opacity = Math.max(0, beamLineMat.opacity - dt * 2.5);
+  }
+}
+
+// PONG MODE: forward-launched, gravity-free, elastic-bouncing balls,
+// player-sized, instakill on contact -- same "no explicit trigger key
+// specified" call as energy blast, so it auto-launches on an interval.
+function stepPong(dt, p) {
+  if (myEffectActive('pong')) {
+    pongTimer -= dt;
+    if (pongTimer <= 0) {
+      pongTimer = 1.5;
+      const mesh = new THREE.Mesh(new THREE.SphereGeometry(PONG_BALL_RADIUS, 10, 8),
+        new THREE.MeshBasicMaterial({ color: 0xff66cc, wireframe: false }));
+      scene.add(mesh);
+      pongBalls.push({ mesh, pos: p.pos.clone(), vel: aimDir().multiplyScalar(PONG_BALL_SPEED), life: PONG_BALL_LIFE });
+    }
+  }
+  for (let i = pongBalls.length - 1; i >= 0; i--) {
+    const b = pongBalls[i];
+    b.life -= dt;
+    b.pos.addScaledVector(b.vel, dt);
+    for (const c of colliders) {
+      if (b.pos.x < c.min[0] - PONG_BALL_RADIUS || b.pos.x > c.max[0] + PONG_BALL_RADIUS ||
+          b.pos.z < c.min[2] - PONG_BALL_RADIUS || b.pos.z > c.max[2] + PONG_BALL_RADIUS ||
+          b.pos.y < c.min[1] - PONG_BALL_RADIUS || b.pos.y > c.max[1] + PONG_BALL_RADIUS) continue;
+      const pens = [
+        [b.pos.x - (c.min[0] - PONG_BALL_RADIUS), 'x', 1], [(c.max[0] + PONG_BALL_RADIUS) - b.pos.x, 'x', -1],
+        [b.pos.y - (c.min[1] - PONG_BALL_RADIUS), 'y', 1], [(c.max[1] + PONG_BALL_RADIUS) - b.pos.y, 'y', -1],
+        [b.pos.z - (c.min[2] - PONG_BALL_RADIUS), 'z', 1], [(c.max[2] + PONG_BALL_RADIUS) - b.pos.z, 'z', -1]];
+      pens.sort((a, b2) => a[0] - b2[0]);
+      const [, axis, sign] = pens[0];
+      b.vel[axis] = Math.abs(b.vel[axis]) * sign;   // elastic bounce
+    }
+    const hitId = nearestRemoteHit(b.pos, PONG_BALL_RADIUS + 1);
+    if (hitId) reportPowerKill(hitId);
+    if (b.life <= 0 || hitId || b.pos.y < -10) { scene.remove(b.mesh); pongBalls.splice(i, 1); continue; }
+    b.mesh.position.copy(b.pos);
+  }
+}
+
+// BOMBER: "while the web button is held, large explosive balls fall from
+// under you, explode on first contact." Explicit trigger given, unlike
+// the two above -- gated on webHeld directly.
+function stepBomber(dt, p) {
+  if (myEffectActive('bomber') && webHeld) {
+    bomberTimer -= dt;
+    if (bomberTimer <= 0) {
+      bomberTimer = BOMBER_INTERVAL;
+      const mesh = new THREE.Mesh(new THREE.SphereGeometry(BOMBER_RADIUS, 8, 6),
+        new THREE.MeshBasicMaterial({ color: 0xff5522 }));
+      scene.add(mesh);
+      bombs.push({ mesh, pos: p.pos.clone().add(new THREE.Vector3(0, -0.5, 0)) });
+    }
+  } else { bomberTimer = 0; }
+  for (let i = bombs.length - 1; i >= 0; i--) {
+    const b = bombs[i];
+    b.pos.y -= BOMBER_FALL_SPEED * dt;
+    b.mesh.position.copy(b.pos);
+    let boom = b.pos.y < 0.4;
+    for (const c of colliders) {
+      if (b.pos.x > c.min[0] - BOMBER_RADIUS && b.pos.x < c.max[0] + BOMBER_RADIUS &&
+          b.pos.z > c.min[2] - BOMBER_RADIUS && b.pos.z < c.max[2] + BOMBER_RADIUS &&
+          b.pos.y < c.max[1] + BOMBER_RADIUS && b.pos.y > c.min[1] - BOMBER_RADIUS) boom = true;
+    }
+    const hitId = nearestRemoteHit(b.pos, BOMBER_BLAST_RADIUS);
+    if (hitId) { reportPowerKill(hitId); boom = true; }
+    if (boom) {
+      explode(b.pos);
+      scene.remove(b.mesh); bombs.splice(i, 1);
+    }
+  }
+}
+
+// MAGNET: solo pulls nearby uncollected pickups toward you (their existing
+// float animation in stepPickups only ever touches .y each frame, so
+// nudging x/z here is safe and doesn't fight it); everyone pulls every
+// OTHER player toward the trigger point (chaotic dogpile) -- each client
+// pulls only ITSELF toward the shared worldMagnetOrigin, per the
+// "each client applies to itself" rule.
+let worldMagnetOrigin = null;
+function stepMagnet(dt, p) {
+  if (myEffectActive('magnet') && !worldEffects.magnet) {
+    for (const pk of pickups) {
+      if (pk.got) continue;
+      const d = p.pos.distanceTo(pk.mesh.position);
+      if (d < MAGNET_RADIUS && d > 0.5) {
+        const pull = Math.min(1, MAGNET_PULL * dt / d);
+        pk.mesh.position.x += (p.pos.x - pk.mesh.position.x) * pull;
+        pk.mesh.position.z += (p.pos.z - pk.mesh.position.z) * pull;
+        pk.baseY += (p.pos.y - pk.baseY) * pull * 0.3;
+      }
+    }
+  }
+  if (worldEffects.magnet > 0 && worldMagnetOrigin) {
+    const d = p.pos.distanceTo(worldMagnetOrigin);
+    if (d > 1.5) p.vel.addScaledVector(worldMagnetOrigin.clone().sub(p.pos).normalize(), MAGNET_PULL * dt * 3);
+  }
+}
+
+// CONFETTI: purely cosmetic trailing particles, zero gameplay impact.
+const confettiParts = [];
+for (let i = 0; i < 16; i++) {
+  const m = new THREE.Mesh(new THREE.PlaneGeometry(0.12, 0.12),
+    new THREE.MeshBasicMaterial({ color: 0xffffff, side: THREE.DoubleSide }));
+  m.visible = false; scene.add(m);
+  confettiParts.push({ mesh: m, vel: new THREE.Vector3(), life: 0 });
+}
+let confettiTimer = 0;
+function stepConfetti(dt, p) {
+  if (myEffectActive('confetti')) {
+    confettiTimer -= dt;
+    if (confettiTimer <= 0) {
+      confettiTimer = 1 / CONFETTI_RATE;
+      const part = confettiParts[Math.floor(rng() * confettiParts.length)];
+      part.mesh.visible = true;
+      part.mesh.material.color.setHSL(rng(), 0.9, 0.6);
+      part.mesh.position.copy(p.pos).addScaledVector(new THREE.Vector3(uniform(-0.3, 0.3), uniform(-0.2, 0.2), uniform(-0.3, 0.3)), 1);
+      part.vel.set(uniform(-1, 1), uniform(0.5, 2), uniform(-1, 1));
+      part.life = uniform(0.8, 1.4);
+    }
+  }
+  for (const part of confettiParts) {
+    if (part.life <= 0) { part.mesh.visible = false; continue; }
+    part.vel.y -= 4 * dt;
+    part.mesh.position.addScaledVector(part.vel, dt);
+    part.mesh.rotation.x += 6 * dt; part.mesh.rotation.y += 5 * dt;
+    part.life -= dt;
+  }
+}
+
+// DISCO: environment-only, everyone-only (see manifest exceptions) -- cheap
+// CSS hue-rotate on the render canvas cycles every building's neon instead
+// of touching the material graph directly.
+function stepDisco(dt) {
+  if (worldEffects.disco > 0) {
+    discoHue = (discoHue + dt * DISCO_CYCLE_SPEED * 57.3) % 360;
+    renderer.domElement.style.filter = `hue-rotate(${discoHue.toFixed(0)}deg) saturate(1.6)`;
+  } else if (renderer.domElement.style.filter) {
+    renderer.domElement.style.filter = '';
+  }
+}
+let discoHue = 0;
+
+function stepPowerupFX(dt, p) {
+  stepEnergyBlast(dt, p);
+  stepPong(dt, p);
+  stepBomber(dt, p);
+  stepMagnet(dt, p);
+  stepConfetti(dt, p);
+  stepDisco(dt);
 }
 
 // ------------------------------------------------------------- GAME OVER --
@@ -1868,8 +2274,13 @@ function stepExplosion(dt) {
 // need a text-sprite helper that doesn't exist in this file yet): just
 // auto-restart a beat after death instead of waiting for a click.
 const VR_AUTO_RESTART_DELAY = 3.5;   // seconds after death, VR-only
-function triggerGameOver() {
+// INVINCIBILITY power-up: "can't be knocked/jousted/exploded" -- guards
+// every COMBAT death (knock/joust/fire/energy-blast/pong/bomber/zombie
+// contact) here in one place. `force` bypasses it for non-combat deaths
+// (falling out of bounds) that the manifest doesn't cover.
+function triggerGameOver(force) {
   if (gameOver) return;
+  if (!force && myEffectActive('invincible')) return;
   gameOver = true;
   explode(player.pos);
   kbMouseWebHeld = webHeld = false; player.anchor = null;
@@ -1899,6 +2310,19 @@ function resetGame() {
   for (const z of zombies) scene.remove(z.obj);
   zombies.length = 0;
   document.getElementById('zombiewarn').style.display = 'none';
+  // Power-up system reset: clear every active effect and any spawned
+  // projectiles/hazards from them, so a Try Again doesn't inherit giant
+  // scale, a floating pong ball, or a disco-tinted screen.
+  for (const k of Object.keys(activeEffects)) delete activeEffects[k];
+  for (const k of Object.keys(worldEffects)) delete worldEffects[k];
+  worldMagnetOrigin = null;
+  for (const b of pongBalls) scene.remove(b.mesh); pongBalls.length = 0;
+  for (const b of bombs) scene.remove(b.mesh); bombs.length = 0;
+  for (const part of confettiParts) part.mesh.visible = false;
+  beamLineMat.opacity = 0;
+  renderer.domElement.style.filter = '';
+  spidey.scale.setScalar(1);
+  powerBannerEl.style.opacity = '0';
   updatePowerupHud();
   respawn();
 }
@@ -2143,7 +2567,14 @@ function findAnchor() {
   return best;
 }
 function tryAttach() {
-  const a = findAnchor();
+  let a = findAnchor();
+  // WEB-ANYWHERE power-up: reuses the phantom-grapple flourish's own aim
+  // point as a REAL anchor when nothing's actually in range -- "always
+  // finds a phantom attach point even with nothing real to grab."
+  if (!a && myEffectActive('webanywhere')) {
+    const f2 = new THREE.Vector3(); camera.getWorldDirection(f2); f2.y = 0; f2.normalize();
+    a = player.pos.clone().addScaledVector(f2, 3).add(new THREE.Vector3(0, 4.2, 0));
+  }
   if (!a) return false;
   player.anchor = a;
   sfxThwip(a);
@@ -2182,7 +2613,7 @@ function fireWeb(boosted) {
   if (found) return;
   const f2 = new THREE.Vector3(); camera.getWorldDirection(f2); f2.y = 0; f2.normalize();
   if (boosted) {
-    player.vel.y = jumpBoostTimer > 0 ? JUMP_VEL_BOOSTED * 0.85 : JUMP_VEL_NORMAL;
+    player.vel.y = (jumpBoostTimer > 0 ? JUMP_VEL_BOOSTED * 0.85 : JUMP_VEL_NORMAL) * (myEffectActive('superjump') ? SUPERJUMP_MULT : 1);
     player.vel.addScaledVector(f2, 3.5);
   }
   sfxThwip(player.pos);
@@ -2525,7 +2956,7 @@ function stepPlayer(dt) {
   const webPressed = webHeld && !prevWebHeld;
   if (webPressed && !p.anchor) {
     if (p.onGround) {
-      p.vel.y = jumpBoostTimer > 0 ? JUMP_VEL_BOOSTED : JUMP_VEL_NORMAL;
+      p.vel.y = (jumpBoostTimer > 0 ? JUMP_VEL_BOOSTED : JUMP_VEL_NORMAL) * (myEffectActive('superjump') ? SUPERJUMP_MULT : 1);
       p.onGround = false;
       pendingAirWeb = true;
     } else {
@@ -2542,16 +2973,42 @@ function stepPlayer(dt) {
     if (sp2 > 1) { p.vel.x *= 1 + 2 / sp2; p.vel.z *= 1 + 2 / sp2; }
   }
 
-  p.vel.y -= GRAV * dt;
-  p.vel.y = Math.max(p.vel.y, -46);   // terminal velocity: keeps the 240-unit sky drop
-                                       // controllable and stops single-frame tunneling
-                                       // through thin colliders at extreme fall speed
-  if (p.onGround) {
-    const target = inDir.multiplyScalar(keys.ShiftLeft ? RUN * 1.7 : RUN);
-    p.vel.x += (target.x - p.vel.x) * Math.min(1, dt * 8);
-    p.vel.z += (target.z - p.vel.z) * Math.min(1, dt * 8);
+  // SPEED / FLY / LOW-GRAVITY power-ups. Speed scales the target horizontal
+  // velocity (not dt -- dt-scaling here would also speed up physics
+  // substeps and interact badly with the rope constraint). Fly disables
+  // gravity ENTIRELY (not just floaty -- full free 3D movement, per spec)
+  // and swaps ground-plane WASD for look-relative 3D flight; low-gravity
+  // just weakens GRAV, everything else about movement stays normal.
+  const speedMult = myEffectActive('speed') ? SPEED_MULT : 1;
+  if (myEffectActive('fly')) {
+    p.vel.y *= Math.pow(0.05, dt);   // gentle air drag stands in for gravity so flight doesn't run away
+    const fwd = new THREE.Vector3(-Math.sin(yaw) * Math.cos(pitch), Math.sin(pitch), -Math.cos(yaw) * Math.cos(pitch));
+    const rgt = new THREE.Vector3(-fwd.z, 0, fwd.x).normalize();
+    const flyDir = new THREE.Vector3();
+    if (keys.KeyW) flyDir.add(fwd);
+    if (keys.KeyS) flyDir.sub(fwd);
+    if (keys.KeyD) flyDir.add(rgt);
+    if (keys.KeyA) flyDir.sub(rgt);
+    if (flyDir.lengthSq() > 0) flyDir.normalize();
+    const flySpeed = (keys.ShiftLeft ? RUN * 1.7 : RUN) * 1.4 * speedMult;
+    const ft = flyDir.multiplyScalar(flySpeed);
+    p.vel.x += (ft.x - p.vel.x) * Math.min(1, dt * 6);
+    p.vel.y += (ft.y - p.vel.y) * Math.min(1, dt * 6);
+    p.vel.z += (ft.z - p.vel.z) * Math.min(1, dt * 6);
+    p.onGround = false;
   } else {
-    p.vel.addScaledVector(inDir, AIR_CTRL * dt);
+    const g = GRAV * (myEffectActive('lowg') ? LOWG_GRAV_MULT : 1);
+    p.vel.y -= g * dt;
+    p.vel.y = Math.max(p.vel.y, -46);   // terminal velocity: keeps the 240-unit sky drop
+                                         // controllable and stops single-frame tunneling
+                                         // through thin colliders at extreme fall speed
+    if (p.onGround) {
+      const target = inDir.multiplyScalar((keys.ShiftLeft ? RUN * 1.7 : RUN) * speedMult);
+      p.vel.x += (target.x - p.vel.x) * Math.min(1, dt * 8);
+      p.vel.z += (target.z - p.vel.z) * Math.min(1, dt * 8);
+    } else {
+      p.vel.addScaledVector(inDir, AIR_CTRL * dt * speedMult);
+    }
   }
   p.pos.addScaledVector(p.vel, dt);
 
@@ -2583,7 +3040,13 @@ function stepPlayer(dt) {
   p.onGround = false;
   p.onWall = false;
   if (p.pos.y < 0.9) { p.pos.y = 0.9; if (p.vel.y < 0) p.vel.y = 0; p.onGround = true; }
-  const R = 0.4;
+  // GIANT/TINY/SHRUNK scale the collision radius along with the visuals
+  // below (giant x tiny x shrunk multiply if somehow stacked -- unspecified
+  // by the manifest, but multiplying is the least-surprising combination).
+  const playerScale = (myEffectActive('giant') ? GIANT_SCALE : 1) *
+    (myEffectActive('tiny') ? TINY_SCALE : 1) * ((activeEffects.shrunk || 0) > 0 ? SHRINKTAG_SCALE : 1);
+  const R = 0.4 * playerScale;
+  const ghosting = myEffectActive('ghost');
   // WALL-CRAWL (Alex: "if I'm holding spacebar and I come to a vertical
   // surface, I should crawl up it like spiderman"). A horizontal-axis push
   // (0/1/4/5, i.e. an actual wall face, not the floor/ceiling axes 2/3) IS
@@ -2596,7 +3059,9 @@ function stepPlayer(dt) {
   const wallCrawling = webHeld && !p.anchor;
   let buildingHit = false;
   let wallFaceAxis = null;   // which wall face we're pressed against this frame, for pawn rotation
-  for (const c of colliders) {
+  // GHOST power-up: skip building collision entirely -- "pass through
+  // buildings/cars/players, no collision."
+  if (!ghosting) for (const c of colliders) {
     if (p.pos.x < c.min[0] - R || p.pos.x > c.max[0] + R ||
         p.pos.z < c.min[2] - R || p.pos.z > c.max[2] + R ||
         p.pos.y < c.min[1] - R || p.pos.y > c.max[1] + 1.0) continue;
@@ -2644,12 +3109,12 @@ function stepPlayer(dt) {
   // you smash through and send it flying instead of stopping dead against
   // it. Sphere-based, not full oriented-box: cars are small and this reads
   // fine at the distances involved, and it's far cheaper than rotated-AABB
-  // math against 100+ moving objects every frame.
+  // math against 100+ moving objects every frame. Ghost skips this too.
   if (carBumpCooldown > 0) carBumpCooldown -= dt;
   if (buildingBumpCooldown > 0) buildingBumpCooldown -= dt;
   if (playerPushCooldown > 0) playerPushCooldown -= dt;
   const sp0 = p.vel.length();
-  resolveCarCollisions(p, sp0);
+  if (!ghosting) resolveCarCollisions(p, sp0);
 
   // BORDER WALL BOUNCE (Alex: "it's too easy to get out of the city and
   // die -- let's just make the border walls bounce you hard back toward
@@ -2660,9 +3125,10 @@ function stepPlayer(dt) {
   // re-trigger. A rope, if taut, is dropped so it can't fight the kickback.
   // Falling through the world floor (y<-25) is unrelated and stays an
   // instant death -- there's no "safe area" to bounce back to from
-  // underneath the map.
+  // underneath the map. (The bounce obsoletes invincibility's OOB carve-out
+  // from the power-up manifest -- there's no more OOB death to bypass.)
   const beyondWall = Math.abs(p.pos.x) > WORLD_BOUND || Math.abs(p.pos.z) > WORLD_BOUND;
-  if (p.pos.y < -25) { triggerGameOver(); return; }
+  if (p.pos.y < -25) { triggerGameOver(true); return; }
   if (beyondWall) {
     const toCenter = new THREE.Vector3(-p.pos.x, 0, -p.pos.z);
     if (toCenter.lengthSq() > 0) toCenter.normalize();
@@ -2684,10 +3150,12 @@ function stepPlayer(dt) {
   checkKnocks(p, p.vel.length());
   if (comboTimer > 0) { comboTimer -= dt; if (comboTimer <= 0) comboCount = 0; }
 
-  // visuals: lean the body into the velocity, or face square into the wall
-  // while climbing (horizontal speed is ~0 mid-climb, so the velocity-facing
-  // rotation below would otherwise leave spidey facing a stale direction).
+  // visuals: lean the body into the velocity (scaled by giant/tiny/shrunk),
+  // or face square into the wall while climbing (horizontal speed is ~0
+  // mid-climb, so the velocity-facing rotation below would otherwise leave
+  // spidey facing a stale direction).
   spidey.position.copy(p.pos);
+  spidey.scale.setScalar(playerScale);
   const sp = Math.hypot(p.vel.x, p.vel.z);
   if (p.onWall && wallFaceAxis !== null) {
     spidey.rotation.y = WALL_FACE_YAW[wallFaceAxis];
@@ -2697,6 +3165,7 @@ function stepPlayer(dt) {
     spidey.rotation.x = THREE.MathUtils.clamp(sp * 0.02 * (p.anchor ? 1.6 : 0.4), 0, 0.9);
   }
   stepCoat(p);
+  stepPowerupFX(dt, p, playerScale);
 
   // camera -- in an XR session this steers cameraRig (the camera's parent),
   // not the camera directly, since the headset owns the camera's local
@@ -2977,7 +3446,7 @@ function connectMultiplayer() {
         const rp = remotePlayers.get(msg.victimId);
         if (rp) explode(rp.body.position);
       }
-    } else if (msg.type === 'knocked' && msg.victimId === myId && !gameOver) {
+    } else if (msg.type === 'knocked' && msg.victimId === myId && !gameOver && !myEffectActive('invincible')) {
       // A knock only ever arrives naming YOU -- the attacker's client
       // detected the hit (it can't move your physics directly, there's no
       // server authority here, so it reports and your own client applies
@@ -2996,6 +3465,29 @@ function connectMultiplayer() {
       // naturally ("YOU just became the leader" looks the same as everyone
       // else's view of it).
       showLeaderBanner(msg.initials, msg.score);
+    } else if (msg.type === 'poweractivated') {
+      // Solo announcements are excluded-from-sender server-side (the
+      // trigger already applied+announced locally, see triggerSoloEffect),
+      // so this only ever fires for OTHER players' solo triggers, and for
+      // world triggers -- including the origin's own, so everyone
+      // (origin included) applies worldEffects from the SAME broadcast.
+      if (msg.world) {
+        worldEffects[msg.name] = EFFECT_DURATION;
+        if (msg.name === 'magnet' && msg.pos) worldMagnetOrigin = new THREE.Vector3(msg.pos[0], msg.pos[1], msg.pos[2]);
+        onEffectTriggered(msg.name, true);
+      }
+      announceRemoteEffect(msg.name, msg.color);
+    } else if (msg.type === 'powerkilled') {
+      // Energy blast / pong / bomber instakill -- same "attacker reports,
+      // victim applies to itself" shape as jousted.
+      if (msg.victimId === myId && !gameOver) triggerGameOver();
+      else { const rp = remotePlayers.get(msg.victimId); if (rp) explode(rp.body.position); }
+    } else if (msg.type === 'shrinktagged') {
+      // Shrink-tag: a THIRD mechanic, not a giant/tiny variant -- touching
+      // another player while charged shrinks THEM specifically.
+      const victimColor = msg.victimId === myId ? myColor : (remotePlayers.get(msg.victimId)?.color ?? null);
+      if (msg.victimId === myId) activeEffects.shrunk = EFFECT_DURATION;
+      showPowerBanner(`${colorLabel(msg.byColor)} SHRUNK ${colorLabel(victimColor)}!!`);
     }
   });
   mpSocket.addEventListener('close', () => { mpSocket = null; setTimeout(connectMultiplayer, 3000); });
@@ -3042,10 +3534,35 @@ function stepMultiplayer(dt, p) {
       rp.webLineGeo.setPositions([rp.body.position.x, rp.body.position.y, rp.body.position.z, rp.anchorPos.x, rp.anchorPos.y, rp.anchorPos.z]);
     } else rp.webLine.visible = false;
   }
-  if (!gameOver) for (const [id, rp] of remotePlayers) {
+  // GHOST: "pass through... players, no collision" -- skips the whole
+  // interaction loop on MY side only (the other client would need to know
+  // MY effect state to skip symmetrically, which the 'state' message
+  // doesn't carry; a known simplification, see commit notes).
+  const ghosting = myEffectActive('ghost');
+  const fireTouch = myEffectActive('fire');
+  const shrinkCharged = myEffectActive('shrinktag');
+  if (!gameOver && !ghosting) for (const [id, rp] of remotePlayers) {
     const dx = p.pos.x - rp.body.position.x, dz = p.pos.z - rp.body.position.z;
     const dist = Math.hypot(dx, dz);
     const heightAbove = p.pos.y - rp.body.position.y;
+    // FIRE: "you explode anyone you touch from any angle" -- any proximity,
+    // not gated to the joust height band. Everyone-version reads as mutual
+    // because BOTH sides independently have fireTouch=true and each
+    // detects the same contact from their own client.
+    if (fireTouch && dist < PLAYER_SOLID_RADIUS + 0.3 && Math.abs(heightAbove) < PLAYER_HEIGHT_GATE + 0.5) {
+      reportPowerKill(id);
+      explode(rp.body.position);
+      continue;
+    }
+    // SHRINK-TAG: charged + close contact shrinks THEM, not you.
+    if (shrinkCharged && dist < PLAYER_SOLID_RADIUS + 0.2 && Math.abs(heightAbove) < PLAYER_HEIGHT_GATE &&
+        !playerKnockCooldowns.has(id)) {
+      playerKnockCooldowns.set(id, 0.6);
+      if (mpSocket && mpSocket.readyState === WebSocket.OPEN) {
+        mpSocket.send(JSON.stringify({ type: 'shrinktag', victimId: id }));
+      }
+      continue;
+    }
     // JOUST: am I currently landing on top of someone's HEAD? Close enough
     // in XZ, in the head's height band specifically, and actually falling
     // with real force (not just standing adjacent).
@@ -3098,6 +3615,10 @@ function stepMultiplayer(dt, p) {
       }
     }
   }
+  // GIANT/TINY/GHOST/CONFETTI rendering for OTHER players -- world effects
+  // only (a solo buff never touches how anyone else is drawn).
+  const remoteScale = (worldEffects.giant > 0 ? GIANT_SCALE : 1) * (worldEffects.tiny > 0 ? TINY_SCALE : 1);
+  for (const rp of remotePlayers.values()) rp.body.scale.setScalar(remoteScale);
   mpSendTimer -= dt;
   if (mpSendTimer <= 0 && mpSocket && mpSocket.readyState === WebSocket.OPEN) {
     mpSendTimer = MP_SEND_INTERVAL;
@@ -3134,6 +3655,11 @@ function loop(now) {
   if (jumpBoostTimer > 0) { jumpBoostTimer -= dt; if (jumpBoostTimer < 0) jumpBoostTimer = 0; }
   noirPass.uniforms.uSat.value = THREE.MathUtils.lerp(
     noirPass.uniforms.uSat.value, noirTimer > 0 ? 0.0 : 1.0, Math.min(1, dt * 3));
+  // Power-up effect timers: plain countdown, stacking is just "still >0"
+  // (see triggerSoloEffect/triggerWorldEffect/extendActiveEffects).
+  for (const map of [activeEffects, worldEffects]) {
+    for (const k of Object.keys(map)) if (map[k] > 0 && (map[k] -= dt) <= 0) delete map[k];
+  }
   updatePowerupHud();
 
   // Signal phase is a pure function of `t % period` -- so swapping in real
@@ -3236,7 +3762,17 @@ window.__sw = { THREE, player, cars, parkedCars, pickups, colliders, EDGE, WORLD
                 knownPlayerIds, updatePlayerCount, playerCountEl, composer,
                 JOUST_RADIUS, JOUST_HEIGHT_MIN, JOUST_HEIGHT_MAX, JOUST_MIN_FALL_SPEED,
                 STICK_POKE_REACH, STICK_POKE_RADIUS, STICK_POKE_MIN_SPEED, STICK_POKE_HEIGHT_GATE,
-                playerPokeCooldowns, predictedRemotePos };
+                playerPokeCooldowns, predictedRemotePos,
+                // Power-up system (Alex's "Delegation Manifest" item 14) --
+                // activeEffects/worldEffects are live objects (not getters),
+                // so tests can poke them directly, e.g.
+                // `__sw.activeEffects.giant = 30` to force-grant an effect
+                // without waiting to find the right orb.
+                activeEffects, worldEffects, EFFECT_NAMES, ORB_EFFECTS, DUAL_KEYS,
+                triggerSoloEffect, triggerWorldEffect, extendActiveEffects, myEffectActive,
+                pongBalls, bombs, confettiParts,
+                get worldMagnetOrigin() { return worldMagnetOrigin; },
+                get discoHue() { return discoHue; } };
 </script>
 </body>
 </html>

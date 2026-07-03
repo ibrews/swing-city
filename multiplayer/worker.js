@@ -108,6 +108,31 @@ export class Room {
       // sees their own banner, same as an attacker sees its own joust
       // resolve.
       this.broadcast({ type: 'leader', id, initials: msg.initials.slice(0, 3).toUpperCase(), score: msg.score });
+    } else if (msg.type === 'powerkill' && typeof msg.victimId === 'string') {
+      // Energy blast / pong / bomber instakill -- generalized joust: one
+      // message type instead of three, since the client-side effect (named
+      // victim's own client dies) is identical regardless of WHICH power-up
+      // caused it.
+      this.broadcast({ type: 'powerkilled', victimId: msg.victimId, byId: id });
+    } else if (msg.type === 'shrinktag' && typeof msg.victimId === 'string') {
+      // Shrink-tag: a targeted attack (touch another player to shrink
+      // THEM), not a self/everyone buff -- same shape again, byColor rides
+      // along so bystanders can render "X SHRUNK Y!!" without a lookup.
+      this.broadcast({ type: 'shrinktagged', victimId: msg.victimId, byId: id, byColor: Number(colorStr) });
+    } else if (msg.type === 'effect' && typeof msg.name === 'string') {
+      // Power-up orb system (Alex's "Delegation Manifest" item 14). SOLO
+      // triggers (solid orb) apply instantly on the toucher's own client
+      // (see triggerSoloEffect in index.html) -- this broadcast is
+      // announcement-only, so it's excluded from the sender like 'state'.
+      // EVERYONE triggers (halo orb) carry the actual effect and go to
+      // ALL sockets including the sender, same no-exclude shape as
+      // joust/knock, so every client (sender included) applies it from one
+      // consistent code path.
+      if (msg.world) {
+        this.broadcast({ type: 'poweractivated', name: msg.name, world: true, byId: id, color: Number(colorStr), pos: Array.isArray(msg.pos) ? msg.pos : null });
+      } else {
+        this.broadcast({ type: 'poweractivated', name: msg.name, world: false, byId: id, color: Number(colorStr) }, ws);
+      }
     }
   }
 
