@@ -1589,6 +1589,12 @@ function stepExplosion(dt) {
     part.life -= dt;
   }
 }
+// You can't see or click the DOM game-over overlay from inside a headset --
+// Alex, family playtest: "in WebXR you can't see the menus, so once you die
+// you can't restart." Simplest fix over a head-locked 3D menu (which would
+// need a text-sprite helper that doesn't exist in this file yet): just
+// auto-restart a beat after death instead of waiting for a click.
+const VR_AUTO_RESTART_DELAY = 3.5;   // seconds after death, VR-only
 function triggerGameOver() {
   if (gameOver) return;
   gameOver = true;
@@ -1600,6 +1606,7 @@ function triggerGameOver() {
     goEl.style.display = 'flex';
     if (document.pointerLockElement) document.exitPointerLock();
   }, 550);
+  if (renderer.xr.isPresenting) setTimeout(resetGame, VR_AUTO_RESTART_DELAY * 1000);
 }
 function resetGame() {
   gameOver = false;
@@ -1935,6 +1942,11 @@ addEventListener('keydown', e => {
   kbKeys[e.code] = true;
   if (e.code === 'Space') { kbMouseWebHeld = true; e.preventDefault(); }
   if (e.code === 'KeyR') respawn();
+  // Non-VR camera toggle only -- in VR there's no keyboard in reach, and
+  // first person is already forced on sessionstart regardless.
+  if (e.code === 'KeyV' && !renderer.xr.isPresenting) {
+    cameraMode = cameraMode === 'first' ? 'third' : 'first';
+  }
 });
 addEventListener('keyup', e => {
   kbKeys[e.code] = false;
@@ -2020,6 +2032,8 @@ initialsInput.addEventListener('input', () => {
 // handler does (minus pointer lock, meaningless once the headset owns
 // head tracking).
 renderer.xr.addEventListener('sessionstart', enterGame);
+renderer.xr.addEventListener('sessionstart', () => { cameraMode = 'first'; });
+renderer.xr.addEventListener('sessionend', () => { cameraMode = 'third'; });
 document.addEventListener('pointerlockerror', () => {
   document.getElementById('webstate').textContent = 'no pointer lock (embedded?) — mouse-look fallback on';
 });
@@ -2396,23 +2410,38 @@ function stepPlayer(dt) {
   }
   stepCoat(p);
 
-  // third-person camera -- in an XR session this steers cameraRig (the
-  // camera's parent), not the camera directly, since the headset owns the
-  // camera's local transform once presenting. Outside XR the rig is never
-  // touched and stays at identity, so this branch changes nothing about
-  // desktop behavior.
-  const camOff = new THREE.Vector3(
-    Math.sin(yaw) * Math.cos(pitch), -Math.sin(pitch), Math.cos(yaw) * Math.cos(pitch)
-  ).multiplyScalar(8.5);
-  const target = p.pos.clone().add(camOff).add(new THREE.Vector3(0, 2.2, 0));
+  // camera -- in an XR session this steers cameraRig (the camera's parent),
+  // not the camera directly, since the headset owns the camera's local
+  // transform once presenting; the headset's own head orientation then
+  // layers on top of whatever the rig does here, same dolly pattern either
+  // mode. Outside XR the rig is never touched and stays at identity, so
+  // this branch changes nothing about desktop behavior.
+  // lookDir is the flat "facing" direction described by yaw/pitch (same
+  // math the old fixed third-person offset used, just factored out so
+  // first-person can point the camera the same way third-person orbits
+  // around it, instead of duplicating the trig).
+  const lookDir = new THREE.Vector3(
+    -Math.sin(yaw) * Math.cos(pitch), Math.sin(pitch), -Math.cos(yaw) * Math.cos(pitch)
+  );
   const camTarget = renderer.xr.isPresenting ? cameraRig : camera;
-  camTarget.position.lerp(target, Math.min(1, dt * 7));
-  // "Camera should not be able to go below the ground" -- steep downward
-  // pitch (looking down at yourself from above) could put the lerped
-  // camera position underneath the ground plane; hard-clamp it above the
-  // surface (ground top is y=0) regardless of what the orbit math wants.
-  camTarget.position.y = Math.max(camTarget.position.y, 0.35);
-  camTarget.lookAt(p.pos.x, p.pos.y + 1.2, p.pos.z);
+  const eyeY = p.pos.y + 1.2;   // same head-height constant third-person already aimed at
+  if (cameraMode === 'first') {
+    // Sit exactly at head height, no offset -- first-person tracks the
+    // head 1:1 (no lerp lag), which matters doubly in VR where any
+    // positional lag on your own head reads as nausea, not smoothing.
+    camTarget.position.set(p.pos.x, eyeY, p.pos.z);
+    camTarget.lookAt(camTarget.position.x + lookDir.x, camTarget.position.y + lookDir.y, camTarget.position.z + lookDir.z);
+  } else {
+    const camOff = lookDir.clone().multiplyScalar(-8.5);
+    const target = p.pos.clone().add(camOff).add(new THREE.Vector3(0, 2.2, 0));
+    camTarget.position.lerp(target, Math.min(1, dt * 7));
+    // "Camera should not be able to go below the ground" -- steep downward
+    // pitch (looking down at yourself from above) could put the lerped
+    // camera position underneath the ground plane; hard-clamp it above the
+    // surface (ground top is y=0) regardless of what the orbit math wants.
+    camTarget.position.y = Math.max(camTarget.position.y, 0.35);
+    camTarget.lookAt(p.pos.x, eyeY, p.pos.z);
+  }
 
   document.getElementById('webstate').textContent =
     p.anchor ? 'SWINGING' : (webHeld ? 'no anchor in range' : 'ready');
@@ -2812,6 +2841,8 @@ window.__sw = { THREE, player, cars, parkedCars, pickups, colliders, EDGE, WORLD
                 stepGamepad, stepTouch, touchJoyVec, touchJoyUpdate,
                 get touchCapable() { return touchCapable; },
                 get yaw() { return yaw; }, get pitch() { return pitch; },
+                get cameraMode() { return cameraMode; }, set cameraMode(v) { cameraMode = v; },
+                VR_AUTO_RESTART_DELAY,
                 get entered() { return entered; },
                 set entered(v) { entered = v; },
                 stepXR, xrKeys, get xrWebHeld() { return xrWebHeld; },
