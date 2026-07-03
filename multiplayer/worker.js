@@ -72,7 +72,16 @@ export class Room {
       // boolean -- Alex: "we should see each other's webs", which needs
       // the real anchor point to draw a line to, not just "someone's
       // swinging."
-      this.broadcast({ type: 'state', id, color: Number(colorStr), pos: msg.pos, yaw: msg.yaw, anchor: Array.isArray(msg.anchor) ? msg.anchor : null, alive: msg.alive !== false }, ws);
+      // initials + score ride along here too (leaderboard + name tags) --
+      // same "sender reports its own state, DO just relays" shape as
+      // everything else; no server-side score authority, so a player's
+      // score is only as fresh as their last state packet (~15/sec).
+      this.broadcast({
+        type: 'state', id, color: Number(colorStr), pos: msg.pos, yaw: msg.yaw,
+        anchor: Array.isArray(msg.anchor) ? msg.anchor : null, alive: msg.alive !== false,
+        initials: typeof msg.initials === 'string' ? msg.initials.slice(0, 3).toUpperCase() : '',
+        score: typeof msg.score === 'number' ? msg.score : 0,
+      }, ws);
     } else if (msg.type === 'joust' && typeof msg.victimId === 'string') {
       this.broadcast({ type: 'jousted', victimId: msg.victimId, byId: id });
     } else if (msg.type === 'knock' && typeof msg.victimId === 'string' && Array.isArray(msg.dir)) {
@@ -81,6 +90,14 @@ export class Room {
       // the named victim acts on it" shape as joust, since there's no
       // server-authoritative physics here for the DO to apply directly.
       this.broadcast({ type: 'knocked', victimId: msg.victimId, byId: id, dir: msg.dir, momentum: msg.momentum });
+    } else if (msg.type === 'leader' && typeof msg.initials === 'string' && typeof msg.score === 'number') {
+      // Leaderboard-topping announcement (Alex: "whenever someone becomes
+      // a new leader, everyone should see text..."). Same shape as
+      // joust/knock: the client that just became #1 detects that itself
+      // and reports once; broadcast (no exclude) so the new leader ALSO
+      // sees their own banner, same as an attacker sees its own joust
+      // resolve.
+      this.broadcast({ type: 'leader', id, initials: msg.initials.slice(0, 3).toUpperCase(), score: msg.score });
     }
   }
 

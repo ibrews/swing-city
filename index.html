@@ -90,9 +90,10 @@
   <b>hold against a wall</b> — crawl up it<br>
   WASD — run / steer in the air &nbsp;·&nbsp; shift — sprint &nbsp;·&nbsp; R — respawn<br><br>
   <b>HOW TO WIN:</b> there's no ending — just a high score. Smash into cars while swinging to send
-  them flying (+25), grab the glowing orbs for points (+10) — a few unusual-looking ones do
-  something other than add points. Cross the glowing boundary wall and the screen turns red --
-  you've got about 2 seconds to get back inside before it's over.
+  them flying (+25), grab the glowing orbs for points (+10), and joust or knock other players
+  around to rack up bonus points too — a few unusual-looking orbs do something other than add
+  points. Cross the glowing boundary wall and the screen turns red -- you've got about 2 seconds
+  to get back inside before it's over.
 </div></div>
 <div id="gameover"><div>
   <h1>SWING&hellip; SWANG&hellip; SWUNG</h1>
@@ -210,6 +211,46 @@ function mulberry32(a) {
 const rng = mulberry32(SEED);
 const uniform = (a, b) => a + (b - a) * rng();
 const choice = arr => arr[Math.floor(rng() * arr.length)];
+
+// ---------------------------------------------------- TIME-SYNCED RNG --
+// For anything that must render IDENTICALLY across multiplayer clients
+// (weather, traffic-light phase) without a server round-trip. `rng()` above
+// is a single mutable cursor shared by city gen, music, pickups, etc; the
+// city itself stays in sync because every client consumes it in the exact
+// same call order during synchronous startup, but anything that keeps
+// drawing from it LATER (every frame, gated by each client's own timers) is
+// consumed at a different rate per client -- different frame timing, tab-
+// focus stalls, network hiccups -- and drifts out of sync within seconds
+// even though it started identical. This was rain's actual bug: stepWeather
+// kept calling the shared rng() on its own per-client countdown.
+// timeHash() has no mutable state at all -- it's a pure function of a topic
+// tag + an integer index, so every client gets the identical value for the
+// identical (topic, index) no matter when it asks.
+function timeHash(topic, index) {
+  let a = (Math.imul(topic, 0x9E3779B1) ^ Math.imul(index, 0x85EBCA6B) ^ SEED) | 0;
+  a = Math.imul(a ^ (a >>> 15), 1 | a);
+  a = (a + Math.imul(a ^ (a >>> 7), 61 | a)) ^ a;
+  return ((a ^ (a >>> 14)) >>> 0) / 4294967296;
+}
+// Chains variable-length segments (each [minMs, maxMs) long, duration drawn
+// from timeHash so every client derives the SAME chain) forward from a
+// rolling epoch -- the start of the current UTC day -- until it reaches
+// `nowMs`, returning the segment "now" falls in. Anchoring to a recent
+// epoch instead of Unix time 0 bounds the walk to at most a few thousand
+// steps (cheap, no caching required) instead of growing forever as the page
+// stays open longer. Known accepted tradeoff: the chain restarts fresh at
+// each UTC-day boundary, so there's a once-a-day discontinuity instead of a
+// seamless transition right at midnight UTC -- far cheaper than an
+// unbounded walk, and rare/subtle enough not to matter for a casual effect.
+function currentSegment(topic, nowMs, minMs, maxMs) {
+  const epoch = Math.floor(nowMs / 86400000) * 86400000;
+  let t = epoch, i = 0;
+  while (true) {
+    const dur = minMs + timeHash(topic, i * 2) * (maxMs - minMs);
+    if (t + dur > nowMs) return { index: i, start: t, end: t + dur };
+    t += dur; i++;
+  }
+}
 
 // ------------------------------------------------------------------ SCENE --
 const scene = new THREE.Scene();
@@ -375,6 +416,26 @@ for (let i = 0; i < GRID_N; i++) for (let j = 0; j < GRID_N; j++) {
       antennas.push({ x: lx, y: y + ah / 2, z: lz, sy: ah, color });
     }
   }
+}
+
+// Cosmetic-only rooftop coins (prep for a separate orb-effects/scoring pass
+// -- no pickup logic here, just an idle spin + pulse so every rooftop reads
+// as "there's something up there" ahead of that work).
+const rooftopCoins = [];
+const coinMat = new THREE.MeshStandardMaterial({
+  color: 0xffd54a, emissive: 0xffaa00, emissiveIntensity: 0.6, metalness: 0.6, roughness: 0.3,
+});
+for (const crown of crowns) {
+  const coin = new THREE.Mesh(new THREE.CylinderGeometry(0.5, 0.5, 0.12, 16), coinMat);
+  coin.position.set(crown.x, crown.y + 1.2, crown.z);
+  scene.add(coin);
+  rooftopCoins.push(coin);
+}
+function stepRooftopCoins(t) {
+  rooftopCoins.forEach((mesh, idx) => {
+    mesh.rotation.y = t * 1.2;
+    mesh.scale.setScalar(1 + Math.sin(t * 2 + idx) * 0.15);
+  });
 }
 
 // Pass 2 — instanced meshes.
@@ -695,22 +756,39 @@ scene.add(rain);
 // be roughly the low end of "heavy," and heavy rain caps higher. Paired
 // with the opacity multiplier bump and the faster/longer drops above, so it
 // reads as heavier both in density and in motion, not just more opaque.
-let rainIntensity = 0, rainTarget = 0, rainRetimer = uniform(5, 12);
-let lightningTimer = uniform(10, 24);
+// rainTarget and the lightning retimer are TIME-SYNCED (see timeHash/
+// currentSegment above), not drawn from the mutable `rng()` stream -- every
+// connected client derives the identical rain segment and the identical
+// lightning-check segment for any given wall-clock moment, so weather looks
+// the same to everyone without the server ever knowing weather exists
+// (Alex: "rain (and most of what a single player sees) should sync in
+// multiplayer"). rainIntensity itself still lerps toward rainTarget locally
+// each frame exactly as before -- that's what gives the smooth drift feel
+// instead of a hard-quantized step at each segment boundary, and since it's
+// a pure function of a SHARED target plus each client's own dt, it stays
+// visually indistinguishable across clients even though it's not literally
+// bit-identical frame to frame.
+const WEATHER_TOPIC = 1, LIGHTNING_TOPIC = 2;
+let rainIntensity = 0, rainTarget = 0, weatherSeg = null, lightningSeg = null;
 function stepWeather(dt) {
-  rainRetimer -= dt;
-  if (rainRetimer <= 0) {
-    rainRetimer = uniform(14, 34);
-    const r = rng();
-    rainTarget = r < 0.3 ? 0 : r < 0.55 ? uniform(0.35, 0.6) : uniform(0.75, 1.0);
+  const now = Date.now();
+  if (!weatherSeg || now >= weatherSeg.end) {
+    weatherSeg = currentSegment(WEATHER_TOPIC, now, 14000, 34000);
+    const r = timeHash(WEATHER_TOPIC, weatherSeg.index * 2 + 1);   // separate draw from the duration roll
+    rainTarget = r < 0.3 ? 0
+      : r < 0.55 ? 0.35 + (r - 0.3) / 0.25 * 0.25
+      : 0.75 + (r - 0.55) / 0.45 * 0.25;
   }
   rainIntensity += (rainTarget - rainIntensity) * Math.min(1, dt * 0.4);
   rainMat.opacity = 0.58 * rainIntensity;
   rainBus.gain.setTargetAtTime(rainIntensity * 0.38, audioCtx.currentTime, 0.6);
 
-  lightningTimer -= dt;
-  if (lightningTimer <= 0) {
-    lightningTimer = uniform(11, 28);
+  if (!lightningSeg || now >= lightningSeg.end) {
+    lightningSeg = currentSegment(LIGHTNING_TOPIC, now, 11000, 28000);
+    // rainIntensity is only approximately synced (each client lerps toward
+    // the shared target on its own dt), so right at a segment boundary two
+    // clients could rarely land on opposite sides of the 0.3 threshold --
+    // an accepted minor edge case, not worth a server round-trip to close.
     if (rainIntensity > 0.3) triggerLightning();
   }
 }
@@ -873,6 +951,35 @@ function sfxBump(pos) {
     src.connect(filt); filt.connect(g);
     src.start(now); src.stop(now + 0.12);
     return { node: g, stopAt: now + 0.12 };
+  });
+}
+// Soft thud for the player bumping into a building wall -- same shape as
+// sfxBump (car) but deeper/duller, since a building is a much bigger, more
+// solid object than a car.
+function sfxBuildingBump(pos) {
+  playSpatialAt(pos, (ctx, now) => {
+    const src = ctx.createBufferSource(); src.buffer = noiseBuffer;
+    const filt = ctx.createBiquadFilter(); filt.type = 'lowpass'; filt.frequency.value = 350;
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0.25, now);
+    g.gain.exponentialRampToValueAtTime(0.001, now + 0.15);
+    src.connect(filt); filt.connect(g);
+    src.start(now); src.stop(now + 0.17);
+    return { node: g, stopAt: now + 0.17 };
+  });
+}
+// Very soft, brief bonk for two players softly pushing off each other --
+// NOT a knock, just enough feedback that the soft-push resolved.
+function sfxPlayerPush(pos) {
+  playSpatialAt(pos, (ctx, now) => {
+    const src = ctx.createBufferSource(); src.buffer = noiseBuffer;
+    const filt = ctx.createBiquadFilter(); filt.type = 'lowpass'; filt.frequency.value = 600;
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0.1, now);
+    g.gain.exponentialRampToValueAtTime(0.001, now + 0.08);
+    src.connect(filt); filt.connect(g);
+    src.start(now); src.stop(now + 0.1);
+    return { node: g, stopAt: now + 0.1 };
   });
 }
 function sfxExplode(pos) {
@@ -1192,6 +1299,7 @@ function stepKnocked(list, dt, isParked) {
 // cooldown so it doesn't spam while pressed against a car.
 const CAR_SOLID_RADIUS = 1.35;   // rough car half-length + a little player radius
 let carBumpCooldown = 0;
+let buildingBumpCooldown = 0, playerPushCooldown = 0;
 function resolveCarCollisions(p, speed) {
   let hit = false;
   for (const list of [cars, parkedCars]) {
@@ -1542,6 +1650,72 @@ function stepCoatFor(segs, pos, vel) {
 }
 const coatSegs = makeCoat();
 function stepCoat(p) { stepCoatFor(coatSegs, p.pos, p.vel); }
+
+// ------------------------------------------------------ CANVAS TEXT PANELS --
+// Shared "render text into a 3D scene" primitive -- backs both the floating
+// name tags above pawns AND the leaderboard billboard mounted on a
+// building. `redraw(drawFn)` re-runs drawFn(ctx, w, h) against the same
+// canvas/texture rather than allocating a new one each time, so callers can
+// cheaply update text (initials rarely change; the leaderboard changes
+// often) without leaking canvases/textures.
+function makeCanvasTexture(canvasW, canvasH) {
+  const canvas = document.createElement('canvas');
+  canvas.width = canvasW; canvas.height = canvasH;
+  const ctx = canvas.getContext('2d');
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.minFilter = THREE.LinearFilter;
+  function redraw(drawFn) {
+    ctx.clearRect(0, 0, canvasW, canvasH);
+    drawFn(ctx, canvasW, canvasH);
+    texture.needsUpdate = true;
+  }
+  return { canvas, ctx, texture, redraw };
+}
+// Floating text that always faces the camera (a THREE.Sprite does this for
+// free) -- used for player name tags, which need to stay legible from any
+// angle as the player swings around.
+function makeTextSprite(canvasW, canvasH, worldW, worldH) {
+  const { texture, redraw } = makeCanvasTexture(canvasW, canvasH);
+  const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: texture, depthWrite: false, transparent: true }));
+  sprite.scale.set(worldW, worldH, 1);
+  return { sprite, redraw };
+}
+// A physical panel mounted in the world (e.g. bolted to a building) --
+// double-sided so it reads from either direction, but does NOT rotate to
+// face the camera the way a sprite does (it's meant to look like a real
+// sign, not a floating HUD element).
+function makeCanvasPanel(canvasW, canvasH, worldW, worldH) {
+  const { texture, redraw } = makeCanvasTexture(canvasW, canvasH);
+  const mesh = new THREE.Mesh(
+    new THREE.PlaneGeometry(worldW, worldH),
+    new THREE.MeshBasicMaterial({ map: texture, transparent: true, side: THREE.DoubleSide })
+  );
+  return { mesh, redraw };
+}
+// PLAYER NAME TAGS (Alex: "their name should float above their pawn for
+// everyone in multiplayer to see") -- a small camera-facing sprite parented
+// to the pawn body, so it inherits position for free and keeps facing the
+// camera regardless of the body's own rotation (that's just how
+// THREE.Sprite renders -- it ignores its object's rotation).
+function drawNameTag(initials, color) {
+  return (ctx, w, h) => {
+    if (!initials) return;
+    ctx.font = 'bold 64px ui-monospace, Menlo, monospace';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.shadowColor = '#000';
+    ctx.shadowBlur = 10;
+    ctx.fillStyle = '#' + new THREE.Color(color).getHexString();
+    ctx.fillText(initials, w / 2, h / 2);
+  };
+}
+function makeNameTag(parentBody, initialInitials, color) {
+  const { sprite, redraw } = makeTextSprite(256, 96, 1.4, 0.52);
+  sprite.position.set(0, 1.15, 0);   // above the head (head top ~0.77 local)
+  parentBody.add(sprite);
+  redraw(drawNameTag(initialInitials, color));
+  return { sprite, redraw };
+}
 // WEB LINE VISIBILITY FIX (Alex: "sometimes I can't see the web"): the old
 // webLine was a plain THREE.Line, which draws via WebGL's native gl.LINE_WIDTH
 // -- and most GPU drivers (ANGLE/Windows especially, but plenty of others
@@ -1642,6 +1816,12 @@ const keys = {};
 // click to "released" just by polling its own all-false state every frame.
 let kbMouseWebHeld = false, gamepadWebHeld = false, touchWebHeld = false;
 let webHeld = false, prevWebHeld = false, yaw = 0, pitch = -0.15;
+// 'first' | 'third' -- desktop/touch/gamepad default to third, VR defaults
+// to first (Alex, family playtest: "in WebXR, third person is very
+// uncomfortable and it's hard to even find where your pawn is"). Forced on
+// sessionstart/sessionend below regardless of the last desktop KeyV toggle,
+// so VR always opens in first person and desktop always returns to third.
+let cameraMode = 'third';
 // Grapple-flourish state for the no-anchor-found self-zip (see stepPlayer):
 // a brief visible web line toward an aimed virtual point, purely cosmetic,
 // so a ground-tap with nothing to grab still READS as a grapple pull
@@ -1691,6 +1871,59 @@ startEl.addEventListener('click', () => {
   enterGame();
   try { renderer.domElement.requestPointerLock(); } catch (e) { /* fallback look */ }
 });
+
+// PLAYER INITIALS (Alex: "let a player put in an optional 3 letter initial
+// before they start playing... floats above their pawn for everyone in
+// multiplayer to see"). Only meaningful once broadcast to others, but kept
+// on-screen (as a no-op label) in single-player too rather than hiding it
+// behind MULTIPLAYER_URL -- one fewer conditional, and it's harmless if
+// nobody's around to see it.
+// Curated 3-letter blocklist -- a kid-safety filter (Alex specifically
+// flagged this), so it errs toward over-blocking rather than under: covers
+// sexual/anatomical, excretory, hate/slur, self-harm, and general-vulgar
+// tokens. Games have blocked initials like this since arcade high-score
+// tables -- collateral false positives on someone's real initials are an
+// accepted tradeoff of the genre, not a bug.
+const PROFANITY_INITIALS = new Set([
+  // sexual / anatomical
+  'ASS', 'SEX', 'TIT', 'CUM', 'CUN', 'DIC', 'DIK', 'FUK', 'FUC', 'FCK', 'JIZ',
+  'COC', 'COK', 'SUC', 'TWA', 'PRK', 'PNS', 'VAJ', 'ORL', 'BLO',
+  // excretory
+  'SHT', 'SHI', 'POO', 'CRP', 'PSS', 'PIS', 'PEE', 'TUR', 'POS',
+  // hate / slurs (ethnic, religious, homophobic)
+  'NIG', 'NIQ', 'FAG', 'DYK', 'KKK', 'SPC', 'SPK', 'WOP', 'KYK', 'KIK',
+  'JAP', 'GOO', 'RAG', 'COO', 'NAZ',
+  // self-harm
+  'KYS',
+  // general vulgar / insults
+  'SOB', 'WTF', 'BCH', 'CNT', 'TWT',
+]);
+const initialsInput = document.getElementById('initialsInput');
+let myInitials = '';
+// The WHOLE #start div is a click target that starts the game (see
+// startEl.addEventListener('click', ...) above) and keydown/keyup are
+// bound at the window level for gameplay controls -- both would fire from
+// interacting with this text field unless stopped here (typing "R" would
+// respawn, Space would fire a web, and any click would skip past the start
+// screen before you'd finished typing).
+for (const evt of ['click', 'mousedown', 'keydown', 'keyup']) {
+  initialsInput.addEventListener(evt, e => e.stopPropagation());
+}
+initialsInput.addEventListener('input', () => {
+  const v = initialsInput.value.toUpperCase().replace(/[^A-Z]/g, '').slice(0, 3);
+  if (v.length === 3 && PROFANITY_INITIALS.has(v)) {
+    // Reject and clear rather than letting a blocked word sit typed in the
+    // box -- "can't be selected" per Alex, not "can be typed but won't be
+    // used."
+    myInitials = '';
+    initialsInput.value = '';
+    initialsInput.classList.add('blocked');
+    setTimeout(() => initialsInput.classList.remove('blocked'), 500);
+    return;
+  }
+  initialsInput.value = v;
+  myInitials = v.length === 3 ? v : '';
+});
 // Entering VR via the VRButton is its own "start the game" gesture -- run
 // the same unlock/hide-overlay/start-music side effects the desktop click
 // handler does (minus pointer lock, meaningless once the headset owns
@@ -1737,7 +1970,7 @@ function stepGamepad(dt) {
   gpKeys.ShiftLeft = stickMag > 0.88 || !!(gp.buttons[7] && gp.buttons[7].pressed);   // full deflection or RT
   if (Math.abs(rx) > GAMEPAD_DEADZONE) yaw -= rx * 2.6 * dt;
   if (Math.abs(ry) > GAMEPAD_DEADZONE) pitch = Math.max(-1.35, Math.min(0.9, pitch - ry * 2.2 * dt));
-  gamepadWebHeld = !!(gp.buttons[0] && gp.buttons[0].pressed);   // A / Cross
+  gamepadWebHeld = !!(gp.buttons[0] && gp.buttons[0].pressed) || !!(gp.buttons[7] && gp.buttons[7].pressed);   // A / Cross OR Right Trigger
   const gpRespawn = !!(gp.buttons[2] && gp.buttons[2].pressed);   // X / Square, edge-triggered
   if (gpRespawn && !gpRespawnPrev) respawn();
   gpRespawnPrev = gpRespawn;
@@ -1968,6 +2201,7 @@ function stepPlayer(dt) {
   // button (or losing contact) just stops the override and you fall/walk
   // off normally -- no separate "let go of wall" logic needed.
   const wallCrawling = webHeld && !p.anchor;
+  let buildingHit = false;
   for (const c of colliders) {
     if (p.pos.x < c.min[0] - R || p.pos.x > c.max[0] + R ||
         p.pos.z < c.min[2] - R || p.pos.z > c.max[2] + R ||
@@ -1985,12 +2219,14 @@ function stepPlayer(dt) {
     if (axis === 3) { p.pos.y = c.max[1] + 0.9; if (p.vel.y < 0) p.vel.y = 0; p.onGround = true; }
     if (axis === 4) { p.pos.z = c.min[2] - R; if (p.vel.z > 0) p.vel.z = 0; }
     if (axis === 5) { p.pos.z = c.max[2] + R; if (p.vel.z < 0) p.vel.z = 0; }
+    if (axis === 0 || axis === 1 || axis === 4 || axis === 5) buildingHit = true;
     if ((axis === 0 || axis === 1 || axis === 4 || axis === 5) && wallCrawling &&
         p.pos.y < c.max[1] + 0.9) {   // don't climb past the roofline -- just walk onto it instead
       p.onWall = true;
       p.vel.y = CLIMB_SPEED;
     }
   }
+  if (buildingHit && buildingBumpCooldown <= 0) { sfxBuildingBump(p.pos); buildingBumpCooldown = 0.4; }
 
   // CAR COLLISION (Alex: "is there any collision or physics on the cars?"
   // -- there wasn't; you passed straight through). Cars now block you like
@@ -2001,6 +2237,8 @@ function stepPlayer(dt) {
   // fine at the distances involved, and it's far cheaper than rotated-AABB
   // math against 100+ moving objects every frame.
   if (carBumpCooldown > 0) carBumpCooldown -= dt;
+  if (buildingBumpCooldown > 0) buildingBumpCooldown -= dt;
+  if (playerPushCooldown > 0) playerPushCooldown -= dt;
   const sp0 = p.vel.length();
   resolveCarCollisions(p, sp0);
 
@@ -2161,7 +2399,7 @@ function connectMultiplayer() {
         rp = Object.assign({
           targetPos: new THREE.Vector3(msg.pos[0], msg.pos[1], msg.pos[2]),
           targetYaw: 0, prevPos: new THREE.Vector3(msg.pos[0], msg.pos[1], msg.pos[2]),
-          vel: new THREE.Vector3(), anchorPos: null, color: msg.color,
+          vel: new THREE.Vector3(), anchorPos: null, color: msg.color, initials: '', score: 0,
         }, makeRemotePlayerMesh(msg.color));
         rp.body.position.copy(rp.targetPos);
         remotePlayers.set(msg.id, rp);
@@ -2172,6 +2410,13 @@ function connectMultiplayer() {
       rp.targetYaw = msg.yaw;
       rp.anchorPos = msg.anchor ? new THREE.Vector3(msg.anchor[0], msg.anchor[1], msg.anchor[2]) : null;
       rp.body.visible = msg.alive !== false;
+      // initials rarely change -- only touch the name-tag texture (and
+      // redraw the leaderboard) when something actually changed, not
+      // every ~15Hz packet.
+      if (rp.initials !== (msg.initials || '') && rp.nameTag) rp.nameTag.redraw(drawNameTag(msg.initials || '', rp.color));
+      rp.initials = msg.initials || '';
+      rp.score = typeof msg.score === 'number' ? msg.score : 0;
+      updateLeaderboard();
     } else if (msg.type === 'leave') {
       const rp = remotePlayers.get(msg.id);
       if (rp) {
@@ -2265,6 +2510,7 @@ function stepMultiplayer(dt, p) {
         p.pos.z += nz * (PLAYER_SOLID_RADIUS - dist);
         const vIn = p.vel.x * nx + p.vel.z * nz;
         if (vIn < 0) { p.vel.x -= vIn * nx; p.vel.z -= vIn * nz; }
+        if (playerPushCooldown <= 0) { sfxPlayerPush(p.pos); playerPushCooldown = 0.5; }
       }
     }
   }
@@ -2274,6 +2520,7 @@ function stepMultiplayer(dt, p) {
     mpSocket.send(JSON.stringify({
       pos: [p.pos.x, p.pos.y, p.pos.z], type: 'state',
       yaw: spidey.rotation.y, anchor: p.anchor ? [p.anchor.x, p.anchor.y, p.anchor.z] : null, alive: !gameOver,
+      initials: myInitials, score,
     }));
   }
 }
@@ -2282,7 +2529,7 @@ function stepMultiplayer(dt, p) {
 respawn();
 for (const seg of coatSegs) seg.pos.copy(player.pos);   // avoid a first-frame unfurl-from-origin pop
 camera.position.copy(player.pos).add(new THREE.Vector3(0, 3, 10));
-let last = performance.now(), simT = 0, worldT = 0;
+let last = performance.now(), simT = 0;
 function loop(now) {
   let dt = Math.min(0.033, (now - last) / 1000);
   last = now;
@@ -2298,7 +2545,6 @@ function loop(now) {
   }
   const worldDt = slowTimeTimer > 0 ? dt * SLOWTIME_WORLD_SCALE : dt;
   const playerDt = slowTimeTimer > 0 ? dt * SLOWTIME_PLAYER_SCALE : dt;
-  worldT += worldDt;
 
   if (noirTimer > 0) { noirTimer -= dt; if (noirTimer < 0) noirTimer = 0; }
   if (jumpBoostTimer > 0) { jumpBoostTimer -= dt; if (jumpBoostTimer < 0) jumpBoostTimer = 0; }
@@ -2306,7 +2552,12 @@ function loop(now) {
     noirPass.uniforms.uSat.value, noirTimer > 0 ? 0.0 : 1.0, Math.min(1, dt * 3));
   updatePowerupHud();
 
-  stepTraffic(worldT, worldDt);
+  // Signal phase is a pure function of `t % period` -- so swapping in real
+  // wall-clock time here (instead of worldT, which started at 0 on each
+  // client's own page load) syncs every client's lights for free, same
+  // pattern as the weather fix above. worldDt still carries the per-client
+  // slow-time scaling for actual car movement inside stepTraffic.
+  stepTraffic(Date.now() / 1000, worldDt);
   stepKnocked(cars, worldDt, false);
   stepKnocked(parkedCars, worldDt, true);
   stepZombies(worldDt, player);
@@ -2325,6 +2576,7 @@ function loop(now) {
   stepSparkles(dt);
   stepWeather(worldDt);
   stepRain(player.pos, simT);
+  stepRooftopCoins(simT);
   updateBloom(player.pos.y);
   updateFallMusic(player.pos.y, player.onGround);
   // Post-processing (bloom/noir) is skipped while presenting in XR --
