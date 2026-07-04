@@ -148,7 +148,8 @@
   them flying (+25), grab the glowing orbs for points (+10), and joust or knock other players
   around to rack up bonus points too — a few unusual-looking orbs do something other than add
   points. Cross the glowing boundary wall and the screen turns red -- you've got about 2 seconds
-  to get back inside before it's over.
+  to get back inside before it's over.<br><br>
+  <span id="vrBloomRow"><label><input type="checkbox" id="vrBloomToggle"> try bloom/glow in VR (experimental -- may render incorrectly in one eye)</label></span>
 </div></div>
 <div id="gameover"><div>
   <h1>SWING&hellip; SWANG&hellip; SWUNG</h1>
@@ -272,7 +273,14 @@ const CLIMB_SPEED = 7.0;   // wall-crawl vertical speed while holding the web bu
 // Perpendicular pawn-facing yaw per wall-contact axis (0/1/4/5 from the
 // collider push-out logic), and how close to the roofline the climb starts
 // easing the player onto the roof -- see wall-crawl handling in stepPlayer.
-const WALL_FACE_YAW = { 0: Math.PI / 2, 1: -Math.PI / 2, 4: 0, 5: Math.PI };
+// Outward wall normal per contact axis (points AWAY from the wall, toward
+// wherever the player is standing) -- used to build the perpendicular
+// wall-climb pose (see stepPlayer). Axis numbering matches the collider
+// push-out logic: 0/1 are the -X/+X faces, 4/5 are the -Z/+Z faces.
+const WALL_OUTWARD_NORMAL = {
+  0: new THREE.Vector3(-1, 0, 0), 1: new THREE.Vector3(1, 0, 0),
+  4: new THREE.Vector3(0, 0, -1), 5: new THREE.Vector3(0, 0, 1),
+};
 const MANTLE_ZONE = 2.0, MANTLE_SPEED = 5.0;
 const NOIR_DURATION = 10;
 const SLOWTIME_DURATION = 6, SLOWTIME_WORLD_SCALE = 0.32, SLOWTIME_PLAYER_SCALE = 0.8;
@@ -496,6 +504,18 @@ for (let i = 0; i < 2; i++) {
   cameraRig.add(grip);
   xrGrips.push(grip);
 }
+// WRIST-MOUNTED LEADERBOARD (Alex: "things like the perpetual leaderboard
+// should fit locked to the inside of your arms"). Mounted on the LEFT
+// grip (index 0, same left/right assumption the rest of this file's XR
+// code already makes -- controller index isn't spec-guaranteed to match
+// handedness, but it's consistent in practice and matches the existing
+// arm/shoulder-offset code), rotated to face upward so glancing down at
+// your own wrist reads it, like a smartwatch.
+const vrWristPanel = makeCanvasPanel(512, 384, 0.34, 0.255);
+vrWristPanel.mesh.position.set(0, 0.02, 0.06);
+vrWristPanel.mesh.rotation.x = -Math.PI / 2;
+vrWristPanel.mesh.visible = false;
+xrGrips[0].add(vrWristPanel.mesh);
 // BASIC ARM REPRESENTATION (Alex, VR playtest: "it's good to see the
 // controllers -- could you give us in VR two arms that are stretched cubes
 // that extend the same distance as the controllers and live a little under
@@ -590,7 +610,19 @@ scene.add(moon);
 // world-space MODULO carves window cells, a per-cell hash lights ~62% of
 // them in the building's neon color, the rest stays dark facade.
 const windowMat = new THREE.ShaderMaterial({
-  uniforms: { fogColor: { value: scene.fog.color }, fogDensity: { value: scene.fog.density } },
+  uniforms: {
+    fogColor: { value: scene.fog.color }, fogDensity: { value: scene.fog.density },
+    // ROOFTOP NEON FADE (Alex: "when you're standing at the top of a
+    // building we should fade down the neon so we can actually see the
+    // top of the building... like a post-process volume on top of each
+    // building"). Rather than an actual per-building volume (expensive to
+    // track which building the player is on), this fades window
+    // brightness by 3D distance from the player's OWN position -- cheapest
+    // approximation that still reads as "the windows right around me dim
+    // so I can see the ledge/roof surface," and it matters most exactly
+    // when standing close to a wall of windows, i.e. at a rooftop.
+    playerPos: { value: new THREE.Vector3() }, fadeRadius: { value: 13 },
+  },
   vertexShader: /* glsl */`
     attribute vec3 instColor;
     varying vec3 vWorld, vColor;
@@ -602,6 +634,7 @@ const windowMat = new THREE.ShaderMaterial({
   fragmentShader: /* glsl */`
     varying vec3 vWorld, vColor;
     uniform vec3 fogColor; uniform float fogDensity;
+    uniform vec3 playerPos; uniform float fadeRadius;
     float hash(vec3 c) { return fract(sin(dot(c, vec3(12.9898, 78.233, 37.719))) * 43758.5453); }
     void main() {
       float Pz = 1.35, Ph = 1.15;                    // window row/col pitch
@@ -610,6 +643,7 @@ const windowMat = new THREE.ShaderMaterial({
       vec3 cell = floor(vec3(vWorld.x / Ph, vWorld.z / Ph, vWorld.y / Pz));
       float lit = step(0.38, hash(cell));            // ~62% of cells lit
       float win = row * col * lit;
+      float nearFade = smoothstep(fadeRadius * 0.35, fadeRadius, distance(vWorld, playerPos));
       // Round 2 brightness pass (Alex: "brighten the world a little...
       // still night, but not 90% black"). This raw shader computes its own
       // color and ignores scene lighting entirely -- the ambient-light and
@@ -618,7 +652,7 @@ const windowMat = new THREE.ShaderMaterial({
       // those. This constant is the actual lever: it's the base wall tone,
       // now a visible dim teal-navy instead of near-zero.
       vec3 base = vec3(0.045, 0.052, 0.075);
-      vec3 colr = base + vColor * win * 1.6;
+      vec3 colr = base + vColor * win * 1.6 * nearFade;
       float d = length(vWorld - cameraPosition);
       float f = 1.0 - exp(-fogDensity * fogDensity * d * d);
       gl_FragColor = vec4(mix(colr, fogColor, f), 1.0);
@@ -853,10 +887,10 @@ function drawLeaderboardPanel(entries) {
     ctx.lineWidth = 6;
     ctx.strokeRect(3, 3, w - 6, h - 6);
     ctx.textAlign = 'center';
-    ctx.font = 'bold 34px ui-monospace, Menlo, monospace';
+    ctx.font = 'bold 26px ui-monospace, Menlo, monospace';   // shrunk from 34px -- "SESSION LEADERBOARD" is longer than "LEADERBOARD" was
     ctx.fillStyle = '#ff64c8';
     ctx.shadowColor = '#f0a'; ctx.shadowBlur = 12;
-    ctx.fillText('LEADERBOARD', w / 2, 48);
+    ctx.fillText('SESSION LEADERBOARD', w / 2, 48);
     ctx.shadowBlur = 0;
     ctx.font = '28px ui-monospace, Menlo, monospace';
     ctx.textAlign = 'left';
@@ -1177,8 +1211,40 @@ const EFFECT_NAMES = {
 const COLOR_NAMES = { 0xff5566: 'RED', 0x55ddff: 'CYAN', 0xffe066: 'YELLOW', 0x8fff8f: 'GREEN', 0xc98fff: 'PURPLE', 0xff9f4d: 'ORANGE' };
 function colorLabel(hex) { return hex == null ? 'YOU' : (COLOR_NAMES[hex] || ('PLAYER-' + hex.toString(16))); }
 
+// VR IN-WORLD NOTIFICATIONS (Alex, VR playtest: "I don't see any updates
+// on the game in VR -- we need the text that appears on screen as a UI
+// appearing in front of us. Notifications like leader and modes
+// activating should appear in front of you head locked as 3D text").
+// HTML overlays like #powerbanner never composite into the WebXR
+// framebuffer, so they're simply invisible in headset -- this is a real
+// mesh, child of the camera itself, so it's always dead-center in view
+// regardless of where the player looks.
+const vrNotifyPanel = makeCanvasPanel(512, 128, 0.62, 0.155);
+vrNotifyPanel.mesh.position.set(0, 0.12, -1.0);
+vrNotifyPanel.mesh.visible = false;
+camera.add(vrNotifyPanel.mesh);
+function drawVRNotify(text) {
+  return (ctx, w, h) => {
+    ctx.fillStyle = '#04101cd0';
+    ctx.fillRect(0, 0, w, h);
+    ctx.font = 'bold 34px ui-monospace, Menlo, monospace';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.shadowColor = '#f0a'; ctx.shadowBlur = 14;
+    ctx.fillStyle = '#ffe27a';
+    ctx.fillText(text, w / 2, h / 2);
+  };
+}
+function showVRNotification(text) {
+  if (!renderer.xr.isPresenting) return;
+  vrNotifyPanel.redraw(drawVRNotify(text));
+  vrNotifyPanel.mesh.visible = true;
+  clearTimeout(vrNotifyPanel._hideT);
+  vrNotifyPanel._hideT = setTimeout(() => { vrNotifyPanel.mesh.visible = false; }, 2600);
+}
+
 const powerBannerEl = document.getElementById('powerbanner');
 function showPowerBanner(text) {
+  showVRNotification(text);
   powerBannerEl.textContent = text;
   powerBannerEl.style.opacity = '1';
   powerBannerEl.style.transform = 'translateX(-50%) scale(1.1)';
@@ -2827,7 +2893,7 @@ function tryAttach() {
 // only, so two liftoffs don't stack into a de-facto super-jump).
 function fireWeb(boosted) {
   const found = tryAttach();
-  if (found) return;
+  if (found) return true;
   const f2 = aimDir(); f2.y = 0; f2.normalize();
   if (boosted) {
     player.vel.y = (jumpBoostTimer > 0 ? JUMP_VEL_BOOSTED * 0.85 : JUMP_VEL_NORMAL) * (myEffectActive('superjump') ? SUPERJUMP_MULT : 1);
@@ -2836,6 +2902,7 @@ function fireWeb(boosted) {
   sfxThwip(player.pos);
   phantomGrappleT = 0.22;
   phantomGrappleTarget.copy(player.pos).addScaledVector(f2, 3).add(new THREE.Vector3(0, 4.2, 0));
+  return false;
 }
 
 // ----------------------------------------------------------------- INPUT --
@@ -2867,6 +2934,11 @@ const phantomGrappleTarget = new THREE.Vector3();
 // one continuous gesture from a single hold (Alex: "it's a jump, and then
 // if you're still holding spacebar, a web thwip").
 let pendingAirWeb = false;
+// GROUND-TO-SWING ASSIST tuning: a short window (SWING_ASSIST_DELAY) after
+// the initial jump+fireWeb attempt whiffs -- if still held past it, one
+// extra upward pull (SWING_ASSIST_BOOST) and a second attach attempt.
+let pendingSwingAssist = false, swingAssistHoldTime = 0;
+const SWING_ASSIST_DELAY = 0.16, SWING_ASSIST_BOOST = 7;
 // Raw keyboard state lives in kbKeys, not `keys` -- `keys` (what stepPlayer
 // actually reads) is a per-frame OR-combine of kbKeys/gpKeys/tKeys, same
 // reasoning as the webHeld combine above: gamepad/touch poll their state
@@ -2991,12 +3063,26 @@ initialsInput.addEventListener('input', () => {
   myInitials = v.length === 3 ? v : '';
   refreshMyNameTag();
 });
+// VR BLOOM TOGGLE (Alex: "are we able to get the bloom glow effect... in
+// VR? It might be too expensive on the GPU but I'd love to see it, maybe
+// as a toggle (off by default)"). Off by default because EffectComposer
+// isn't WebXR-stereo-aware (see the render-branch comment in the main
+// loop) -- this is a genuine experimental/may-break-one-eye opt-in, not
+// just a performance tradeoff, hence the checkbox's own warning text.
+let vrBloomEnabled = false;
+const vrBloomToggle = document.getElementById('vrBloomToggle');
+for (const evt of ['click', 'mousedown']) {
+  vrBloomToggle.addEventListener(evt, e => e.stopPropagation());
+}
+vrBloomToggle.addEventListener('change', () => { vrBloomEnabled = vrBloomToggle.checked; });
 // Entering VR via the VRButton is its own "start the game" gesture -- run
 // the same unlock/hide-overlay/start-music side effects the desktop click
 // handler does (minus pointer lock, meaningless once the headset owns
 // head tracking).
 renderer.xr.addEventListener('sessionstart', enterGame);
 renderer.xr.addEventListener('sessionstart', () => { cameraMode = 'first'; });
+renderer.xr.addEventListener('sessionstart', () => { vrWristPanel.mesh.visible = true; });
+renderer.xr.addEventListener('sessionend', () => { vrWristPanel.mesh.visible = false; });
 // VR PERFORMANCE (Alex: "performance goes up and down, maybe based on how
 // much of the city I see"). The city's buildings/windows already render as
 // a handful of InstancedMesh draw calls (one draw call regardless of view
@@ -3157,8 +3243,14 @@ function stepTouch(dt) {
 // controller's stick drives look (yaw/pitch, directly -- there's no
 // separate "xr look" primitive to combine, same as how the desktop
 // gamepad's right stick works). Either trigger fires the web/jump action.
-let xrWebHeld = false, xrMenuPrevPressed = false, xrMenuHoldTime = 0;
+let xrWebHeld = false, xrLeftXPrev = false, xrLeftYPrev = false;
 const xrKeys = {};
+// Right-stick scheme (Alex, second VR playtest pass): X axis snap-turns in
+// fixed increments (the standard VR-comfort turn), Y axis smooth-turns
+// (yaw) continuously -- NEITHER axis touches pitch anymore; real head
+// tilt handles looking up/down in VR, a stick shouldn't fight it.
+const SNAP_TURN_ANGLE = Math.PI / 6, SNAP_TURN_THRESHOLD = 0.6;
+let xrSnapArmed = true;
 function stepXR(dt) {
   const session = renderer.xr.getSession && renderer.xr.getSession();
   if (!session) {
@@ -3166,55 +3258,60 @@ function stepXR(dt) {
     xrKeys.KeyW = xrKeys.KeyS = xrKeys.KeyA = xrKeys.KeyD = xrKeys.ShiftLeft = false;
     return;
   }
-  let held = false, moveX = 0, moveY = 0, lookX = 0, lookY = 0, gripCount = 0;
+  let held = false, moveX = 0, moveY = 0, lookX = 0, lookY = 0;
+  let leftX = false, leftY = false;
   for (const src of session.inputSources) {
     const gp = src.gamepad;
     if (!gp) continue;
-    if (gp.buttons[0] && gp.buttons[0].pressed) held = true;
-    // Grip (squeeze), buttons[1] -- BOTH held together, not any single face
-    // button, doubles as "return to menu" (Alex: "we need a button to
-    // return to the main menu"). A face button (buttons[4]/[5]) firing
-    // instantly on its own turned out to be way too easy to bump by
-    // accident mid-play (Alex: "too many buttons kick you out of the
-    // experience") -- requiring BOTH grips together, held (see
-    // xrMenuHoldTime below), is a much more deliberate, hard-to-fumble
-    // gesture. HTML overlays like #start don't composite into the WebXR
-    // framebuffer, so there's nothing to actually SHOW in headset -- the
-    // practical version of "open the menu" in VR is ending the immersive
-    // session, which drops back to the flat page where the (already-open)
-    // menu is visible, with score/position untouched.
-    if (gp.buttons[1] && gp.buttons[1].pressed) gripCount++;
+    const rightHand = src.handedness === 'right';
+    if (gp.buttons[0] && gp.buttons[0].pressed) held = true;   // either trigger fires web/jump
+    // Right A (buttons[4] on the right controller) does the same thing as
+    // the right trigger (Alex: "Make the Right A button do the same thing
+    // as right trigger").
+    if (rightHand && gp.buttons[4] && gp.buttons[4].pressed) held = true;
+    // Left X/Y (buttons[4]/[5] on the left controller): X exits VR
+    // (Alex: "Make the left X button exit VR mode"), Y respawns (Alex:
+    // "Y button for Respawn -- that fall feels so cool"). Edge-triggered
+    // below via xrLeftXPrev/xrLeftYPrev so holding doesn't re-fire.
+    if (!rightHand) {
+      if (gp.buttons[4] && gp.buttons[4].pressed) leftX = true;
+      if (gp.buttons[5] && gp.buttons[5].pressed) leftY = true;
+    }
     // xr-standard mapping: axes[2]/[3] are the thumbstick. Real-hardware
-    // playtest (Alex: "you made the joysticks all backwards -- up is down
-    // and down is up and left is right and right is left") found both
-    // axes inverted from what this mapping assumed -- negated here rather
-    // than re-deriving the "why" from spec, since the empirical report is
-    // unambiguous and covers all four directions on both sticks.
+    // playtest found both axes inverted from what this mapping assumed --
+    // negated here rather than re-deriving the "why" from spec, since the
+    // empirical report was unambiguous.
     const ax = -(gp.axes[2] !== undefined ? gp.axes[2] : gp.axes[0]);
     const ay = -(gp.axes[3] !== undefined ? gp.axes[3] : gp.axes[1]);
-    if (src.handedness === 'right') { lookX = ax || 0; lookY = ay || 0; }
+    if (rightHand) { lookX = ax || 0; lookY = ay || 0; }
     else { moveX = ax || 0; moveY = ay || 0; }   // 'left' or 'none' -- default to movement
   }
-  if (gripCount >= 2) {
-    xrMenuHoldTime += dt;
-    if (xrMenuHoldTime > 0.8 && !xrMenuPrevPressed) { xrMenuPrevPressed = true; openMenu(); session.end().catch(() => {}); }
-  } else {
-    xrMenuHoldTime = 0;
-    xrMenuPrevPressed = false;
-  }
+  if (leftX && !xrLeftXPrev) { xrLeftXPrev = true; openMenu(); session.end().catch(() => {}); }
+  else if (!leftX) xrLeftXPrev = false;
+  if (leftY && !xrLeftYPrev) { xrLeftYPrev = true; respawn(); }
+  else if (!leftY) xrLeftYPrev = false;
   xrWebHeld = held;
   xrKeys.KeyW = moveY < -GAMEPAD_DEADZONE;
   xrKeys.KeyS = moveY > GAMEPAD_DEADZONE;
   xrKeys.KeyA = moveX < -GAMEPAD_DEADZONE;
   xrKeys.KeyD = moveX > GAMEPAD_DEADZONE;
   xrKeys.ShiftLeft = Math.hypot(moveX, moveY) > 0.88;
-  if (Math.abs(lookX) > GAMEPAD_DEADZONE) yaw -= lookX * 2.6 * dt;
-  if (Math.abs(lookY) > GAMEPAD_DEADZONE) pitch = Math.max(-1.35, Math.min(0.9, pitch - lookY * 2.2 * dt));
+  // Snap-turn: fires once per push past the threshold, then re-arms once
+  // the stick returns near center -- a held-over stick would otherwise
+  // spin continuously instead of discrete comfort-turns.
+  if (Math.abs(lookX) > SNAP_TURN_THRESHOLD) {
+    if (xrSnapArmed) { yaw -= Math.sign(lookX) * SNAP_TURN_ANGLE; xrSnapArmed = false; }
+  } else if (Math.abs(lookX) < GAMEPAD_DEADZONE) {
+    xrSnapArmed = true;
+  }
+  // Smooth yaw turn from the Y axis (not pitch -- see comment above).
+  if (Math.abs(lookY) > GAMEPAD_DEADZONE) yaw -= lookY * 2.2 * dt;
 }
 
 // ----------------------------------------------------------- PLAYER STEP --
 const GRAV = 26, RUN = 11, AIR_CTRL = 11;
 let reticleClock = 0;
+const wallClimbFwd = new THREE.Vector3(), wallClimbSide = new THREE.Vector3(), wallClimbMatrix = new THREE.Matrix4();
 function stepPlayer(dt) {
   const p = player;
   if (gameOver) return;   // frozen behind the game-over overlay until Try Again
@@ -3270,7 +3367,30 @@ function stepPlayer(dt) {
       // fireWeb() sets p.anchor. Skip the swing-attach attempt entirely
       // when already touching a wall -- let the collider loop's wall-crawl
       // branch claim it instead.
-      if (!touchingWallNow()) fireWeb(false);
+      if (!touchingWallNow() && !fireWeb(false)) {
+        // GROUND-TO-SWING ASSIST (Alex: "sometimes getting from the
+        // ground to swinging is hard... first tap to get up, then hold
+        // to get pulled a little up and start swinging"). The jump alone
+        // didn't get high/close enough for anything to be in anchor
+        // range -- if the player is STILL holding the button, arm one
+        // more attempt after a brief extra upward pull, like a second
+        // half-jump, instead of just leaving them to fall back down with
+        // nothing.
+        pendingSwingAssist = true;
+        swingAssistHoldTime = 0;
+      }
+    }
+  }
+  if (pendingSwingAssist) {
+    if (!webHeld || p.onGround || p.anchor || p.onWall) {
+      pendingSwingAssist = false;
+    } else {
+      swingAssistHoldTime += dt;
+      if (swingAssistHoldTime > SWING_ASSIST_DELAY) {
+        pendingSwingAssist = false;
+        player.vel.y += SWING_ASSIST_BOOST;
+        if (!touchingWallNow()) fireWeb(false);
+      }
     }
   }
   // On a grounded press: jump, and arm pendingAirWeb so the SAME hold also
@@ -3482,8 +3602,25 @@ function stepPlayer(dt) {
   spidey.scale.setScalar(playerScale);
   const sp = Math.hypot(p.vel.x, p.vel.z);
   if (p.onWall && wallFaceAxis !== null) {
-    spidey.rotation.y = WALL_FACE_YAW[wallFaceAxis];
-    spidey.rotation.x = 0;
+    // PERPENDICULAR WALL-CLIMB POSE (Alex: "climbing a building should
+    // make the pawn perpendicular to the building, so it's like we're
+    // running up the building just like it's the road"). A flat rotation.x
+    // tilt on top of the per-axis WALL_FACE_YAW only worked for ONE of the
+    // 4 wall faces (verified via the debug hook -- "on some building faces
+    // I perpendicular correctly on others I'm on my side") since Euler
+    // composition doesn't commute the same way across different yaw
+    // values. Built directly from the actual wall normal instead: the
+    // pawn's "head" axis (normally straight up when standing on the
+    // ground) now points along the wall's OUTWARD normal (treating the
+    // wall as the new ground), and its "chest/forward" axis (normally the
+    // horizontal running direction) now points along world +Y, the
+    // climbing direction -- exactly the same relationship a runner has to
+    // the actual ground, just with the wall's normal standing in for "up."
+    const wallUp = WALL_OUTWARD_NORMAL[wallFaceAxis];
+    const climbFwd = wallClimbFwd.set(0, 1, 0);
+    const wallSide = wallClimbSide.crossVectors(wallUp, climbFwd);
+    wallClimbMatrix.makeBasis(wallSide, wallUp, climbFwd);
+    spidey.quaternion.setFromRotationMatrix(wallClimbMatrix);
   } else {
     if (sp > 0.5) spidey.rotation.y = Math.atan2(p.vel.x, p.vel.z);
     spidey.rotation.x = THREE.MathUtils.clamp(sp * 0.02 * (p.anchor ? 1.6 : 0.4), 0, 0.9);
@@ -3598,13 +3735,16 @@ function getLeaderboardEntries() {
   entries.sort((a, b) => b.score - a.score);
   return entries;
 }
+function hexColor(n) { return '#' + (n != null ? n : 0x9fe8ff).toString(16).padStart(6, '0'); }
 function updateLeaderboard() {
   if (!MULTIPLAYER_URL) return;
   const entries = getLeaderboardEntries();
-  leaderboardEl.innerHTML = '<b>LEADERBOARD</b>' + entries.slice(0, 8).map((e, i) =>
-    `<div class="row"><span>${i + 1}. ${e.initials || '???'}${e.isMe ? ' (you)' : ''}</span><span>${e.score}</span></div>`
+  leaderboardEl.innerHTML = '<b>SESSION LEADERBOARD</b>' + entries.slice(0, 8).map((e, i) =>
+    `<div class="row"><span style="color:${hexColor(e.color)}">${i + 1}. ${e.initials || '???'}${e.isMe ? ' (you)' : ''}</span><span>${e.score}</span></div>`
   ).join('');
   billboardPanel.redraw(drawLeaderboardPanel(entries));
+  vrWristPanel.redraw(drawLeaderboardPanel(entries));
+  vrWristPanel.mesh.visible = renderer.xr.isPresenting;
   // Only the client that JUST became #1 reports it (same "attacker/newly-
   // true-condition reports once" shape as joust/knock in worker.js) --
   // every other client just renders whatever banner arrives. Guarded on
@@ -3623,11 +3763,13 @@ function updateLeaderboard() {
   // persisted storage with writes for no reason since only the max matters).
   if (score > 0 && score > lastDailyScoreSent && mpSocket && mpSocket.readyState === WebSocket.OPEN) {
     lastDailyScoreSent = score;
-    mpSocket.send(JSON.stringify({ type: 'dailyscore', initials: myInitials || '???', score }));
+    mpSocket.send(JSON.stringify({ type: 'dailyscore', initials: myInitials || '???', score, color: myColor }));
   }
 }
 function showLeaderBanner(name, points) {
-  leaderbannerEl.textContent = `${name} is the new leader with ${points} points!`;
+  const text = `${name} is the new leader with ${points} points!`;
+  showVRNotification(text);
+  leaderbannerEl.textContent = text;
   leaderbannerEl.style.opacity = '1';
   clearTimeout(leaderbannerEl._hideT);
   leaderbannerEl._hideT = setTimeout(() => { leaderbannerEl.style.opacity = '0'; }, 3200);
@@ -3639,9 +3781,9 @@ function showLeaderBanner(name, points) {
 // computes this list locally.
 const dailyboardEl = document.getElementById('dailyboard');
 let lastDailyScoreSent = 0;
-function renderDailyboard(entries) {
-  dailyboardEl.innerHTML = '<b>TODAY</b>' + entries.slice(0, 8).map((e, i) =>
-    `<div class="row"><span>${i + 1}. ${e.initials || '???'}</span><span>${e.score}</span></div>`
+function renderDailyboard(entries, date) {
+  dailyboardEl.innerHTML = `<b>DAILY LEADERBOARD ${date || ''}</b>` + entries.slice(0, 8).map((e, i) =>
+    `<div class="row"><span style="color:${hexColor(e.color)}">${i + 1}. ${e.initials || '???'}</span><span>${e.score}</span></div>`
   ).join('');
 }
 function updatePlayerCount() { playerCountTotalEl.textContent = knownPlayerIds.size + 1; }
@@ -3833,7 +3975,7 @@ function connectMultiplayer() {
       // else's view of it).
       showLeaderBanner(msg.initials, msg.score);
     } else if (msg.type === 'dailyboard') {
-      renderDailyboard(msg.entries);
+      renderDailyboard(msg.entries, msg.date);
     } else if (msg.type === 'poweractivated') {
       // Solo announcements are excluded-from-sender server-side (the
       // trigger already applied+announced locally, see triggerSoloEffect),
@@ -4055,6 +4197,7 @@ function loop(now) {
   }
   stepPlayer(playerDt);
   updateXRArms();
+  windowMat.uniforms.playerPos.value.copy(player.pos);
   stepMultiplayer(playerDt, player);
   if (!gameOver) stepPickups(simT, player);
   stepExplosion(dt);
@@ -4070,8 +4213,9 @@ function loop(now) {
   // session provides), so mixing them risks a broken or single-eye render.
   // A straight renderer.render() is always correct for both eyes; the
   // tradeoff is no bloom/desaturation while in VR.
-  if (renderer.xr.isPresenting) renderer.render(scene, camera);
-  else composer.render();
+  if (renderer.xr.isPresenting) {
+    if (vrBloomEnabled) composer.render(); else renderer.render(scene, camera);
+  } else composer.render();
 }
 // setAnimationLoop (not requestAnimationFrame) is required for WebXR: it's
 // how Three.js hands control of frame scheduling to the active XRSession
@@ -4110,6 +4254,8 @@ window.__sw = { THREE, player, cars, parkedCars, pickups, colliders, EDGE, WORLD
                 set carBumpCooldown(v) { carBumpCooldown = v; },
                 get pendingAirWeb() { return pendingAirWeb; },
                 fireWeb, tryAttach,
+                get pendingSwingAssist() { return pendingSwingAssist; },
+                get swingAssistHoldTime() { return swingAssistHoldTime; },
                 get comboCount() { return comboCount; },
                 get comboTimer() { return comboTimer; },
                 rainBus, audioCtx, findQueuedCar, stepHonks,
@@ -4126,11 +4272,14 @@ window.__sw = { THREE, player, cars, parkedCars, pickups, colliders, EDGE, WORLD
                 VR_AUTO_RESTART_DELAY,
                 get entered() { return entered; },
                 set entered(v) { entered = v; },
-                openMenu, closeMenu, get paused() { return paused; }, wallMat, WALL_CYCLE_SECONDS,
+                openMenu, closeMenu, get paused() { return paused; }, wallMat, WALL_CYCLE_SECONDS, windowMat,
+                get vrBloomEnabled() { return vrBloomEnabled; }, set vrBloomEnabled(v) { vrBloomEnabled = v; }, vrBloomToggle,
                 xrArms, xrGrips, updateXRArms, announceEffect, announceRemoteEffect,
+                vrNotifyPanel, showVRNotification, vrWristPanel,
                 get myInitials() { return myInitials; }, set myInitials(v) { myInitials = v; },
                 powerBannerEl,
-                get xrMenuHoldTime() { return xrMenuHoldTime; },
+                get xrLeftXPrev() { return xrLeftXPrev; }, get xrLeftYPrev() { return xrLeftYPrev; },
+                get xrSnapArmed() { return xrSnapArmed; },
                 kbKeyDown, aimDir, fpStick,
                 stepXR, xrKeys, get xrWebHeld() { return xrWebHeld; },
                 cameraRig, renderer, enterGame,

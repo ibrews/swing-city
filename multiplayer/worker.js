@@ -25,6 +25,16 @@
 
 const COLORS = [0xff5566, 0x55ddff, 0xffe066, 0x8fff8f, 0xc98fff, 0xff9f4d];
 
+// Standard HSL->RGB->hex conversion (Workers have no DOM/Color API) --
+// used only as the >6-concurrent-players fallback in pickUniqueColor.
+function hslToHex(h, s, l) {
+  const k = n => (n + h * 12) % 12;
+  const a = s * Math.min(l, 1 - l);
+  const f = n => l - a * Math.max(-1, Math.min(k(n) - 3, Math.min(9 - k(n), 1)));
+  const toHex = n => Math.round(f(n) * 255);
+  return (toHex(0) << 16) | (toHex(8) << 8) | toHex(4);
+}
+
 // Daily leaderboard (Alex: "a daily leaderboard, separate from the current
 // session... refresh all the scores" at midnight EST). No cron/reset job
 // needed: the board is keyed by the current EST calendar date, so a new day
@@ -52,6 +62,30 @@ export class Room {
     return Object.values(board).sort((a, b) => b.score - a.score).slice(0, 8);
   }
 
+  // UNIQUE COLORS (Alex: "make sure everyone gets a unique color!"). Picking
+  // purely at random from the 6-entry COLORS palette collided constantly --
+  // even at just 2 players, 1-in-6 odds of a repeat every join. Checks every
+  // currently-connected socket's color tag first and picks a free one from
+  // the curated palette; if the room somehow has more than 6 players and the
+  // whole palette is taken, falls back to a procedurally generated distinct
+  // hue rather than silently repeating.
+  pickUniqueColor() {
+    const used = new Set();
+    for (const ws of this.state.getWebSockets()) {
+      const [, colorStr] = this.state.getTags(ws);
+      used.add(Number(colorStr));
+    }
+    const free = COLORS.filter(c => !used.has(c));
+    if (free.length) return free[Math.floor(Math.random() * free.length)];
+    let hue = Math.random();
+    for (let tries = 0; tries < 50; tries++) {
+      const hex = hslToHex(hue, 0.65, 0.6);
+      if (!used.has(hex)) return hex;
+      hue = (hue + 0.17) % 1;
+    }
+    return COLORS[Math.floor(Math.random() * COLORS.length)];   // give up, accept a repeat
+  }
+
   async fetch(request) {
     if (request.headers.get('Upgrade') !== 'websocket') {
       return new Response('expected websocket', { status: 426 });
@@ -60,7 +94,7 @@ export class Room {
     const [client, server] = Object.values(pair);
 
     const id = crypto.randomUUID();
-    const color = COLORS[Math.floor(Math.random() * COLORS.length)];
+    const color = this.pickUniqueColor();
     // Tags let us recover per-socket metadata after hibernation without
     // keeping a live JS closure around -- see webSocketMessage/Close below.
     // Color rides along as a SECOND tag so every future state broadcast for
@@ -142,8 +176,12 @@ export class Room {
       const { dateKey, board } = await this.loadDailyBoard();
       const initials = msg.initials.slice(0, 3).toUpperCase();
       const prev = board[id];
+      // color rides along so the client can render each row in that
+      // player's own game color (Alex: "your game color should show up
+      // in the leaderboard as your text's initial colors").
+      const color = typeof msg.color === 'number' ? msg.color : Number(colorStr);
       if (!prev || msg.score > prev.score) {
-        board[id] = { initials, score: msg.score };
+        board[id] = { initials, score: msg.score, color };
         await this.state.storage.put('daily:' + dateKey, board);
       }
       this.broadcast({ type: 'dailyboard', date: dateKey, entries: this.dailyTop(board) });
