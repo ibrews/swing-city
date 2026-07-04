@@ -361,6 +361,15 @@ const PICKUP_PER_BLOCK = 2, PICKUP_SCORE = 10, KNOCK_SCORE = 25;
 const COMBO_WINDOW = 1.6;   // seconds since the last knock that still counts as the same combo chain
 const JUMP_VEL_NORMAL = 12, JUMP_VEL_BOOSTED = 20, JUMP_BOOST_DURATION = 9;
 const CLIMB_SPEED = 7.0;   // wall-crawl vertical speed while holding the web button against a building
+// SWING REEL (Alex: "forward... basically retract the web so you're pulled
+// directly to that spot" + "backward... let out more web and rappel down"
+// + "web by default with no other input should default toward pulling me
+// in the general direction of my forward vector"). Replaces the old
+// "hold W to pump the swing" mechanic with a literal reel-in/reel-out on
+// the rope, Spider-Man-game style. SWING_FORWARD_PULL is a small always-on
+// nudge along the look direction so a swing keeps making progress even
+// with nothing held; W/S additionally reel the rope itself in/out.
+const REEL_SPEED = 12, REEL_MIN_ROPE = 2, SWING_FORWARD_PULL = 6;
 // Perpendicular pawn-facing yaw per wall-contact axis (0/1/4/5 from the
 // collider push-out logic), and how close to the roofline the climb starts
 // easing the player onto the roof -- see wall-crawl handling in stepPlayer.
@@ -4263,8 +4272,12 @@ function stepPlayer(dt) {
   const f = new THREE.Vector3(-Math.sin(yaw), 0, -Math.cos(yaw));
   const r = new THREE.Vector3(-f.z, 0, f.x);
   const inDir = new THREE.Vector3();
-  if (keys.KeyW) inDir.add(f);
-  if (keys.KeyS) inDir.sub(f);
+  // While attached to a swing, forward/back are repurposed to REEL the
+  // rope in/out (see the rope-constraint block below) instead of air-
+  // steering -- otherwise they'd do both at once, fighting each other.
+  // Left/right keep steering the swing normally.
+  if (keys.KeyW && !p.anchor) inDir.add(f);
+  if (keys.KeyS && !p.anchor) inDir.sub(f);
   if (keys.KeyD) inDir.add(r);
   if (keys.KeyA) inDir.sub(r);
   if (inDir.lengthSq() > 0) inDir.normalize();
@@ -4410,6 +4423,14 @@ function stepPlayer(dt) {
 
   // rope constraint => pendulum
   if (p.anchor) {
+    // REEL (see REEL_SPEED/SWING_FORWARD_PULL above): W shortens the rope
+    // (retract -- pulls you toward the anchor), S lengthens it (payout --
+    // rappel away/down); with neither held, a small default nudge along
+    // the look direction keeps the swing making forward progress instead
+    // of feeling "dead" with no input.
+    if (keys.KeyW) p.ropeLen = Math.max(REEL_MIN_ROPE, p.ropeLen - REEL_SPEED * dt);
+    else if (keys.KeyS) p.ropeLen += REEL_SPEED * dt;
+    else p.vel.addScaledVector(aimDir(), SWING_FORWARD_PULL * dt);
     const d = p.pos.clone().sub(p.anchor);
     if (d.length() > p.ropeLen) {
       d.setLength(p.ropeLen);
@@ -4418,10 +4439,6 @@ function stepPlayer(dt) {
       const radial = n.multiplyScalar(p.vel.dot(n));
       p.vel.sub(radial);                       // keep only tangential motion
       p.vel.multiplyScalar(1.004);             // tiny pump so swings build
-      // holding W while taut pumps the swing hard (like kicking your legs)
-      if (keys.KeyW && p.vel.lengthSq() > 1) {
-        p.vel.addScaledVector(p.vel.clone().normalize(), 10 * dt);
-      }
     }
     webLine.visible = true;
     webLineGeo.setPositions([p.pos.x, p.pos.y, p.pos.z, p.anchor.x, p.anchor.y, p.anchor.z]);
