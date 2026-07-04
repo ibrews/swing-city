@@ -23,6 +23,15 @@
     font: 16px/1.8 ui-monospace, Menlo, monospace; text-align: center;
   }
   #start { cursor: pointer; }
+  /* Text wrapping (Alex: "better text wrapping so we don't have text going
+     to the ends of the page") -- the flex-centered container had no width
+     constraint on its content, so lines stretched close to full viewport
+     width on wide screens. Cap the readable measure and keep side padding
+     so it never touches the edges regardless of viewport size. */
+  #start > div, #gameover > div { max-width: 720px; padding: 0 28px; box-sizing: border-box; }
+  #versionLine { font-size: 12px; color: #5a7a94; letter-spacing: 1px; margin-top: -8px; }
+  .controlsGrid { text-align: left; font-size: 14px; line-height: 1.7; }
+  .controlsGrid h3 { color: #ff64c8; font-size: 13px; letter-spacing: 1px; margin: 14px 0 4px; }
   /* Callsign input (Alex: "the box for typing your name... too small and
      hard to click"). No rule existed before this -- it was rendering at
      the browser's tiny default input size against a page full of large
@@ -135,15 +144,28 @@
 <body>
 <div id="start"><div>
   <h1>SWING CITY</h1>
+  <div id="versionLine">by ibrews &nbsp;·&nbsp; v0.0.6 built 2026-07-03</div><br>
   A living neon city at night. Sling a web, swing between skyscrapers, and see how much
   trouble you can cause before the night's over.<br><br>
   <span id="initialsRow">callsign (optional, 3 letters): <input id="initialsInput" maxlength="3"
     placeholder="AAA" autocomplete="off" spellcheck="false"></span><br><br>
-  <b>click to enter</b><br><br>
-  mouse — look &nbsp;·&nbsp; <b>hold LMB or SPACE</b> — shoot a web and swing (let go to release)<br>
-  <b>tap LMB or SPACE</b> — jump (in the air, tap again to fire a web instead) &nbsp;·&nbsp;
-  <b>hold against a wall</b> — crawl up it<br>
-  WASD — run / steer in the air &nbsp;·&nbsp; shift — sprint &nbsp;·&nbsp; R — respawn<br><br>
+  <b>click to enter</b>
+  <div class="controlsGrid">
+    <h3>KEYBOARD &amp; MOUSE</h3>
+    mouse — look &nbsp;·&nbsp; <b>hold LMB or SPACE</b> — shoot a web and swing (let go to release)<br>
+    <b>tap LMB or SPACE</b> — jump (in the air, tap again to fire a web instead) &nbsp;·&nbsp;
+    <b>hold against a wall</b> — crawl up it<br>
+    WASD or arrow keys — run / steer in the air &nbsp;·&nbsp; shift — sprint &nbsp;·&nbsp;
+    R — respawn &nbsp;·&nbsp; V — first/third person &nbsp;·&nbsp; M — menu
+    <h3>GAMEPAD</h3>
+    left stick — move &nbsp;·&nbsp; right stick — look &nbsp;·&nbsp;
+    A/Cross or right trigger — web/jump &nbsp;·&nbsp; X/Square — respawn &nbsp;·&nbsp;
+    full stick deflection or right trigger — sprint
+    <h3>VR CONTROLLERS</h3>
+    left stick — move &nbsp;·&nbsp; right stick X — snap-turn &nbsp;·&nbsp; right stick Y — smooth turn<br>
+    either trigger or right A — web/jump &nbsp;·&nbsp; right B — first/third person<br>
+    left X — exit VR &nbsp;·&nbsp; left Y — respawn
+  </div><br>
   <b>HOW TO WIN:</b> there's no ending — just a high score. Smash into cars while swinging to send
   them flying (+25), grab the glowing orbs for points (+10), and joust or knock other players
   around to rack up bonus points too — a few unusual-looking orbs do something other than add
@@ -456,7 +478,22 @@ const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x060a18);
 scene.fog = new THREE.FogExp2(0x0a0f1e, 0.008);
 
-const camera = new THREE.PerspectiveCamera(70, innerWidth / innerHeight, 0.1, 900);
+// Far plane cut from 900 to 280 (Alex: "cull the ones too far away... help
+// with VR framerate"). At fog density 0.008 (FogExp2), the fog factor is
+// already ~98% by ~250 units -- anything out there is visually
+// indistinguishable from the fog color regardless of what it actually is.
+// The city's diagonal (GRID_N=16 blocks) spans close to 500 units corner-
+// to-corner, so standing near one edge previously left geometry across
+// almost the WHOLE city still inside the frustum and eligible for
+// per-object culling checks even though none of it was visible past the
+// fog. Individual scene objects (cars, rooftop coins/crowns, streetlights,
+// remote players, building-name labels) each get their own bounding-sphere
+// frustum/distance test, so a tighter far plane lets Three.js actually
+// skip them once they're fog-invisible anyway. (The single city-wide
+// buildingMesh InstancedMesh doesn't benefit per-building from this --
+// splitting it into spatially-chunked instanced meshes would, but that's
+// a real city-gen restructure, not a one-line fix.)
+const camera = new THREE.PerspectiveCamera(70, innerWidth / innerHeight, 0.1, 280);
 // WebXR "dolly" pattern: the camera is a child of a movable rig, not moved
 // directly. Outside XR the rig just sits at identity (position/rotation
 // zeroed) so camera.position/camera.lookAt below behave EXACTLY as before
@@ -502,18 +539,19 @@ for (let i = 0; i < 2; i++) {
   cameraRig.add(grip);
   xrGrips.push(grip);
 }
-// WRIST-MOUNTED LEADERBOARD (Alex: "things like the perpetual leaderboard
-// should fit locked to the inside of your arms"). Mounted on the LEFT
-// grip (index 0, same left/right assumption the rest of this file's XR
-// code already makes -- controller index isn't spec-guaranteed to match
-// handedness, but it's consistent in practice and matches the existing
-// arm/shoulder-offset code), rotated to face upward so glancing down at
-// your own wrist reads it, like a smartwatch.
-const vrWristPanel = makeCanvasPanel(512, 384, 0.34, 0.255);
-vrWristPanel.mesh.position.set(0, 0.02, 0.06);
-vrWristPanel.mesh.rotation.x = -Math.PI / 2;
+// ARM-TATTOO LEADERBOARD PANELS (Alex: "I should see daily leaderboard on
+// my right arm, session leaderboard on my left arm... needs to rotate 90
+// degrees and match my arm rotation, not the hands -- should feel like an
+// arm tattoo, not something separate and perpendicular"). Originally
+// parented to the grip (the handheld controller's own independent
+// rotation) with a fixed "face up" tilt -- reads as a floating panel near
+// the hand, not something drawn ON the arm. Repositioned/reoriented every
+// frame in updateXRArms() below to match the ARM cube's actual computed
+// orientation instead (see xrArms), which is what makes it read as a
+// tattoo on the limb rather than a HUD element that happens to be nearby.
+const vrWristPanel = makeCanvasPanel(512, 384, 0.34, 0.255);   // left arm: session leaderboard
 vrWristPanel.mesh.visible = false;
-xrGrips[0].add(vrWristPanel.mesh);
+scene.add(vrWristPanel.mesh);
 // BASIC ARM REPRESENTATION (Alex, VR playtest: "it's good to see the
 // controllers -- could you give us in VR two arms that are stretched cubes
 // that extend the same distance as the controllers and live a little under
@@ -538,20 +576,50 @@ const XR_SHOULDER_OFFSETS = [
   new THREE.Vector3(0.22, -0.35, -0.05),    // right
 ];
 const xrArmHandWorld = new THREE.Vector3(), xrArmShoulderWorld = new THREE.Vector3(), xrArmMid = new THREE.Vector3();
+const xrArmSideAxis = new THREE.Vector3();
 function updateXRArms() {
   const presenting = renderer.xr.isPresenting;
   for (let i = 0; i < 2; i++) {
     const arm = xrArms[i];
-    arm.visible = presenting;
-    if (!presenting) continue;
+    // left arm (i=0) carries the session leaderboard, right arm (i=1) the
+    // daily leaderboard -- see the ARM-TATTOO comment above vrWristPanel.
+    const panel = i === 0 ? vrWristPanel.mesh : vrDailyPanel.mesh;
+    if (!presenting) { arm.visible = false; panel.visible = false; continue; }
     xrGrips[i].getWorldPosition(xrArmHandWorld);
     xrArmShoulderWorld.copy(XR_SHOULDER_OFFSETS[i]);
     camera.localToWorld(xrArmShoulderWorld);
-    xrArmMid.copy(xrArmShoulderWorld).add(xrArmHandWorld).multiplyScalar(0.5);
     const length = xrArmShoulderWorld.distanceTo(xrArmHandWorld);
+    // Alex: "still see black halo around me at all times in VR, but not
+    // in regular mode." A real arm is never more than ~1m long. A
+    // controller that hasn't been tracked yet, or a camera pose that's a
+    // frame stale (three.js only updates the XR camera's matrixWorld
+    // INSIDE renderer.render(), so code earlier in the same frame --
+    // this function included -- can see last frame's pose), can produce a
+    // wildly large hand-to-shoulder distance; stretching a dark cube
+    // across that distance with one end landing near the camera is
+    // exactly what reads as a black halo. Hide the arm entirely for any
+    // frame where the geometry would be implausible instead of rendering
+    // a giant dark box that happens to eat the view.
+    if (!isFinite(length) || length > 1.0) { arm.visible = false; panel.visible = false; continue; }
+    arm.visible = true;
+    xrArmMid.copy(xrArmShoulderWorld).add(xrArmHandWorld).multiplyScalar(0.5);
     arm.position.copy(xrArmMid);
     arm.scale.set(XR_ARM_THICKNESS, XR_ARM_THICKNESS, Math.max(0.05, length));
     arm.lookAt(xrArmHandWorld);
+    // Tattoo placement: copy the arm's own orientation directly (not the
+    // grip's) so the panel rotates WITH the forearm, then offset outward
+    // from its surface along the arm's own local X axis (computed post-
+    // lookAt, so it's a stable "sideways" direction rather than a fixed
+    // world axis). Sign flips per arm so both panels face outward from
+    // the body rather than into it. Deliberately NOT parented to `arm` --
+    // arm.scale.z changes every frame with hand distance, which would
+    // squash/stretch a naively-parented child; copying transforms instead
+    // keeps the panel's own size constant regardless of arm length.
+    panel.quaternion.copy(arm.quaternion);
+    xrArmSideAxis.set(1, 0, 0).applyQuaternion(arm.quaternion);
+    const outwardSign = i === 0 ? -1 : 1;
+    panel.position.copy(arm.position).addScaledVector(xrArmSideAxis, outwardSign * (XR_ARM_THICKNESS * 0.55 + 0.002));
+    panel.visible = true;
   }
 }
 
@@ -819,10 +887,26 @@ for (const crown of [...plateCrowns, ...spireCrowns]) {
   scene.add(coin);
   rooftopCoins.push(coin);
 }
-function stepRooftopCoins(t) {
+// Alex: "seems like I can't collect the pickups on roofs?" -- there was
+// never any collection logic here at all (see the original comment above:
+// "no pickup logic here... prep for a separate orb-effects/scoring pass"
+// that this file never actually did). Rooftop coins were purely cosmetic
+// spinners the whole time, on every roof, implying collectibility that
+// never existed. Reuses scoreForOrbHeight/spawnScorePopup from the orb
+// system for a consistent feel (taller building = more points).
+function stepRooftopCoins(t, p) {
   rooftopCoins.forEach((mesh, idx) => {
+    if (mesh.userData.got) return;
     mesh.rotation.y = t * 1.2;
     mesh.scale.setScalar(1 + Math.sin(t * 2 + idx) * 0.15);
+    if (p && p.pos.distanceTo(mesh.position) < 1.8) {
+      mesh.userData.got = true;
+      mesh.visible = false;
+      sfxPing(mesh.position);
+      const amount = scoreForOrbHeight(mesh.position.y);
+      addScore(amount);
+      spawnScorePopup(mesh.position, amount);
+    }
   });
 }
 
@@ -947,6 +1031,51 @@ const billboardPanel = makeCanvasPanel(512, 384, BILLBOARD_W, BILLBOARD_H);
 billboardPanel.mesh.position.set(billboardSpot.x, billboardSpot.topY + BILLBOARD_H / 2 + 0.6, billboardSpot.z);
 billboardPanel.redraw(drawLeaderboardPanel([]));
 scene.add(billboardPanel.mesh);
+// DAILY LEADERBOARD PANEL (Alex: "daily leaderboard should go up to 20").
+// A physical in-world panel showing all 20 rows at the billboard's row
+// height would need to be over 2x taller -- fits more compactly here with
+// a smaller font/row-pitch instead in a taller canvas, while the flat
+// HTML #dailyboard (no physical-panel size constraint) shows the full 20
+// either way.
+function drawDailyboardPanel(entries, date) {
+  return (ctx, w, h) => {
+    ctx.fillStyle = '#1c1304e6';
+    ctx.fillRect(0, 0, w, h);
+    ctx.strokeStyle = '#ffcf6b';
+    ctx.lineWidth = 6;
+    ctx.strokeRect(3, 3, w - 6, h - 6);
+    ctx.textAlign = 'center';
+    ctx.font = 'bold 22px ui-monospace, Menlo, monospace';
+    ctx.fillStyle = '#ffe27a';
+    ctx.shadowColor = '#a60'; ctx.shadowBlur = 10;
+    ctx.fillText(`DAILY ${date || ''}`, w / 2, 34);
+    ctx.shadowBlur = 0;
+    ctx.font = '20px ui-monospace, Menlo, monospace';
+    ctx.textAlign = 'left';
+    const rows = entries.slice(0, 12);
+    rows.forEach((e, i) => {
+      const y = 68 + i * 26;
+      ctx.fillStyle = '#ffcf6b';
+      ctx.fillText(`${i + 1}.`, 20, y);
+      ctx.fillStyle = '#' + new THREE.Color(e.color).getHexString();
+      ctx.fillText(e.initials || '???', 56, y);
+      ctx.fillStyle = '#9fe8ff';
+      ctx.textAlign = 'right';
+      ctx.fillText(String(e.score), w - 20, y);
+      ctx.textAlign = 'left';
+    });
+    if (!rows.length) {
+      ctx.fillStyle = '#c98';
+      ctx.textAlign = 'center';
+      ctx.fillText('no scores yet today', w / 2, h / 2);
+      ctx.textAlign = 'left';
+    }
+  };
+}
+const vrDailyPanel = makeCanvasPanel(512, 384, 0.34, 0.255);
+vrDailyPanel.mesh.visible = false;
+scene.add(vrDailyPanel.mesh);
+vrDailyPanel.redraw(drawDailyboardPanel([], ''));
 
 // Ground, roads, sidewalks, dashes
 // Ground now sized to just past WORLD_BOUND (not CITY_EXTENT*2) -- see the
@@ -1739,6 +1868,25 @@ function sfxPing(pos) {
     return { node: g, stopAt: now + 0.2 };
   });
 }
+// SPATIAL WHOOSH (Alex: "a whoosh sound other players make so you know when
+// you're around them"). A short filtered-noise sweep, high->low, like air
+// moving past -- see stepMultiplayer for when this actually fires.
+function sfxWhoosh(pos) {
+  playSpatialAt(pos, (ctx, now) => {
+    const src = ctx.createBufferSource(); src.buffer = noiseBuffer;
+    const filt = ctx.createBiquadFilter(); filt.type = 'bandpass';
+    filt.Q.value = 1.1;
+    filt.frequency.setValueAtTime(1400, now);
+    filt.frequency.exponentialRampToValueAtTime(280, now + 0.35);
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0.0001, now);
+    g.gain.exponentialRampToValueAtTime(0.3, now + 0.06);
+    g.gain.exponentialRampToValueAtTime(0.0001, now + 0.4);
+    src.connect(filt); filt.connect(g);
+    src.start(now); src.stop(now + 0.42);
+    return { node: g, stopAt: now + 0.42 };
+  });
+}
 // Soft bump thud for a blocked (non-knock) car collision -- much gentler
 // than sfxKnock, just enough to confirm "yes, you hit something."
 function sfxBump(pos) {
@@ -1848,7 +1996,17 @@ function findQueuedCar() {
       const d = c.dirn * (o.s - c.s);
       if (d > 0.1 && d < closestAhead) closestAhead = d;
     }
-    if (closestAhead < 3.2) return c;
+    // Alex: "still not hearing many sound effects -- really just rain and
+    // collision with cars. No thunder. No honking." Traced this one down
+    // via the debug hook: this traffic model has no actual congestion
+    // dynamics -- cars hold a perfectly uniform lane spacing at all times
+    // (measured: every single "closest car ahead" gap across 166 cars was
+    // EXACTLY 22.4 units, never smaller), so a 3.2-unit "stuck behind
+    // someone" threshold could physically never be crossed -- this was a
+    // fully dead feature, not just rare. Raised well above the actual
+    // fixed gap so it fires as the intended "every so often" ambience
+    // instead of never.
+    if (closestAhead < 24) return c;
   }
   return null;
 }
@@ -2759,7 +2917,6 @@ function respawn() {
 // (white) and chest mark (red) stay fixed accents on every instance --
 // that consistency IS what reads as "the same pawn."
 const suitGlow = new THREE.MeshBasicMaterial({ color: 0xf2f6ff });
-const suitRed = new THREE.MeshBasicMaterial({ color: 0xff2a3a });
 // JOUSTING STICK (Alex, family playtest: "all players are carrying a thin
 // jousting stick"). Purely cosmetic -- lives on the shared pawn factory (see
 // "PAWN FACTORY" above) so both the local player and every remote player get
@@ -2781,9 +2938,18 @@ function makePawnBody(suitColor) {
     eye.position.set(ex, 0.66, 0.16);
     body.add(eye);
   }
-  const chestMark = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.28, 0.02), suitRed);
+  // Chest mark used to be a fixed red accent on every pawn regardless of
+  // player color (Alex: "can the part of my pawn that are red be replaced
+  // with my player color, like my web?"). Now its own per-instance
+  // material colored the same as the suit -- `body.chestMat` lets the
+  // local-player color-assignment code (see the 'welcome' handler) recolor
+  // it once the network assigns a real color, same as it already does for
+  // suitMat.
+  const chestMat = new THREE.MeshBasicMaterial({ color: suitColor });
+  const chestMark = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.28, 0.02), chestMat);
   chestMark.position.set(0, 0.05, 0.18);
   body.add(chestMark);
+  body.chestMat = chestMat;
   const stick = new THREE.Mesh(new THREE.CylinderGeometry(0.035, 0.045, STICK_LEN, 6), stickMat);
   stick.rotation.x = Math.PI / 2;   // cylinder's local +Y -> body-local +Z (forward)
   stick.position.set(0.2, 0.18, 0.35);
@@ -3105,13 +3271,16 @@ let pendingAirWeb = false;
 // the initial jump+fireWeb attempt whiffs -- if still held past it, one
 // extra upward pull (SWING_ASSIST_BOOST) and a second attach attempt.
 let pendingSwingAssist = false, swingAssistHoldTime = 0;
-// Bumped from 0.16/7 (Alex: "Double jump effect to get higher faster isn't
-// working"). Verified the trigger/arm/retry mechanism itself fires
-// correctly through the real webHeld pipeline (including a simulated XR
-// trigger via stepXR) -- the likely issue is the effect being too subtle
-// to notice rather than not firing, so made both the window and the boost
-// more generous.
-const SWING_ASSIST_DELAY = 0.22, SWING_ASSIST_BOOST = 10;
+// Bumped twice now (0.16/7 -> 0.22/10 -> this). Alex: "double jump still
+// not getting me high enough" even after the previous bump, and the
+// trigger/arm/retry mechanism itself was already verified firing correctly
+// through the real webHeld pipeline -- so this isn't a triggering problem,
+// it's a magnitude one. Boost raised to be comparable to the ORIGINAL jump
+// itself (JUMP_VEL_NORMAL=12), so the assist reads as a genuine second
+// jump stacked on the first (true "double jump" height) rather than a
+// partial top-up, and the delay shortened so less of it decays to gravity
+// before the boost lands.
+const SWING_ASSIST_DELAY = 0.16, SWING_ASSIST_BOOST = 15;
 // Raw keyboard state lives in kbKeys, not `keys` -- `keys` (what stepPlayer
 // actually reads) is a per-frame OR-combine of kbKeys/gpKeys/tKeys, same
 // reasoning as the webHeld combine above: gamepad/touch poll their state
@@ -3209,7 +3378,23 @@ const PROFANITY_INITIALS = new Set([
   'SOB', 'WTF', 'BCH', 'CNT', 'TWT',
 ]);
 const initialsInput = document.getElementById('initialsInput');
+const CALLSIGN_STORAGE_KEY = 'swingCityCallsign';
 let myInitials = '';
+// Alex: "can we save callsign in local cache so a user doesn't need to
+// type it in again every session?" Restored here (module init, before
+// entering the game) rather than waiting for the 'welcome' network
+// message, so it's already filled in and visible the instant the start
+// screen shows. Re-validated through the SAME profanity check as manual
+// typing rather than trusted blindly -- the blocklist can grow between
+// sessions, and a name that was fine when saved shouldn't get a free pass
+// forever.
+try {
+  const saved = localStorage.getItem(CALLSIGN_STORAGE_KEY);
+  if (saved && /^[A-Z]{3}$/.test(saved) && !PROFANITY_INITIALS.has(saved)) {
+    initialsInput.value = saved;
+    myInitials = saved;
+  }
+} catch (e) { /* localStorage unavailable (private browsing, etc) -- just skip restoring */ }
 // The WHOLE #start div is a click target that starts the game (see
 // startEl.addEventListener('click', ...) above) and keydown/keyup are
 // bound at the window level for gameplay controls -- both would fire from
@@ -3234,6 +3419,10 @@ initialsInput.addEventListener('input', () => {
   }
   initialsInput.value = v;
   myInitials = v.length === 3 ? v : '';
+  try {
+    if (myInitials) localStorage.setItem(CALLSIGN_STORAGE_KEY, myInitials);
+    else localStorage.removeItem(CALLSIGN_STORAGE_KEY);
+  } catch (e) { /* localStorage unavailable -- callsign just won't persist this session */ }
   refreshMyNameTag();
 });
 // Entering VR via the VRButton is its own "start the game" gesture -- run
@@ -3242,8 +3431,10 @@ initialsInput.addEventListener('input', () => {
 // head tracking).
 renderer.xr.addEventListener('sessionstart', enterGame);
 renderer.xr.addEventListener('sessionstart', () => { cameraMode = 'first'; });
-renderer.xr.addEventListener('sessionstart', () => { vrWristPanel.mesh.visible = true; });
-renderer.xr.addEventListener('sessionend', () => { vrWristPanel.mesh.visible = false; });
+// vrWristPanel/vrDailyPanel visibility is now owned entirely by
+// updateXRArms() (it needs to hide them under the same implausible-
+// geometry conditions the arms themselves hide under -- see the black-
+// halo fix above), so no separate sessionstart/sessionend toggle here.
 // STICK FOLLOWS THE LEFT HAND IN VR (Alex: "jousting rod should actually
 // stay relative to the same vector of your left arm and help with aiming
 // an attack in VR"). The fixed camera-space offset was fine for desktop
@@ -3466,8 +3657,18 @@ function stepXR(dt) {
     // empirical report was unambiguous.
     const ax = -(gp.axes[2] !== undefined ? gp.axes[2] : gp.axes[0]);
     const ay = -(gp.axes[3] !== undefined ? gp.axes[3] : gp.axes[1]);
-    if (rightHand) { lookX = ax || 0; lookY = ay || 0; }
-    else { moveX = ax || 0; moveY = ay || 0; }   // 'left' or 'none' -- default to movement
+    // RIGHT STICK ONLY: a third playtest report ("left joystick is
+    // perfect, lock that... right joystick Y (up) is doing a right snap
+    // turn, X (right) is doing left smooth rotation") means the right
+    // controller's axes[2]/[3] are SWAPPED relative to axes[0]/[1]-style X/Y
+    // on this hardware (physical up/down is landing in axes[2], physical
+    // left/right in axes[3]) -- distinct from the left stick, which reports
+    // normally (hence "lock that"). Solved directly from the two reported
+    // input->output pairs (not re-guessed from spec): swap which raw axis
+    // feeds lookX vs lookY, and negate the one now feeding lookX, or a
+    // push-right still produced a left snap after the swap alone.
+    if (rightHand) { lookX = -ay || 0; lookY = ax || 0; }
+    else { moveX = ax || 0; moveY = ay || 0; }   // 'left' or 'none' -- default to movement -- UNCHANGED, confirmed correct
   }
   if (leftX && !xrLeftXPrev) { xrLeftXPrev = true; openMenu(); session.end().catch(() => {}); }
   else if (!leftX) xrLeftXPrev = false;
@@ -3956,8 +4157,7 @@ function updateLeaderboard() {
     `<div class="row"><span style="color:${hexColor(e.color)}">${i + 1}. ${e.initials || '???'}${e.isMe ? ' (you)' : ''}</span><span>${e.score}</span></div>`
   ).join('');
   billboardPanel.redraw(drawLeaderboardPanel(entries));
-  vrWristPanel.redraw(drawLeaderboardPanel(entries));
-  vrWristPanel.mesh.visible = renderer.xr.isPresenting;
+  vrWristPanel.redraw(drawLeaderboardPanel(entries));   // visibility owned by updateXRArms()
   // Only the client that JUST became #1 reports it (same "attacker/newly-
   // true-condition reports once" shape as joust/knock in worker.js) --
   // every other client just renders whatever banner arrives. Guarded on
@@ -3968,7 +4168,16 @@ function updateLeaderboard() {
   if (leader && leader.score > 0 && leader.id !== lastLeaderId) {
     lastLeaderId = leader.id;
     if (leader.isMe && mpSocket && mpSocket.readyState === WebSocket.OPEN) {
-      mpSocket.send(JSON.stringify({ type: 'leader', initials: myInitials || '???', score: leader.score }));
+      // Alex: "don't show ??? when we know the name of a player, even if
+      // their score is 0" -- '???' was being sent and PERSISTED server-
+      // side as the literal initials value for anonymous players (rather
+      // than staying a display-only fallback), so an early anonymous score
+      // baked "???" into that player's entry permanently, even after they
+      // later set a real callsign (confirmed live: the daily board really
+      // does store the 3-character string "???" for several entries).
+      // Send blank instead -- the '???' text is purely a rendering
+      // fallback (see drawLeaderboardPanel/renderDailyboard), never data.
+      mpSocket.send(JSON.stringify({ type: 'leader', initials: myInitials || '', score: leader.score }));
     }
   }
   // Crown always tracks the CURRENT #1, not just who most recently became
@@ -3991,7 +4200,7 @@ function updateLeaderboard() {
   // persisted storage with writes for no reason since only the max matters).
   if (score > 0 && score > lastDailyScoreSent && mpSocket && mpSocket.readyState === WebSocket.OPEN) {
     lastDailyScoreSent = score;
-    mpSocket.send(JSON.stringify({ type: 'dailyscore', initials: myInitials || '???', score, color: myColor }));
+    mpSocket.send(JSON.stringify({ type: 'dailyscore', initials: myInitials || '', score, color: myColor }));
   }
 }
 function showLeaderBanner(name, points) {
@@ -4010,9 +4219,11 @@ function showLeaderBanner(name, points) {
 const dailyboardEl = document.getElementById('dailyboard');
 let lastDailyScoreSent = 0;
 function renderDailyboard(entries, date) {
-  dailyboardEl.innerHTML = `<b>DAILY LEADERBOARD ${date || ''}</b>` + entries.slice(0, 8).map((e, i) =>
+  const html = `<b>DAILY LEADERBOARD ${date || ''}</b>` + entries.slice(0, 20).map((e, i) =>
     `<div class="row"><span style="color:${hexColor(e.color)}">${i + 1}. ${e.initials || '???'}</span><span>${e.score}</span></div>`
   ).join('');
+  dailyboardEl.innerHTML = html;
+  vrDailyPanel.redraw(drawDailyboardPanel(entries, date));
 }
 function updatePlayerCount() { playerCountTotalEl.textContent = knownPlayerIds.size + 1; }
 let mpSocket = null, myId = null, myColor = null, mpSendTimer = 0;
@@ -4070,6 +4281,8 @@ const playerKnockCooldowns = new Map();   // victim id -> seconds remaining
 // victim applies it to itself" relay shape as joust/knock.
 const STICK_POKE_REACH = 1.5, STICK_POKE_RADIUS = 0.75, STICK_POKE_MIN_SPEED = 3.5, STICK_POKE_HEIGHT_GATE = 1.4;
 const playerPokeCooldowns = new Map();   // victim id -> seconds remaining
+const WHOOSH_RADIUS = 5, WHOOSH_MIN_SPEED = 3, WHOOSH_COOLDOWN = 2.5;
+const playerWhooshCooldowns = new Map();   // remote player id -> seconds remaining
 
 function makeRemotePlayerMesh(color) {
   // Same pawn every player uses (Alex: "all players should use the same
@@ -4102,6 +4315,7 @@ function connectMultiplayer() {
       // white only in single player").
       webLineMat.color.setHex(myColor);
       spidey.material.color.setHex(myColor);   // body AND head share this one material (see makePawnBody)
+      spidey.chestMat.color.setHex(myColor);
       refreshMyNameTag();   // name tag was drawn in the default suit color until now
       playerCountEl.style.display = 'block';
       updatePlayerCount();
@@ -4251,6 +4465,10 @@ function stepMultiplayer(dt, p) {
     const t = playerPokeCooldowns.get(id) - dt;
     if (t <= 0) playerPokeCooldowns.delete(id); else playerPokeCooldowns.set(id, t);
   }
+  for (const id of playerWhooshCooldowns.keys()) {
+    const t = playerWhooshCooldowns.get(id) - dt;
+    if (t <= 0) playerWhooshCooldowns.delete(id); else playerWhooshCooldowns.set(id, t);
+  }
   // Updates arrive at MP_SEND_INTERVAL, not every frame. Rather than lerping
   // toward the raw last-known packet (which trails a genuinely moving player
   // by roughly velocity * smoothing-time-constant -- see the JOUST comment
@@ -4265,7 +4483,7 @@ function stepMultiplayer(dt, p) {
   // ACTUAL rendered motion (not netVel directly), so the coat streams
   // correctly during the smoothed glide, not just at the moment a new packet
   // arrives.
-  for (const rp of remotePlayers.values()) {
+  for (const [id, rp] of remotePlayers) {
     rp.prevPos.copy(rp.body.position);
     const sinceUpdate = Math.min((performance.now() - rp.lastStateTime) / 1000, REMOTE_EXTRAPOLATION_CAP);
     predictedRemotePos.copy(rp.targetPos).addScaledVector(rp.netVel, sinceUpdate);
@@ -4277,6 +4495,20 @@ function stepMultiplayer(dt, p) {
       rp.webLine.visible = true;
       rp.webLineGeo.setPositions([rp.body.position.x, rp.body.position.y, rp.body.position.z, rp.anchorPos.x, rp.anchorPos.y, rp.anchorPos.z]);
     } else rp.webLine.visible = false;
+    // SPATIAL WHOOSH (Alex: "a whoosh sound other players make so you know
+    // when they're around you -- make sure it's spatial so if you're in
+    // VR you know if they're behind you"). PositionalAudio + the shared
+    // AudioListener (a child of the camera, so it tracks real head
+    // orientation in VR too) already gives real 3D directionality for
+    // free -- this just decides WHEN to fire it: another player passing
+    // close by at real speed (not just idling nearby), gated by a
+    // per-player cooldown so someone lingering at the edge of range
+    // doesn't spam it every frame.
+    if (p.pos.distanceTo(rp.body.position) < WHOOSH_RADIUS && rp.vel.length() > WHOOSH_MIN_SPEED &&
+        !playerWhooshCooldowns.has(id)) {
+      sfxWhoosh(rp.body.position);
+      playerWhooshCooldowns.set(id, WHOOSH_COOLDOWN);
+    }
   }
   // GHOST: "pass through... players, no collision" -- skips the whole
   // interaction loop on MY side only (the other client would need to know
@@ -4435,7 +4667,7 @@ function loop(now) {
   stepSparkles(dt);
   stepWeather(worldDt);
   stepRain(player.pos, simT);
-  stepRooftopCoins(simT);
+  stepRooftopCoins(simT, player);
   stepScorePopups(dt);
   updateBloom(player.pos.y);
   updateFallMusic(player.pos.y, player.onGround);
@@ -4494,7 +4726,8 @@ window.__sw = { THREE, player, cars, parkedCars, pickups, colliders, EDGE, WORLD
                 get playerKillCount() { return playerKillCount; }, set playerKillCount(v) { playerKillCount = v; },
                 coatLengthFor, COAT_MAX, COAT_N, reportPowerKill, leaderCrown,
                 get comboTimer() { return comboTimer; },
-                rainBus, audioCtx, findQueuedCar, stepHonks,
+                rainBus, audioCtx, findQueuedCar, stepHonks, sfxWhoosh, playerWhooshCooldowns,
+                WHOOSH_RADIUS, WHOOSH_MIN_SPEED,
                 get CLIMB_SPEED() { return CLIMB_SPEED; }, KNOCK_SPEED,
                 keys, kbKeys, gpKeys, tKeys,
                 get kbMouseWebHeld() { return kbMouseWebHeld; },
@@ -4503,14 +4736,14 @@ window.__sw = { THREE, player, cars, parkedCars, pickups, colliders, EDGE, WORLD
                 set touchWebHeld(v) { touchWebHeld = v; },
                 stepGamepad, stepTouch, touchJoyVec, touchJoyUpdate,
                 get touchCapable() { return touchCapable; },
-                get yaw() { return yaw; }, get pitch() { return pitch; },
+                get yaw() { return yaw; }, set yaw(v) { yaw = v; }, get pitch() { return pitch; },
                 get cameraMode() { return cameraMode; }, set cameraMode(v) { cameraMode = v; },
                 VR_AUTO_RESTART_DELAY,
                 get entered() { return entered; },
                 set entered(v) { entered = v; },
                 openMenu, closeMenu, get paused() { return paused; }, wallMat, WALL_CYCLE_SECONDS, windowMat,
                 xrArms, xrGrips, updateXRArms, announceEffect, announceRemoteEffect,
-                vrNotifyPanel, showVRNotification, vrWristPanel,
+                vrNotifyPanel, showVRNotification, vrWristPanel, vrDailyPanel, drawDailyboardPanel,
                 get myInitials() { return myInitials; }, set myInitials(v) { myInitials = v; },
                 powerBannerEl,
                 get xrLeftXPrev() { return xrLeftXPrev; }, get xrLeftYPrev() { return xrLeftYPrev; },

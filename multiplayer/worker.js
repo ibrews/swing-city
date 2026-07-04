@@ -59,7 +59,7 @@ export class Room {
   }
 
   dailyTop(board) {
-    return Object.values(board).sort((a, b) => b.score - a.score).slice(0, 8);
+    return Object.values(board).sort((a, b) => b.score - a.score).slice(0, 20);
   }
 
   // UNIQUE COLORS (Alex: "make sure everyone gets a unique color!"). Picking
