@@ -607,11 +607,44 @@ if (navigator.xr && navigator.xr.isSessionSupported) {
 // with zero manual per-frame plumbing.
 const xrControllerModelFactory = new XRControllerModelFactory();
 const xrGrips = [];
+// Alex: "sometimes I see a right hand model in my left hand and a left
+// hand model in my right hand... sometimes I have a left and right hand
+// on each hand... sometimes I see controllers." getControllerGrip(index)
+// tracks whatever input source CURRENTLY occupies that numbered slot --
+// WebXR does not guarantee slot 0 is always the left hand, and hand-
+// tracking sources (no physical controller to stay "plugged in") are
+// especially prone to reordering as tracking confidence comes and goes.
+// XRControllerModelFactory already reacts correctly to WHATEVER occupies
+// a slot (it loads the model matching that slot's live handedness), so
+// the model itself isn't "wrong" -- but code elsewhere in this file
+// (fpStick's left-hand attach, the arm-tattoo panels' left/right
+// assignment) assumed slot 0 = left, slot 1 = right, which breaks the
+// moment a reorder happens. Track LIVE handedness per slot via
+// connected/disconnected instead of assuming it from the index, and
+// explicitly clear each grip's children on disconnect so a later
+// reconnect can't stack a stale model on top of a new one (the
+// "left AND right hand on each hand" duplication report).
+const xrGripHandedness = ['unknown', 'unknown'];
 for (let i = 0; i < 2; i++) {
   const grip = renderer.xr.getControllerGrip(i);
+  const slot = i;
+  grip.addEventListener('connected', e => { xrGripHandedness[slot] = e.data.handedness || 'unknown'; });
+  grip.addEventListener('disconnected', () => {
+    xrGripHandedness[slot] = 'unknown';
+    while (grip.children.length) grip.remove(grip.children[0]);
+  });
   grip.add(xrControllerModelFactory.createControllerModel(grip));
   cameraRig.add(grip);
   xrGrips.push(grip);
+}
+// Resolves a hand ('left'/'right') to its CURRENT grip index, falling
+// back to the historical index0=left/index1=right assumption only when
+// live handedness data isn't available yet (e.g. the very first frame,
+// before any 'connected' event has fired).
+function xrGripIndexFor(hand) {
+  const live = xrGripHandedness.indexOf(hand);
+  if (live !== -1) return live;
+  return hand === 'left' ? 0 : 1;
 }
 // ARM-TATTOO LEADERBOARD PANELS (Alex: "I should see daily leaderboard on
 // my right arm, session leaderboard on my left arm... needs to rotate 90
@@ -652,27 +685,47 @@ const XR_SHOULDER_OFFSETS = [
   new THREE.Vector3(0.22, -0.35, -0.05),    // right
 ];
 const xrArmHandWorld = new THREE.Vector3(), xrArmShoulderWorld = new THREE.Vector3(), xrArmMid = new THREE.Vector3();
-const xrArmSideAxis = new THREE.Vector3();
+const xrArmSideAxis = new THREE.Vector3(), xrArmForwardAxis = new THREE.Vector3();
+// Alex: the arm panels were "bisecting the arms facing toward the torso"
+// -- copying the arm's own quaternion directly pointed the panel's face
+// along the arm's length (toward the torso/shoulder), edge-on to the
+// player instead of readable. Pitching 90 degrees around the panel's own
+// local X turns that same face to point outward/up instead.
+const XR_PANEL_PITCH = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), Math.PI / 2);
 function updateXRArms() {
   const presenting = renderer.xr.isPresenting;
+  // Re-parent the aim stick to whichever grip is CURRENTLY the left hand
+  // every frame (not just once at sessionstart) -- input source slot
+  // order can change mid-session (see xrGripIndexFor above), and a
+  // one-time attach would leave the stick stuck on the wrong hand after
+  // a reorder.
+  if (presenting) {
+    const leftGrip = xrGrips[xrGripIndexFor('left')];
+    if (fpStick.parent !== leftGrip) {
+      leftGrip.add(fpStick);
+      fpStick.position.set(0, 0, -(STICK_LEN / 2 + 0.05));
+    }
+  }
   for (let i = 0; i < 2; i++) {
     const arm = xrArms[i];
+    const hand = i === 0 ? 'left' : 'right';
+    const gripIdx = xrGripIndexFor(hand);
     // left arm (i=0) carries the session leaderboard, right arm (i=1) the
     // daily leaderboard -- see the ARM-TATTOO comment above vrWristPanel.
     const panel = i === 0 ? vrWristPanel.mesh : vrDailyPanel.mesh;
-    // CORRECTED (this gate was wrong): a prior fix here hid the arms in
-    // first-person to "match" spidey's hide rule, on the theory that a
-    // reported "body invisible + arms visible" complaint meant the player
-    // was actually stuck in first-person believing they were in third.
-    // That broke the arms' actual purpose -- they're the FIRST-PERSON
-    // substitute for the body (Alex, original VR playtest: wanted to see
-    // his own arms/hands in VR), and VR sessions default to first-person
-    // on sessionstart, so this made arms invisible almost always in
-    // practice ("I can't see any of my avatar body -- no arms or body at
-    // all"). Arms show whenever presenting, in EITHER camera mode; only
-    // the full body (spidey) hides in first-person.
-    if (!presenting) { arm.visible = false; panel.visible = false; continue; }
-    xrGrips[i].getWorldPosition(xrArmHandWorld);
+    // MUTUAL EXCLUSIVITY, re-confirmed (Alex, after trying "arms always
+    // visible while presenting"): "trouble seeing my avatar in third
+    // person and my arm cubes stay attached to me in both modes" -- arms
+    // are the FIRST-PERSON-only substitute for the body (you can't see
+    // your own body's spidey mesh in first-person without it clipping the
+    // camera), and the body is the THIRD-PERSON-only view -- never both
+    // at once. This still covers Vision Pro's pinch-only sessions fine:
+    // they default to (and typically stay in) first-person, so arms show
+    // there exactly as before; a genuine toggle to third-person (real
+    // controllers, right B) now correctly shows the body and hides the
+    // arm cubes instead of showing both.
+    if (!presenting || cameraMode !== 'first') { arm.visible = false; panel.visible = false; continue; }
+    xrGrips[gripIdx].getWorldPosition(xrArmHandWorld);
     xrArmShoulderWorld.copy(XR_SHOULDER_OFFSETS[i]);
     camera.localToWorld(xrArmShoulderWorld);
     const length = xrArmShoulderWorld.distanceTo(xrArmHandWorld);
@@ -702,10 +755,19 @@ function updateXRArms() {
     // arm.scale.z changes every frame with hand distance, which would
     // squash/stretch a naively-parented child; copying transforms instead
     // keeps the panel's own size constant regardless of arm length.
-    panel.quaternion.copy(arm.quaternion);
+    // Pitched 90 degrees on top of the arm's own orientation (see
+    // XR_PANEL_PITCH above) so it reads face-up instead of edge-on, and
+    // shifted further toward the HAND end along the arm's own length axis
+    // (local -Z, same convention `arm.lookAt(hand)` uses) instead of
+    // sitting at the arm's midpoint -- Alex: "go further toward the hands
+    // along the arm for easier readability."
+    panel.quaternion.copy(arm.quaternion).multiply(XR_PANEL_PITCH);
     xrArmSideAxis.set(1, 0, 0).applyQuaternion(arm.quaternion);
+    xrArmForwardAxis.set(0, 0, 1).applyQuaternion(arm.quaternion);
     const outwardSign = i === 0 ? -1 : 1;
-    panel.position.copy(arm.position).addScaledVector(xrArmSideAxis, outwardSign * (XR_ARM_THICKNESS * 0.55 + 0.002));
+    panel.position.copy(arm.position)
+      .addScaledVector(xrArmSideAxis, outwardSign * (XR_ARM_THICKNESS * 0.55 + 0.002))
+      .addScaledVector(xrArmForwardAxis, length * 0.28);
     panel.visible = true;
   }
 }
@@ -4144,20 +4206,38 @@ function stepXR(dt) {
   // full-deflection thresholds tuned against a desktop gamepad's analog
   // curve may simply be harder to physically reach on a VR thumbstick).
   xrKeys.ShiftLeft = Math.hypot(moveX, moveY) > 0.72;
-  // X (lookY, left/right) ALWAYS smooth-turns yaw, in both camera modes.
-  if (Math.abs(lookY) > GAMEPAD_DEADZONE) yaw -= lookY * 2.2 * dt;
-  // Y (lookX, up/down): third-person pitches the camera; first-person
-  // snap-turns instead (see the correction comment above stepXR's loop).
+  // RIGHT STICK, latest correction (Alex, explicit, after the previous fix
+  // was "still wrong"): physX = lookY (physical left/right), physY =
+  // lookX (physical up/down) -- see the hardware-swap note above the loop
+  // for why the raw axes carry those names. Alex's own words: "Left
+  // (X<-0.5) needs to swap with Up (Y>0.5)" and "Right (X>0.5) needs to
+  // swap with Down (Y<-0.5)" -- i.e. swap which FIRST-PERSON function
+  // physX vs physY drives. THIRD PERSON is explicitly UNCHANGED ("needs to
+  // continue... as a full camera controller"): continuous 2-axis yaw+pitch.
+  const physX = lookY, physY = lookX;
   if (cameraMode === 'third') {
     xrSnapArmed = true;   // stays armed while unused, so a mode-switch back to first-person doesn't inherit a stale disarm
-    if (Math.abs(lookX) > GAMEPAD_DEADZONE) pitch = Math.max(-1.35, Math.min(0.9, pitch - lookX * 2.2 * dt));
+    if (Math.abs(physX) > GAMEPAD_DEADZONE) yaw -= physX * 2.2 * dt;
+    if (Math.abs(physY) > GAMEPAD_DEADZONE) pitch = Math.max(-1.35, Math.min(0.9, pitch - physY * 2.2 * dt));
   } else {
-    // Snap-turn: fires once per push past the threshold, then re-arms once
-    // the stick returns near center -- a held-over stick would otherwise
-    // spin continuously instead of discrete comfort-turns.
-    if (Math.abs(lookX) > SNAP_TURN_THRESHOLD) {
-      if (xrSnapArmed) { yaw -= Math.sign(lookX) * SNAP_TURN_ANGLE; xrSnapArmed = false; }
-    } else if (Math.abs(lookX) < GAMEPAD_DEADZONE) {
+    // FIRST PERSON ONLY: "a lot of deadzone, and really only respond to
+    // directions (not NW or SE or anything like that which should be
+    // deadzone)" -- a diagonal push (both axes significant at once) is
+    // explicitly deadzone, not a blend of both functions. STICK_DIR_PURITY
+    // is how small the OTHER axis must stay for a push to count as clean.
+    // Functions SWAPPED per the correction above: X (left/right) now
+    // SNAP-TURNS (used to be Y's job); Y (up/down) now SMOOTH-TURNS
+    // continuously while held (used to be X's job).
+    const STICK_DIR_THRESHOLD = 0.5, STICK_DIR_PURITY = 0.3;
+    const yIsClean = Math.abs(physY) > STICK_DIR_THRESHOLD && Math.abs(physX) < STICK_DIR_PURITY;
+    const xIsClean = Math.abs(physX) > STICK_DIR_THRESHOLD && Math.abs(physY) < STICK_DIR_PURITY;
+    if (yIsClean) yaw -= physY * 2.2 * dt;
+    // Snap-turn: fires once per clean push past the threshold, then
+    // re-arms once the stick returns near center -- a held-over stick
+    // would otherwise spin continuously instead of discrete comfort-turns.
+    if (xIsClean) {
+      if (xrSnapArmed) { yaw -= Math.sign(physX) * SNAP_TURN_ANGLE; xrSnapArmed = false; }
+    } else if (Math.abs(physX) < GAMEPAD_DEADZONE) {
       xrSnapArmed = true;
     }
   }
@@ -5286,6 +5366,7 @@ window.__sw = { THREE, player, cars, parkedCars, pickups, colliders, EDGE, WORLD
                 set entered(v) { entered = v; },
                 openMenu, closeMenu, get paused() { return paused; }, wallMat, WALL_CYCLE_SECONDS, windowMat,
                 xrArms, xrGrips, updateXRArms, announceEffect, announceRemoteEffect,
+                xrGripHandedness, xrGripIndexFor,
                 vrNotifyPanel, showVRNotification, vrWristPanel, vrDailyPanel, drawArmTopPanel,
                 updatePowerupAppearance, showEffectExpired,
                 get myInitials() { return myInitials; }, set myInitials(v) { myInitials = v; },
