@@ -62,6 +62,51 @@ export class Room {
     return Object.values(board).sort((a, b) => b.score - a.score).slice(0, 20);
   }
 
+  // "Players today" (a distinct HUD stat from the live session PLAYERS
+  // count) -- same date-keyed storage pattern as the daily leaderboard
+  // above, but tracking distinct CONNECTIONS rather than scores. No real
+  // login identity exists in this game (see file header -- pure relay, no
+  // auth), so "unique" here means unique connection id; a reload or
+  // reconnect is a new id and counts again, same tradeoff the daily
+  // leaderboard already makes by being keyed on connection id too.
+  async recordTodayPlayer(id) {
+    const dateKey = estDateKey();
+    const key = 'today:' + dateKey;
+    const ids = (await this.state.storage.get(key)) || [];
+    if (!ids.includes(id)) {
+      ids.push(id);
+      await this.state.storage.put(key, ids);
+    }
+    return ids.length;
+  }
+
+  // SESSION ANALYTICS (Alex: "good logging from all sessions... play time,
+  // how many orbs people tend to get, and errors or crashes"). Same date-
+  // keyed aggregate pattern as the two above -- no per-player identity
+  // attached, just running totals for the day plus a capped sample of raw
+  // error strings (unbounded storage growth from noisy repeated errors
+  // would just bloat the Durable Object for no analytical benefit beyond
+  // a representative sample).
+  async recordAnalytics(report) {
+    const dateKey = estDateKey();
+    const key = 'analytics:' + dateKey;
+    // reportCount, not "sessions" -- a single session sends one of these
+    // roughly every ANALYTICS_INTERVAL_MS plus one at game-over, so this
+    // counts CHECKPOINTS, not distinct players (see recordTodayPlayer
+    // above for the actual unique-connection count).
+    const agg = (await this.state.storage.get(key)) || { reportCount: 0, totalPlaySeconds: 0, totalOrbs: 0, errorCount: 0, errorSamples: [] };
+    agg.reportCount++;
+    agg.totalPlaySeconds += typeof report.playSeconds === 'number' ? Math.max(0, report.playSeconds) : 0;
+    agg.totalOrbs += typeof report.orbs === 'number' ? Math.max(0, report.orbs) : 0;
+    if (Array.isArray(report.errors)) {
+      agg.errorCount += report.errors.length;
+      for (const e of report.errors) {
+        if (agg.errorSamples.length < 20) agg.errorSamples.push(String(e).slice(0, 200));
+      }
+    }
+    await this.state.storage.put(key, agg);
+  }
+
   // UNIQUE COLORS (Alex: "make sure everyone gets a unique color!"). Picking
   // purely at random from the 6-entry COLORS palette collided constantly --
   // even at just 2 players, 1-in-6 odds of a repeat every join. Checks every
@@ -119,6 +164,9 @@ export class Room {
 
     const { dateKey, board } = await this.loadDailyBoard();
     server.send(JSON.stringify({ type: 'dailyboard', date: dateKey, entries: this.dailyTop(board) }));
+
+    const playersToday = await this.recordTodayPlayer(id);
+    this.broadcast({ type: 'today', count: playersToday });
 
     return new Response(null, { status: 101, webSocket: client });
   }
@@ -185,6 +233,17 @@ export class Room {
         await this.state.storage.put('daily:' + dateKey, board);
       }
       this.broadcast({ type: 'dailyboard', date: dateKey, entries: this.dailyTop(board) });
+    } else if (msg.type === 'analytics' && msg.report && typeof msg.report === 'object') {
+      // Server-side only -- no broadcast, this never needs to reach other
+      // clients (see recordAnalytics above).
+      await this.recordAnalytics(msg.report);
+    } else if (msg.type === 'pickup' && Array.isArray(msg.pos)) {
+      // Orb/coin collection (Alex: "show a floating +N popup AND play a
+      // coin sound every time, for ALL players, not just the collector").
+      // Announcement-only, excluded from the sender (it already applied
+      // its own popup+sound locally) -- same shape as the solo 'effect'
+      // broadcast.
+      this.broadcast({ type: 'pickup', pos: msg.pos, amount: typeof msg.amount === 'number' ? msg.amount : 0 }, ws);
     } else if (msg.type === 'powerkill' && typeof msg.victimId === 'string') {
       // Energy blast / pong / bomber instakill -- generalized joust: one
       // message type instead of three, since the client-side effect (named

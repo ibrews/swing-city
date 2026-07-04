@@ -29,9 +29,36 @@
      width on wide screens. Cap the readable measure and keep side padding
      so it never touches the edges regardless of viewport size. */
   #start > div, #gameover > div { max-width: 720px; padding: 0 28px; box-sizing: border-box; }
+  /* Accidental text-selection on phones (tap-drag across the overlay text
+     selects it instead of registering as input) -- selection has no use on
+     a game overlay, so just disable it everywhere on these screens. */
+  #start, #gameover { -webkit-user-select: none; user-select: none; }
   #versionLine { font-size: 12px; color: #5a7a94; letter-spacing: 1px; margin-top: -8px; }
+  /* Session+daily leaderboards mirrored INTO the pause/game-over overlays
+     (Alex: they should be clearly visible at both screens on every
+     platform) -- the flat #leaderboard/#dailyboard HUD elements sit z-index
+     10, BEHIND these overlays' opaque backgrounds, so a copy of the same
+     content is rendered here instead of relying on it showing through. */
+  .overlayBoards { display: flex; gap: 24px; justify-content: center; flex-wrap: wrap;
+    margin-top: 16px; font-size: 12px; line-height: 1.6; text-align: left; }
+  .overlayBoards b { display: block; margin-bottom: 4px; letter-spacing: 1px; }
+  .overlayBoards .row { display: flex; justify-content: space-between; gap: 16px; min-width: 150px; }
   .controlsGrid { text-align: left; font-size: 14px; line-height: 1.7; }
   .controlsGrid h3 { color: #ff64c8; font-size: 13px; letter-spacing: 1px; margin: 14px 0 4px; }
+  /* Collapsible controls reference (Alex: a way to shrink/hide menu text
+     without losing it) -- native <details> needs zero extra JS/state. */
+  .controlsDetails summary { cursor: pointer; color: #ffe27a; font-size: 13px;
+    letter-spacing: 1px; margin-top: 10px; }
+  .controlsDetails summary:hover { color: #fff2b0; }
+  /* Mobile (Alex: reduce on-screen text on phones -- both so it fits without
+     scrolling and so there's less of it to snag an accidental tap-drag
+     selection). Smaller type + tighter leading; the controls reference also
+     starts collapsed on phones via the `open` attribute below. */
+  @media (max-width: 600px) {
+    #start, #gameover { font: 14px/1.5 ui-monospace, Menlo, monospace; }
+    #start h1, #gameover h1 { font-size: 22px; }
+    .controlsGrid { font-size: 12px; line-height: 1.5; }
+  }
   /* Callsign input (Alex: "the box for typing your name... too small and
      hard to click"). No rule existed before this -- it was rendering at
      the browser's tiny default input size against a page full of large
@@ -59,12 +86,15 @@
     color: #ff3b4d; font: 16px/1.4 ui-monospace, Menlo, monospace; text-shadow: 0 0 10px #ff1a2e;
     z-index: 14; opacity: 0; pointer-events: none; letter-spacing: 2px; text-align: center; }
   #playercount { position: fixed; right: 14px; top: 12px; color: #6bd4ff; z-index: 10;
-    font: 12px ui-monospace, Menlo, monospace; text-shadow: 0 0 6px #08a; letter-spacing: 1px;
+    font: 12px/1.6 ui-monospace, Menlo, monospace; text-shadow: 0 0 6px #08a; letter-spacing: 1px;
     user-select: none; pointer-events: none; text-align: right; display: none; }
   /* #score sits below #playercount's slot unconditionally -- simpler than
      conditionally repositioning it in JS based on multiplayer state, at
-     the cost of a small unused gap above the score box in single-player. */
-  #score { position: fixed; right: 14px; top: 34px; color: #ffe27a; z-index: 10;
+     the cost of a small unused gap above the score box in single-player.
+     Bumped 34->56px when #playercount grew a second "PLAYERS TODAY" line
+     (Alex: HUD text in the upper-right was overlapping) -- the old 34px
+     assumed #playercount was always one line tall. */
+  #score { position: fixed; right: 14px; top: 56px; color: #ffe27a; z-index: 10;
     font: 13px/1.5 ui-monospace, Menlo, monospace; text-shadow: 0 0 6px #a80;
     user-select: none; pointer-events: none; text-align: right; }
   /* Return-to-menu button (Alex: "a button to return to the main menu
@@ -77,7 +107,11 @@
     background: #0a1424b0; border: 1px solid #2a4868; border-radius: 4px; padding: 4px 10px;
     cursor: pointer; user-select: none; }
   #menubtn:hover { background: #12203aca; }
-  #powerups { position: fixed; right: 14px; top: 76px; z-index: 10; text-align: right;
+  /* Bumped 76->124px -- #score is a fixed-height 3-line box (score/cars
+     knocked/orbs) starting at 56px, so 76px already sat inside it,
+     overlapping the "orbs" line with power-up MODE text whenever any
+     effect was active (Alex: HUD text in the upper-right overlapping). */
+  #powerups { position: fixed; right: 14px; top: 124px; z-index: 10; text-align: right;
     font: 12px/1.6 ui-monospace, Menlo, monospace; user-select: none; pointer-events: none; }
   #powerups div { text-shadow: 0 0 6px currentColor; }
   #zombiewarn { position: fixed; left: 50%; top: 14%; transform: translateX(-50%);
@@ -88,6 +122,12 @@
     color: #ffd23b; font: 22px/1.4 ui-monospace, Menlo, monospace; text-shadow: 0 0 12px #ff8c00;
     z-index: 14; opacity: 0; pointer-events: none; letter-spacing: 2px; text-align: center;
     transition: opacity 0.12s linear, transform 0.12s ease-out; }
+  /* Power-up expiry notice (item 10) -- sits just below #combotext so the
+     two never physically overlap if both happen to fire close together. */
+  #effectexpire { position: fixed; left: 50%; top: 38%; transform: translateX(-50%);
+    color: #8fffb0; font: 16px/1.4 ui-monospace, Menlo, monospace; text-shadow: 0 0 10px #4dff88;
+    z-index: 14; opacity: 0; pointer-events: none; letter-spacing: 1px; text-align: center;
+    transition: opacity 0.3s linear; }
   /* Power-up name-announcement banner (Alex's manifest: "PLAYERNAME
      triggered GIANT MODE!!" visible to everyone in multiplayer). Bigger
      and higher than #combotext -- it's a rarer, bigger-deal event. Sits
@@ -123,22 +163,31 @@
     transition: opacity 0.3s linear; }
   /* Touch controls -- hidden by default, shown only on touch-capable devices
      (see the 'touch-active' class toggle in the INPUT section below). */
-  #touchjoyBase, #touchjoyThumb, #touchweb, #touchrespawn { display: none; z-index: 20;
+  #touchjoyBase, #touchjoyThumb, #touchsprint, #touchrespawn { display: none; z-index: 20;
     position: fixed; touch-action: none; user-select: none; }
   body.touch-active #touchjoyBase, body.touch-active #touchjoyThumb,
-  body.touch-active #touchweb, body.touch-active #touchrespawn { display: block; }
+  body.touch-active #touchsprint, body.touch-active #touchrespawn { display: block; }
   #touchjoyBase { left: 26px; bottom: 26px; width: 108px; height: 108px; border-radius: 50%;
     background: rgba(140, 200, 255, 0.10); border: 2px solid rgba(140, 200, 255, 0.35); }
   #touchjoyThumb { left: 62px; bottom: 62px; width: 52px; height: 52px; margin: -26px 0 0 -26px;
     border-radius: 50%; background: rgba(180, 220, 255, 0.35); border: 2px solid rgba(200, 235, 255, 0.6); }
-  #touchweb { right: 28px; bottom: 30px; width: 84px; height: 84px; border-radius: 50%;
+  /* Repurposed from a dedicated WEB button (Alex: tapping the screen
+     already fires the swing/web action via the tap itself, so this button
+     was redundant for that -- turned into the missing dedicated touch
+     sprint control instead). */
+  #touchsprint { right: 28px; bottom: 30px; width: 84px; height: 84px; border-radius: 50%;
     background: rgba(255, 210, 100, 0.18); border: 2px solid rgba(255, 210, 100, 0.55);
     color: #ffe27a; font: 12px ui-monospace, Menlo, monospace; text-align: center;
     line-height: 84px; letter-spacing: 1px; }
-  #touchweb.active { background: rgba(255, 210, 100, 0.42); }
+  #touchsprint.active { background: rgba(255, 210, 100, 0.42); }
   #touchrespawn { right: 28px; bottom: 128px; width: 46px; height: 46px; border-radius: 50%;
     background: rgba(255, 255, 255, 0.08); border: 1px solid rgba(255, 255, 255, 0.3);
     color: #cfd8ea; font: 11px ui-monospace, Menlo, monospace; text-align: center; line-height: 46px; }
+  /* UI toggle (item 19): hide persistent HUD chrome, leave transient
+     warnings/banners (boundary warning, combo/power-up popups) working. */
+  body.hudHidden #hud, body.hudHidden #score, body.hudHidden #playercount,
+  body.hudHidden #powerups, body.hudHidden #leaderboard, body.hudHidden #dailyboard,
+  body.hudHidden #menubtn { display: none !important; }
 </style>
 </head>
 <body>
@@ -150,42 +199,59 @@
   <span id="initialsRow">callsign (optional, 3 letters): <input id="initialsInput" maxlength="3"
     placeholder="AAA" autocomplete="off" spellcheck="false"></span><br><br>
   <b>click to enter</b>
-  <div class="controlsGrid">
-    <h3>KEYBOARD &amp; MOUSE</h3>
-    mouse — look &nbsp;·&nbsp; <b>hold LMB or SPACE</b> — shoot a web and swing (let go to release)<br>
-    <b>tap LMB or SPACE</b> — jump (in the air, tap again to fire a web instead) &nbsp;·&nbsp;
-    <b>hold against a wall</b> — crawl up it<br>
-    WASD or arrow keys — run / steer in the air &nbsp;·&nbsp; shift — sprint &nbsp;·&nbsp;
-    R — respawn &nbsp;·&nbsp; V — first/third person &nbsp;·&nbsp; M — menu
-    <h3>GAMEPAD</h3>
-    left stick — move &nbsp;·&nbsp; right stick — look &nbsp;·&nbsp;
-    A/Cross or right trigger — web/jump &nbsp;·&nbsp; X/Square — respawn &nbsp;·&nbsp;
-    full stick deflection or right trigger — sprint
-    <h3>VR CONTROLLERS</h3>
-    left stick — move &nbsp;·&nbsp; right stick X — snap-turn &nbsp;·&nbsp; right stick Y — smooth turn<br>
-    either trigger or right A — web/jump &nbsp;·&nbsp; right B — first/third person<br>
-    left X — exit VR &nbsp;·&nbsp; left Y — respawn
-  </div><br>
+  <details class="controlsDetails">
+    <summary>controls (tap to expand/collapse)</summary>
+    <div class="controlsGrid">
+      <h3>MOVE</h3>
+      keyboard: WASD / arrows &nbsp;·&nbsp; gamepad &amp; VR: left stick &nbsp;·&nbsp;
+      touch: left joystick
+      <h3>LOOK / TURN</h3>
+      mouse: move mouse &nbsp;·&nbsp; gamepad: right stick &nbsp;·&nbsp;
+      touch: drag right half of screen &nbsp;·&nbsp;
+      VR: right stick — Y (up/down) snap-turns, X (left/right) smooth-turns
+      <h3>SWING (WEB)</h3>
+      <b>hold LMB or SPACE</b> — swing, let go to release &nbsp;·&nbsp;
+      <b>tap LMB or SPACE</b> — jump (tap again in the air to swing instead) &nbsp;·&nbsp;
+      gamepad: A/Cross or right trigger &nbsp;·&nbsp; touch: tap the screen &nbsp;·&nbsp;
+      VR: either trigger or right A
+      <h3>WALL CLIMB</h3>
+      hold the swing input against a wall to crawl up it (all platforms)
+      <h3>SPRINT</h3>
+      keyboard: shift &nbsp;·&nbsp; gamepad &amp; VR: push the stick to full deflection, or
+      right trigger &nbsp;·&nbsp; touch: SPRINT button
+      <h3>FIRST / THIRD PERSON</h3>
+      keyboard: V &nbsp;·&nbsp; gamepad &amp; VR: right B
+      <h3>RESPAWN</h3>
+      keyboard: R &nbsp;·&nbsp; gamepad: X/Square &nbsp;·&nbsp; touch: R button &nbsp;·&nbsp; VR: left Y
+      <h3>MENU / EXIT VR</h3>
+      keyboard: M — menu &nbsp;·&nbsp; VR: left X — exit VR (opens menu too)
+      <h3>SHOW/HIDE HUD</h3>
+      keyboard: H &nbsp;·&nbsp; gamepad: Y/Triangle &nbsp;·&nbsp; VR: left stick click
+    </div>
+  </details><br>
   <b>HOW TO WIN:</b> there's no ending — just a high score. Smash into cars while swinging to send
   them flying (+25), grab the glowing orbs for points (+10), and joust or knock other players
   around to rack up bonus points too — a few unusual-looking orbs do something other than add
   points. Cross the glowing boundary wall and the screen turns red -- you've got about 2 seconds
   to get back inside before it's over.
+  <div id="startBoards" class="overlayBoards"></div>
 </div></div>
 <div id="gameover"><div>
   <h1>SWING&hellip; SWANG&hellip; SWUNG</h1>
   <div id="finalscore"></div>
   <button id="restart">Try Again?</button>
+  <div id="gameoverBoards" class="overlayBoards"></div>
 </div></div>
 <div id="flash"></div>
 <div id="warnvignette"></div>
 <div id="warntext">LEAVING THE CITY &mdash; GET BACK</div>
-<div id="hud">web: <b id="webstate">ready</b> · speed: <b id="speed">0</b></div>
-<div id="playercount">PLAYERS: <b id="playercounttotal">1</b></div>
+<div id="hud">swing: <b id="webstate">ready</b> · speed: <b id="speed">0</b></div>
+<div id="playercount">PLAYERS: <b id="playercounttotal">1</b><br>PLAYERS TODAY: <b id="playerstoday">1</b></div>
 <div id="score">score: <b id="scoretotal">0</b><br>cars knocked: <b id="knocked">0</b><br>orbs: <b id="orbs">0</b>/<b id="orbstotal">0</b></div>
 <div id="powerups"></div>
 <div id="zombiewarn">ZOMBIES INBOUND</div>
 <div id="combotext"></div>
+<div id="effectexpire"></div>
 <div id="powerbanner"></div>
 <div id="leaderboard"></div>
 <div id="dailyboard"></div>
@@ -193,7 +259,7 @@
 <div id="leaderbanner"></div>
 <div id="touchjoyBase"></div>
 <div id="touchjoyThumb"></div>
-<div id="touchweb">WEB</div>
+<div id="touchsprint">SPRINT</div>
 <div id="touchrespawn">R</div>
 <div id="center"></div>
 
@@ -315,7 +381,9 @@ const FALL_SPAWN_Y = 240;   // "battle bus" drop height, above city center
 const EFFECT_DURATION = 30, EFFECT_EXTEND = 30;
 const GIANT_SCALE = 10, TINY_SCALE = 0.22, SHRINKTAG_SCALE = 0.22;
 const SPEED_MULT = 2, LOWG_GRAV_MULT = 0.28, SUPERJUMP_MULT = 5;
-const MAGNET_RADIUS = 16, MAGNET_PULL = 14;
+// Strengthened per Alex feedback (radius 16->26, pull 14->24) -- magnet felt
+// too weak/small to reliably matter during a run.
+const MAGNET_RADIUS = 26, MAGNET_PULL = 24;
 const ENERGY_BEAM_SPEED = 90, ENERGY_BEAM_RANGE = 70, ENERGY_BEAM_RADIUS = 0.5;
 const PONG_BALL_SPEED = 16, PONG_BALL_RADIUS = 0.85, PONG_BALL_LIFE = 12;
 const BOMBER_INTERVAL = 0.45, BOMBER_FALL_SPEED = 15, BOMBER_RADIUS = 1.0, BOMBER_BLAST_RADIUS = 3.2;
@@ -520,10 +588,15 @@ renderer.toneMapping = THREE.ACESFilmicToneMapping;
 // under ACES. Paired with the ambient-light bump below.
 renderer.toneMappingExposure = 1.18;
 document.body.appendChild(renderer.domElement);
-// VRButton.createButton() self-detects support (navigator.xr /
-// isSessionSupported) and renders as a disabled "VR NOT SUPPORTED" button
-// if unavailable -- safe to always append, no feature-detect needed here.
-document.body.appendChild(VRButton.createButton(renderer));
+// VRButton.createButton() renders as a disabled "VR NOT SUPPORTED" button
+// when unavailable rather than hiding itself (Alex: don't show it at all on
+// devices with no XR support) -- feature-detect first and only append when
+// an immersive-vr session is actually possible.
+if (navigator.xr && navigator.xr.isSessionSupported) {
+  navigator.xr.isSessionSupported('immersive-vr').then(supported => {
+    if (supported) document.body.appendChild(VRButton.createButton(renderer));
+  }).catch(() => {});
+}
 
 // VR CONTROLLER MODELS (Alex, VR playtest: "seeing controllers if
 // possible"). renderer.xr's controller-grip spaces auto-track each physical
@@ -549,7 +622,9 @@ for (let i = 0; i < 2; i++) {
 // frame in updateXRArms() below to match the ARM cube's actual computed
 // orientation instead (see xrArms), which is what makes it read as a
 // tattoo on the limb rather than a HUD element that happens to be nearby.
-const vrWristPanel = makeCanvasPanel(512, 384, 0.34, 0.255);   // left arm: session leaderboard
+// Shrunk from 0.34x0.255 (read as an oversized "poster" floating off the
+// forearm -- see drawArmTopPanel below) to actually fit ON the arm.
+const vrWristPanel = makeCanvasPanel(512, 384, 0.16, 0.12);   // left arm: session leaderboard #1
 vrWristPanel.mesh.visible = false;
 scene.add(vrWristPanel.mesh);
 // BASIC ARM REPRESENTATION (Alex, VR playtest: "it's good to see the
@@ -584,7 +659,12 @@ function updateXRArms() {
     // left arm (i=0) carries the session leaderboard, right arm (i=1) the
     // daily leaderboard -- see the ARM-TATTOO comment above vrWristPanel.
     const panel = i === 0 ? vrWristPanel.mesh : vrDailyPanel.mesh;
-    if (!presenting) { arm.visible = false; panel.visible = false; continue; }
+    // Bug: arms/panels only ever checked `presenting`, never `cameraMode`,
+    // so they stayed visible in VR first-person even though the rest of the
+    // avatar (spidey.visible below) correctly hides there -- own-body arms
+    // floating with no torso. Hide them in first-person too, matching
+    // spidey's first/third-person rule.
+    if (!presenting || cameraMode === 'first') { arm.visible = false; panel.visible = false; continue; }
     xrGrips[i].getWorldPosition(xrArmHandWorld);
     xrArmShoulderWorld.copy(XR_SHOULDER_OFFSETS[i]);
     camera.localToWorld(xrArmShoulderWorld);
@@ -631,11 +711,22 @@ composer.addPass(new RenderPass(scene, camera));
 // baseline once you're down at city level. `bloom` is `let`, not `const`,
 // specifically so strength can be animated.
 const BLOOM_STRENGTH_FALL = 1.5, BLOOM_STRENGTH_BASE = 0.62;
+// Rooftops still read as "super bloomy and bright" even with the window
+// shader's own player-proximity neon fade (see windowMat's nearFade
+// uniform above) -- that fade dims the WINDOW COLOR, but bloom is a
+// post-process pass working off final rendered brightness, so a
+// still-bright neighboring facade keeps blooming out regardless of how
+// dim the shader made any one pixel. Alex: "when I stand on them we
+// should dim so I can see the powerup" -- an extra bloom-strength cut
+// specifically while standing (onGround) up at rooftop height (H_LOW
+// buildings start at y=6, same threshold the window-fade shader uses).
+const BLOOM_STRENGTH_ROOFTOP = 0.32, ROOFTOP_Y = 6;
 let bloom = new UnrealBloomPass(new THREE.Vector2(innerWidth, innerHeight), BLOOM_STRENGTH_FALL, 0.55, 0.6);
 composer.addPass(bloom);
-function updateBloom(playerY) {
+function updateBloom(playerY, onGround) {
   const fallProgress = THREE.MathUtils.clamp((FALL_SPAWN_Y - playerY) / (FALL_SPAWN_Y - 30), 0, 1);
-  bloom.strength = THREE.MathUtils.lerp(BLOOM_STRENGTH_FALL, BLOOM_STRENGTH_BASE, fallProgress);
+  const baseStrength = THREE.MathUtils.lerp(BLOOM_STRENGTH_FALL, BLOOM_STRENGTH_BASE, fallProgress);
+  bloom.strength = (onGround && playerY > ROOFTOP_Y) ? Math.min(baseStrength, BLOOM_STRENGTH_ROOFTOP) : baseStrength;
 }
 
 // NOIR pickup: full desaturation, driven by uSat (1 = normal, 0 = grayscale).
@@ -792,7 +883,12 @@ const buildingLabels = [];   // one per block, on that block's TALLEST building 
 // likely to actually pass, not just whichever hero tower happened to roll
 // tallest out at the map edge.
 let billboardSpot = null, billboardProminence = -Infinity;
+// PARK (Alex: "at least one park area with trees") -- one block near the
+// city center is reserved building-free; makePark() below fills it with a
+// green ground patch and a scatter of low-poly trees instead.
+const PARK_BLOCK_I = Math.floor(GRID_N / 2), PARK_BLOCK_J = Math.floor(GRID_N / 2);
 for (let i = 0; i < GRID_N; i++) for (let j = 0; j < GRID_N; j++) {
+  if (i === PARK_BLOCK_I && j === PARK_BLOCK_J) continue;   // reserved for the park
   const cx = blockCenter(i), cz = blockCenter(j);
   const interior = BLOCK_SIZE - 2 * SIDEWALK_W, lot = interior / LOTS_PER_SIDE;
   let bestLot = null;   // tallest building in this block gets the name label
@@ -872,6 +968,62 @@ for (let i = 0; i < GRID_N; i++) for (let j = 0; j < GRID_N; j++) {
   }
 }
 
+// PARK: a green ground patch + a scatter of simple cone/cylinder trees,
+// filling the block reserved above (PARK_BLOCK_I/J). Trees are decorative
+// only (no colliders) -- a swinging player just passes through them, same
+// as the game already treats every other purely cosmetic prop.
+const parkGroundMat = new THREE.MeshStandardMaterial({ color: 0x1c3a22, roughness: 0.95 });
+const treeTrunkMat = new THREE.MeshStandardMaterial({ color: 0x4a3420, roughness: 0.9 });
+const treeFoliageMat = new THREE.MeshStandardMaterial({ color: 0x2f6b3a, roughness: 0.8 });
+function makePark(cx, cz) {
+  const interior = BLOCK_SIZE - 2 * SIDEWALK_W;
+  const patch = new THREE.Mesh(new THREE.BoxGeometry(interior, 0.1, interior), parkGroundMat);
+  patch.position.set(cx, 0.06, cz);
+  scene.add(patch);
+  const TREE_COUNT = 12;
+  for (let t = 0; t < TREE_COUNT; t++) {
+    const tx = cx + uniform(-interior / 2 + 1, interior / 2 - 1);
+    const tz = cz + uniform(-interior / 2 + 1, interior / 2 - 1);
+    const trunkH = uniform(1.4, 2.4), trunkR = uniform(0.12, 0.2);
+    const trunk = new THREE.Mesh(new THREE.CylinderGeometry(trunkR, trunkR * 1.2, trunkH, 6), treeTrunkMat);
+    trunk.position.set(tx, trunkH / 2, tz);
+    scene.add(trunk);
+    const foliageH = uniform(2.2, 3.4), foliageR = uniform(1.1, 1.7);
+    const foliage = new THREE.Mesh(new THREE.ConeGeometry(foliageR, foliageH, 7), treeFoliageMat);
+    foliage.position.set(tx, trunkH + foliageH * 0.42, tz);
+    scene.add(foliage);
+  }
+}
+makePark(blockCenter(PARK_BLOCK_I), blockCenter(PARK_BLOCK_J));
+
+// ROTATING SPOTLIGHTS (Alex: "rotating spotlights in the city"). Visual-
+// only search-light beams (an emissive additive cone, not a real
+// THREE.Light) -- this project has repeatedly hit VR framerate problems
+// from real-time cost (see the far-plane and foveated-rendering history
+// above), so a few more live dynamic lights isn't worth the risk for a
+// purely cosmetic effect. Placed on a handful of the tallest rooftops
+// (reuses spireCrowns, already the "tall/prominent" roof marker), each
+// spinning continuously around its own vertical axis in stepSpotlights().
+const spotlightMat = new THREE.MeshBasicMaterial({
+  color: 0xbfe8ff, transparent: true, opacity: 0.22, blending: THREE.AdditiveBlending, depthWrite: false,
+});
+const spotlights = [];
+{
+  const tallest = [...spireCrowns].sort((a, b) => b.y - a.y).slice(0, 5);
+  for (const crown of tallest) {
+    const beam = new THREE.Mesh(new THREE.ConeGeometry(0.5, 9, 10, 1, true), spotlightMat);
+    beam.position.set(crown.x, crown.y + 1.2, crown.z);
+    beam.rotation.x = Math.PI;   // cone tip down at the base, opening upward into the sky
+    beam.rotation.z = uniform(0.35, 0.55);   // tilted, not straight up -- reads as a sweeping beam
+    beam.userData.spinSpeed = uniform(0.5, 1.1) * choice([-1, 1]);
+    scene.add(beam);
+    spotlights.push(beam);
+  }
+}
+function stepSpotlights(dt) {
+  for (const beam of spotlights) beam.rotation.y += beam.userData.spinSpeed * dt;
+}
+
 // Cosmetic-only rooftop coins (prep for a separate orb-effects/scoring pass
 // -- no pickup logic here, just an idle spin + pulse so every rooftop reads
 // as "there's something up there" ahead of that work).
@@ -906,6 +1058,8 @@ function stepRooftopCoins(t, p) {
       const amount = scoreForOrbHeight(mesh.position.y);
       addScore(amount);
       spawnScorePopup(mesh.position, amount);
+      broadcastPickup(mesh.position, amount);
+      analyticsOrbsSinceReport++;
     }
   });
 }
@@ -1031,51 +1185,43 @@ const billboardPanel = makeCanvasPanel(512, 384, BILLBOARD_W, BILLBOARD_H);
 billboardPanel.mesh.position.set(billboardSpot.x, billboardSpot.topY + BILLBOARD_H / 2 + 0.6, billboardSpot.z);
 billboardPanel.redraw(drawLeaderboardPanel([]));
 scene.add(billboardPanel.mesh);
-// DAILY LEADERBOARD PANEL (Alex: "daily leaderboard should go up to 20").
-// A physical in-world panel showing all 20 rows at the billboard's row
-// height would need to be over 2x taller -- fits more compactly here with
-// a smaller font/row-pitch instead in a taller canvas, while the flat
-// HTML #dailyboard (no physical-panel size constraint) shows the full 20
-// either way.
-function drawDailyboardPanel(entries, date) {
+// Arm-tattoo panels only ever need the #1 entry (Alex: they read as
+// oversized "posters" at full-board size and full row counts -- shrunk to
+// fit on the forearm and simplified to top-1 only; the flat HTML
+// #leaderboard/#dailyboard and the in-world billboard still show full
+// ranked lists).
+function drawArmTopPanel(entries, label, accentColor) {
   return (ctx, w, h) => {
-    ctx.fillStyle = '#1c1304e6';
+    ctx.fillStyle = '#040a18e6';
     ctx.fillRect(0, 0, w, h);
-    ctx.strokeStyle = '#ffcf6b';
-    ctx.lineWidth = 6;
-    ctx.strokeRect(3, 3, w - 6, h - 6);
+    ctx.strokeStyle = accentColor;
+    ctx.lineWidth = 8;
+    ctx.strokeRect(4, 4, w - 8, h - 8);
     ctx.textAlign = 'center';
-    ctx.font = 'bold 22px ui-monospace, Menlo, monospace';
-    ctx.fillStyle = '#ffe27a';
-    ctx.shadowColor = '#a60'; ctx.shadowBlur = 10;
-    ctx.fillText(`DAILY ${date || ''}`, w / 2, 34);
+    ctx.font = 'bold 30px ui-monospace, Menlo, monospace';
+    ctx.fillStyle = accentColor;
+    ctx.shadowColor = accentColor; ctx.shadowBlur = 14;
+    ctx.fillText(label, w / 2, 56);
     ctx.shadowBlur = 0;
-    ctx.font = '20px ui-monospace, Menlo, monospace';
-    ctx.textAlign = 'left';
-    const rows = entries.slice(0, 12);
-    rows.forEach((e, i) => {
-      const y = 68 + i * 26;
-      ctx.fillStyle = '#ffcf6b';
-      ctx.fillText(`${i + 1}.`, 20, y);
-      ctx.fillStyle = '#' + new THREE.Color(e.color).getHexString();
-      ctx.fillText(e.initials || '???', 56, y);
+    const top = entries && entries[0];
+    if (top) {
+      ctx.font = 'bold 50px ui-monospace, Menlo, monospace';
+      ctx.fillStyle = '#' + new THREE.Color(top.color).getHexString();
+      ctx.fillText(top.initials || '???', w / 2, h / 2 + 24);
+      ctx.font = '30px ui-monospace, Menlo, monospace';
       ctx.fillStyle = '#9fe8ff';
-      ctx.textAlign = 'right';
-      ctx.fillText(String(e.score), w - 20, y);
-      ctx.textAlign = 'left';
-    });
-    if (!rows.length) {
-      ctx.fillStyle = '#c98';
-      ctx.textAlign = 'center';
-      ctx.fillText('no scores yet today', w / 2, h / 2);
-      ctx.textAlign = 'left';
+      ctx.fillText(String(top.score), w / 2, h / 2 + 76);
+    } else {
+      ctx.font = '22px ui-monospace, Menlo, monospace';
+      ctx.fillStyle = '#6bd4ff';
+      ctx.fillText('no scores yet', w / 2, h / 2 + 10);
     }
   };
 }
-const vrDailyPanel = makeCanvasPanel(512, 384, 0.34, 0.255);
+const vrDailyPanel = makeCanvasPanel(512, 384, 0.16, 0.12);
 vrDailyPanel.mesh.visible = false;
 scene.add(vrDailyPanel.mesh);
-vrDailyPanel.redraw(drawDailyboardPanel([], ''));
+vrDailyPanel.redraw(drawArmTopPanel([], 'DAILY #1', '#ffcf6b'));
 
 // Ground, roads, sidewalks, dashes
 // Ground now sized to just past WORLD_BOUND (not CITY_EXTENT*2) -- see the
@@ -1357,7 +1503,7 @@ const EFFECT_NAMES = {
   giant: 'GIANT MODE', tiny: 'TINY MODE', fly: 'FLIGHT MODE', lowg: 'LOW GRAVITY',
   speed: 'SPEED BOOST', superjump: 'SUPER JUMP', invincible: 'INVINCIBILITY', fire: 'FIRE TOUCH',
   energyblast: 'ENERGY BLAST', pong: 'PONG MODE', bomber: 'BOMBER MODE', ghost: 'GHOST MODE',
-  webanywhere: 'WEB ANYWHERE', magnet: 'MAGNET MODE', confetti: 'CONFETTI MODE',
+  webanywhere: 'SWING ANYWHERE', magnet: 'MAGNET MODE', confetti: 'CONFETTI MODE',
   zombiesummon: 'ZOMBIE SUMMON', disco: 'DISCO CITY', slow: 'SLOW-MO',
   shrinktag: 'SHRINK TOUCH', shrunk: 'SHRUNKEN', torusext: 'DURATION UP',
 };
@@ -1384,8 +1530,18 @@ function drawVRNotify(text) {
   return (ctx, w, h) => {
     ctx.fillStyle = '#04101cd0';
     ctx.fillRect(0, 0, w, h);
-    ctx.font = 'bold 34px ui-monospace, Menlo, monospace';
+    // Text (especially longer strings like the leader banner's "X is the
+    // new leader with N points!") was getting cut off at the canvas edges
+    // in VR -- no width-aware sizing existed at all, just a fixed 34px
+    // font regardless of string length. Shrink to fit instead of clipping.
+    const maxWidth = w - 40;
+    let fontSize = 34;
     ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.font = `bold ${fontSize}px ui-monospace, Menlo, monospace`;
+    while (fontSize > 14 && ctx.measureText(text).width > maxWidth) {
+      fontSize -= 2;
+      ctx.font = `bold ${fontSize}px ui-monospace, Menlo, monospace`;
+    }
     ctx.shadowColor = '#f0a'; ctx.shadowBlur = 14;
     ctx.fillStyle = '#ffe27a';
     ctx.fillText(text, w / 2, h / 2);
@@ -1479,6 +1635,31 @@ function extendActiveEffects() {
 // functions below).
 function onEffectTriggered(name, isWorld) {
   if (name === 'zombiesummon') spawnZombieWave(player.pos, isWorld);
+}
+// POWER-UP APPEARANCE (Alex: recolor the suit while powered up, and
+// progressively recolor the cape's faces one more per stacked power-up, so
+// a glance shows how many are stacked -- reverting + a notification on
+// expiry). Scoped to the LOCAL player's own solo effects (activeEffects) --
+// remote players' effect state isn't replicated to this client at all
+// (pure relay architecture, see worker.js header), so this can't extend to
+// other players' pawns without a new networked message.
+const POWERUP_STACK_COLORS = [0xffe066, 0xff5566, 0xc98fff];
+const SUIT_POWERED_COLOR = 0xffe066;
+function updatePowerupAppearance() {
+  const stackCount = Object.values(activeEffects).filter(t => t > 0).length;
+  const normalSuitColor = myColor != null ? myColor : 0x12172c;
+  spidey.material.color.setHex(stackCount > 0 ? SUIT_POWERED_COLOR : normalSuitColor);
+  for (let i = 0; i < coatSegs.length; i++) {
+    const seg = coatSegs[i];
+    seg.segMat.color.setHex(i < stackCount ? POWERUP_STACK_COLORS[Math.min(i, POWERUP_STACK_COLORS.length - 1)] : coatMat.color.getHex());
+  }
+}
+const effectExpireEl = document.getElementById('effectexpire');
+function showEffectExpired(name) {
+  effectExpireEl.textContent = `${EFFECT_NAMES[name] || name} EXPIRED`;
+  effectExpireEl.style.opacity = '1';
+  clearTimeout(effectExpireEl._hideT);
+  effectExpireEl._hideT = setTimeout(() => { effectExpireEl.style.opacity = '0'; }, 1400);
 }
 function updatePowerupHud() {
   const rows = [];
@@ -1709,6 +1890,18 @@ function stepWeather(dt) {
       : 0.75 + (r - 0.55) / 0.45 * 0.25;
   }
   rainIntensity += (rainTarget - rainIntensity) * Math.min(1, dt * 0.4);
+  // Alex: "I'm still regularly hearing rain... without even seeing rain."
+  // The lerp above only asymptotically approaches 0 -- it never actually
+  // reaches it, so between rain segments (and while fading toward one) it
+  // spends long stretches at a tiny-but-nonzero intensity. At that level
+  // the sound bus (a persistent broadband hiss, audible even very quiet)
+  // stays perceptible while the visual (both opacity AND how many drops
+  // even render -- see stepRain's liveCount below, which floors to a
+  // visible drop count at a much higher intensity than the ear needs to
+  // notice hiss) reads as fully invisible. Snap both to exactly 0 below a
+  // shared floor so sound and sight appear/disappear together.
+  const RAIN_AUDIBLE_FLOOR = 0.08;
+  if (rainIntensity < RAIN_AUDIBLE_FLOOR) rainIntensity = 0;
   rainMat.opacity = 0.58 * rainIntensity;
   rainBus.gain.setTargetAtTime(rainIntensity * 0.38, audioCtx.currentTime, 0.6);
 
@@ -2029,18 +2222,39 @@ musicBus.gain.value = 0;   // starts silent -- faded in by updateFallMusic() onc
 musicBus.connect(audioCtx.destination);
 const MUSIC_BPM = 74;
 const BEAT = 60 / MUSIC_BPM;
-const NOIR_SCALE = [110.00, 123.47, 130.81, 146.83, 164.81, 174.61, 196.00, 207.65];  // A2 natural-minor-ish, w/ b2
+// Two scale variants -- Alex: "I don't know if I hear it" (see the gain
+// boost below) plus "add distinct musical styles/variety beyond the
+// current single noir loop". Picked once per load from the SAME seeded rng
+// stream as the city, so it's reproducible per-seed but varies across
+// sessions/seeds instead of always being the identical loop.
+const NOIR_SCALE_A = [110.00, 123.47, 130.81, 146.83, 164.81, 174.61, 196.00, 207.65];  // A2 natural-minor-ish, w/ b2
+const NOIR_SCALE_B = [98.00, 110.00, 116.54, 130.81, 146.83, 155.56, 174.61, 196.00];   // G2, darker/moodier flavor
+const NOIR_SCALE = choice([NOIR_SCALE_A, NOIR_SCALE_B]);
 let musicNext = 0, musicStep = 0, musicStarted = false;
+// Stack count of the local player's currently active solo power-ups (see
+// item 10's updatePowerupAppearance for the same computation on the visual
+// side) -- read by scheduleMusic() above to decide whether to brighten the
+// loop. Updated once per frame from the main loop.
+let powerupMusicBoost = 0;
+function updatePowerupMusicReactivity() {
+  powerupMusicBoost = Object.values(activeEffects).filter(t => t > 0).length;
+}
 function scheduleMusic() {
+  // Reactive brightening while a power-up is active (Alex: "make the music
+  // change/react when the player has active power-ups" -- extending the
+  // disco-mode pattern below to the general case). Opens the lowpass
+  // filters and lifts note volume a touch instead of a full alternate
+  // track, since this has to layer under whatever's already scheduled.
+  const powered = powerupMusicBoost > 0;
   while (musicNext < audioCtx.currentTime + 0.22) {
     const t = musicNext;
     if (musicStep % 4 === 0 || musicStep % 4 === 2) {
       const o = audioCtx.createOscillator(); o.type = 'triangle';
       o.frequency.value = NOIR_SCALE[0];
-      const filt = audioCtx.createBiquadFilter(); filt.type = 'lowpass'; filt.frequency.value = 420;
+      const filt = audioCtx.createBiquadFilter(); filt.type = 'lowpass'; filt.frequency.value = powered ? 900 : 420;
       const g = audioCtx.createGain();
       g.gain.setValueAtTime(0.0001, t);
-      g.gain.exponentialRampToValueAtTime(0.22, t + 0.02);
+      g.gain.exponentialRampToValueAtTime(powered ? 0.32 : 0.24, t + 0.02);
       g.gain.exponentialRampToValueAtTime(0.0001, t + BEAT * 0.85);
       o.connect(filt); filt.connect(g); g.connect(musicBus);
       o.start(t); o.stop(t + BEAT);
@@ -2049,10 +2263,10 @@ function scheduleMusic() {
       const note = choice(NOIR_SCALE) * 2;
       const o = audioCtx.createOscillator(); o.type = 'square';
       o.frequency.value = note;
-      const filt = audioCtx.createBiquadFilter(); filt.type = 'lowpass'; filt.frequency.value = 1300;
+      const filt = audioCtx.createBiquadFilter(); filt.type = 'lowpass'; filt.frequency.value = powered ? 2200 : 1300;
       const g = audioCtx.createGain();
       g.gain.setValueAtTime(0.0001, t);
-      g.gain.exponentialRampToValueAtTime(0.05, t + 0.015);
+      g.gain.exponentialRampToValueAtTime(powered ? 0.09 : 0.07, t + 0.015);
       g.gain.exponentialRampToValueAtTime(0.0001, t + BEAT * 0.55);
       o.connect(filt); filt.connect(g); g.connect(musicBus);
       o.start(t); o.stop(t + BEAT * 0.55);
@@ -2154,6 +2368,17 @@ function spawnScorePopup(pos, amount) {
   sprite.position.copy(pos);
   scene.add(sprite);
   scorePopups.push({ sprite, t: 0 });
+}
+// Pickup popup/sound were LOCAL-only (Alex: replicate them so everyone
+// sees/hears every pickup, not just the collector). Lightweight
+// broadcast-only message, same "attacker reports, DO just relays" shape as
+// joust/knock -- excluded from the sender in worker.js since the collector
+// already spawned its own popup+sound locally above, same pattern as the
+// solo 'effect' broadcast.
+function broadcastPickup(pos, amount) {
+  if (mpSocket && mpSocket.readyState === WebSocket.OPEN) {
+    mpSocket.send(JSON.stringify({ type: 'pickup', pos: [pos.x, pos.y, pos.z], amount }));
+  }
 }
 function stepScorePopups(dt) {
   for (let i = scorePopups.length - 1; i >= 0; i--) {
@@ -2391,11 +2616,12 @@ function stepPickups(t, p) {
           const amount = scoreForOrbHeight(pk.baseY);
           addScore(amount);
           spawnScorePopup(pk.mesh.position, amount);
+          broadcastPickup(pk.mesh.position, amount);
         }
       }
     }
   }
-  if (collectedNow) orbsEl.textContent = (parseInt(orbsEl.textContent) || 0) + collectedNow;
+  if (collectedNow) { orbsEl.textContent = (parseInt(orbsEl.textContent) || 0) + collectedNow; analyticsOrbsSinceReport += collectedNow; }
 }
 
 // ---------------------------------------------------------------- ZOMBIES --
@@ -2829,6 +3055,7 @@ function triggerGameOver(force) {
   gameOver = true;
   explode(player.pos);
   kbMouseWebHeld = webHeld = false; player.anchor = null;
+  sendAnalytics();   // game-over is a natural checkpoint, same as the periodic interval
   setTimeout(() => {
     document.getElementById('finalscore').textContent =
       `score: ${score}  ·  cars knocked: ${knockedCount}  ·  orbs: ${orbsEl.textContent}/${document.getElementById('orbstotal').textContent}`;
@@ -3030,16 +3257,25 @@ const COAT_N = 5, COAT_MAX = 22;
 const coatMat = new THREE.MeshStandardMaterial({ color: 0x3f72e8, roughness: 0.6, metalness: 0.05 });
 const coatLiningMat = new THREE.MeshBasicMaterial({ color: 0xdd1f2f });
 function coatLengthFor(kills) { return Math.min(COAT_MAX, COAT_N + (kills || 0) * 2); }
+// Per-segment (not per-coat) materials: power-up stacking (Alex: "stacking
+// 2-3 power-ups should progressively recolor the cape's faces, one more
+// face per additional power-up") needs each segment independently
+// recolorable, and per-PLAYER too (a shared module-level material would
+// recolor every player's cape at once) -- so every segment gets its own
+// cloned material instead of all segments/players sharing coatMat/
+// coatLiningMat directly.
 function makeCoat() {
   const segs = [];
   for (let i = 0; i < COAT_MAX; i++) {
-    const mesh = new THREE.Mesh(new THREE.BoxGeometry(Math.max(0.1, 0.46 - i * 0.03), 0.34, 0.05), coatMat);
-    const lining = new THREE.Mesh(new THREE.BoxGeometry(Math.max(0.12, 0.5 - i * 0.03), 0.38, 0.02), coatLiningMat);
+    const segMat = coatMat.clone();
+    const liningMatInst = coatLiningMat.clone();
+    const mesh = new THREE.Mesh(new THREE.BoxGeometry(Math.max(0.1, 0.46 - i * 0.03), 0.34, 0.05), segMat);
+    const lining = new THREE.Mesh(new THREE.BoxGeometry(Math.max(0.12, 0.5 - i * 0.03), 0.38, 0.02), liningMatInst);
     lining.position.z = -0.045;
     mesh.add(lining);
     mesh.visible = i < COAT_N;
     scene.add(mesh);
-    segs.push({ mesh, pos: new THREE.Vector3() });
+    segs.push({ mesh, pos: new THREE.Vector3(), segMat, liningMat: liningMatInst });
   }
   return segs;
 }
@@ -3246,7 +3482,7 @@ const keys = {};
 // its own flag, never `webHeld` directly, so a connected-but-idle gamepad
 // (or a touch button that isn't currently pressed) can't stomp a mouse
 // click to "released" just by polling its own all-false state every frame.
-let kbMouseWebHeld = false, gamepadWebHeld = false, touchWebHeld = false;
+let kbMouseWebHeld = false, gamepadWebHeld = false, touchSprintHeld = false;
 let webHeld = false, prevWebHeld = false, yaw = 0, pitch = -0.15;
 // 'first' | 'third' -- desktop/touch/gamepad default to third, VR defaults
 // to first (Alex, family playtest: "in WebXR, third person is very
@@ -3300,6 +3536,7 @@ addEventListener('keydown', e => {
   if (e.code === 'Space') { kbMouseWebHeld = true; e.preventDefault(); }
   if (e.code === 'KeyR') respawn();
   if (e.code === 'KeyM') openMenu();
+  if (e.code === 'KeyH') toggleHud();
   // Non-VR camera toggle only -- in VR there's no keyboard in reach, and
   // first person is already forced on sessionstart regardless.
   if (e.code === 'KeyV' && !renderer.xr.isPresenting) {
@@ -3318,6 +3555,30 @@ addEventListener('mouseup', e => { if (e.button === 0) kbMouseWebHeld = false; }
 // granted we fall back to raw mouse-look (movementX/Y works unlocked too).
 const startEl = document.getElementById('start');
 let entered = false;
+// SESSION ANALYTICS (Alex: "good logging from all sessions... play time,
+// how many orbs people tend to get, and errors or crashes"). Sent to the
+// worker periodically + at game-over, same stateless-report shape as
+// dailyscore -- the server just aggregates it per EST calendar day
+// (recordAnalytics in worker.js), no per-player identity attached.
+let analyticsPlayStart = null, analyticsOrbsSinceReport = 0, analyticsErrors = [];
+const ANALYTICS_INTERVAL_MS = 60000;
+function sendAnalytics() {
+  if (!analyticsPlayStart || !(mpSocket && mpSocket.readyState === WebSocket.OPEN)) return;
+  const now = Date.now();
+  const playSeconds = (now - analyticsPlayStart) / 1000;
+  mpSocket.send(JSON.stringify({
+    type: 'analytics',
+    report: { playSeconds, orbs: analyticsOrbsSinceReport, errors: analyticsErrors.splice(0, analyticsErrors.length) },
+  }));
+  analyticsPlayStart = now;
+  analyticsOrbsSinceReport = 0;
+}
+addEventListener('error', e => {
+  analyticsErrors.push(`${e.message || e.type} @ ${e.filename || '?'}:${e.lineno || '?'}`.slice(0, 200));
+});
+addEventListener('unhandledrejection', e => {
+  analyticsErrors.push(String(e.reason).slice(0, 200));
+});
 function enterGame() {
   if (entered) return;
   entered = true;
@@ -3325,6 +3586,8 @@ function enterGame() {
   if (audioCtx.state === 'suspended') audioCtx.resume();
   startMusic();
   startHype();
+  analyticsPlayStart = Date.now();
+  setInterval(sendAnalytics, ANALYTICS_INTERVAL_MS);
 }
 // RETURN TO MENU (Alex: "a button to return to the main menu without
 // losing your progress -- say you want to change your name or look at the
@@ -3332,6 +3595,10 @@ function enterGame() {
 // toggles the overlay and freezes local input (see the `paused` check at
 // the top of stepPlayer below); score, position, and the multiplayer
 // connection are untouched, so closing the menu drops you right back in.
+// UI TOGGLE (Alex: "a toggle to turn the UI off and back on during
+// gameplay"). Body class drives the CSS rule hiding persistent HUD chrome
+// (see body.hudHidden in <style>); transient warnings/popups are untouched.
+function toggleHud() { document.body.classList.toggle('hudHidden'); }
 let paused = false;
 function openMenu() {
   if (!entered || paused) return;
@@ -3451,6 +3718,13 @@ renderer.xr.addEventListener('sessionend', () => {
   camera.add(fpStick);
   fpStick.position.set(-0.26, -0.28, -0.55);
 });
+// Far plane 900->280 (see comment above camera's constructor) helped VR
+// framerate but Alex later reported it "looks awkward" in VR -- a hard
+// clip at world edges reads as worse than the framerate problem it fixed.
+// Revert to the original 900 specifically while presenting (desktop never
+// had this complaint, so it keeps the tighter 280 default).
+renderer.xr.addEventListener('sessionstart', () => { camera.far = 900; camera.updateProjectionMatrix(); });
+renderer.xr.addEventListener('sessionend', () => { camera.far = 280; camera.updateProjectionMatrix(); });
 // VR PERFORMANCE (Alex: "performance goes up and down, maybe based on how
 // much of the city I see"). The city's buildings/windows already render as
 // a handful of InstancedMesh draw calls (one draw call regardless of view
@@ -3506,7 +3780,7 @@ addEventListener('mousemove', e => {
 // keeps stepPlayer completely untouched, only feeding it the same booleans
 // it always read.
 const GAMEPAD_DEADZONE = 0.22;
-let gpRespawnPrev = false;
+let gpRespawnPrev = false, gpHudPrev = false;
 function stepGamepad(dt) {
   const pads = navigator.getGamepads ? navigator.getGamepads() : null;
   const gp = pads && (pads[0] || pads[1] || pads[2] || pads[3]);
@@ -3529,19 +3803,26 @@ function stepGamepad(dt) {
   const gpRespawn = !!(gp.buttons[2] && gp.buttons[2].pressed);   // X / Square, edge-triggered
   if (gpRespawn && !gpRespawnPrev) respawn();
   gpRespawnPrev = gpRespawn;
+  const gpHud = !!(gp.buttons[3] && gp.buttons[3].pressed);   // Y / Triangle, edge-triggered -- HUD toggle
+  if (gpHud && !gpHudPrev) toggleHud();
+  gpHudPrev = gpHud;
 }
 
 // --------------------------------------------------------------- TOUCH --
 // Left half of the screen = a virtual joystick (drag from touch-down point,
 // same digital-threshold trick as the gamepad, feeding tKeys instead of
 // gpKeys); right half = drag-to-look (mirrors the mousemove handler); plus
-// a dedicated WEB button and a small respawn button. Only shown on touch-
+// a dedicated SPRINT button and a small respawn button. Web/swing itself
+// doesn't need a dedicated button -- any tap already fires it via the
+// browser's synthesized mousedown/up compatibility events on touch (same
+// path as kbMouseWebHeld below), which is why the old WEB button was
+// redundant and got turned into SPRINT instead. Only shown on touch-
 // capable devices (feature-detected once at load) so desktop players never
 // see it.
 const touchCapable = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
 if (touchCapable) document.body.classList.add('touch-active');
 const touchJoyThumb = document.getElementById('touchjoyThumb');
-const touchWebEl = document.getElementById('touchweb');
+const touchSprintEl = document.getElementById('touchsprint');
 const TOUCH_JOY_RADIUS = 46;
 let touchJoyId = null, touchJoyOrigin = { x: 0, y: 0 }, touchJoyVec = { x: 0, y: 0 };
 let touchLookId = null, touchLookPrev = { x: 0, y: 0 };
@@ -3560,9 +3841,9 @@ function touchJoyReset() {
 }
 addEventListener('pointerdown', e => {
   if (!entered || !touchCapable || e.pointerType !== 'touch') return;
-  if (e.target === touchWebEl) {
-    touchWebHeld = true; touchWebEl.classList.add('active');
-    try { touchWebEl.setPointerCapture(e.pointerId); } catch (err) {}
+  if (e.target === touchSprintEl) {
+    touchSprintHeld = true; touchSprintEl.classList.add('active');
+    try { touchSprintEl.setPointerCapture(e.pointerId); } catch (err) {}
     return;
   }
   if (e.target.id === 'touchrespawn') { respawn(); return; }
@@ -3589,7 +3870,7 @@ addEventListener('pointermove', e => {
 function touchEnd(e) {
   if (e.pointerId === touchJoyId) touchJoyReset();
   if (e.pointerId === touchLookId) touchLookId = null;
-  if (e.target === touchWebEl) { touchWebHeld = false; touchWebEl.classList.remove('active'); }
+  if (e.target === touchSprintEl) { touchSprintHeld = false; touchSprintEl.classList.remove('active'); }
 }
 addEventListener('pointerup', touchEnd);
 addEventListener('pointercancel', touchEnd);
@@ -3600,7 +3881,9 @@ function stepTouch(dt) {
   tKeys.KeyS = touchJoyVec.y > 0.28;
   tKeys.KeyA = touchJoyVec.x < -0.28;
   tKeys.KeyD = touchJoyVec.x > 0.28;
-  tKeys.ShiftLeft = Math.hypot(touchJoyVec.x, touchJoyVec.y) > 0.88;
+  // Full joystick deflection still sprints too (mirrors gamepad/VR), in
+  // addition to the dedicated SPRINT button below.
+  tKeys.ShiftLeft = Math.hypot(touchJoyVec.x, touchJoyVec.y) > 0.88 || touchSprintHeld;
 }
 
 // ----------------------------------------------------------------- XR --
@@ -3611,7 +3894,7 @@ function stepTouch(dt) {
 // controller's stick drives look (yaw/pitch, directly -- there's no
 // separate "xr look" primitive to combine, same as how the desktop
 // gamepad's right stick works). Either trigger fires the web/jump action.
-let xrWebHeld = false, xrLeftXPrev = false, xrLeftYPrev = false, xrRightBPrev = false;
+let xrWebHeld = false, xrLeftXPrev = false, xrLeftYPrev = false, xrRightBPrev = false, xrLeftStickClickPrev = false;
 const xrKeys = {};
 // Right-stick scheme (Alex, second VR playtest pass): X axis snap-turns in
 // fixed increments (the standard VR-comfort turn), Y axis smooth-turns
@@ -3627,7 +3910,7 @@ function stepXR(dt) {
     return;
   }
   let held = false, moveX = 0, moveY = 0, lookX = 0, lookY = 0;
-  let leftX = false, leftY = false, rightB = false;
+  let leftX = false, leftY = false, rightB = false, leftStickClick = false;
   for (const src of session.inputSources) {
     const gp = src.gamepad;
     if (!gp) continue;
@@ -3650,6 +3933,10 @@ function stepXR(dt) {
     if (!rightHand) {
       if (gp.buttons[4] && gp.buttons[4].pressed) leftX = true;
       if (gp.buttons[5] && gp.buttons[5].pressed) leftY = true;
+      // Left stick click (buttons[3], xr-standard) toggles the HUD (Alex:
+      // "a toggle to turn the UI off and back on" -- edge-triggered like
+      // the other left-hand buttons above).
+      if (gp.buttons[3] && gp.buttons[3].pressed) leftStickClick = true;
     }
     // xr-standard mapping: axes[2]/[3] are the thumbstick. Real-hardware
     // playtest found both axes inverted from what this mapping assumed --
@@ -3657,17 +3944,21 @@ function stepXR(dt) {
     // empirical report was unambiguous.
     const ax = -(gp.axes[2] !== undefined ? gp.axes[2] : gp.axes[0]);
     const ay = -(gp.axes[3] !== undefined ? gp.axes[3] : gp.axes[1]);
-    // RIGHT STICK ONLY: a third playtest report ("left joystick is
-    // perfect, lock that... right joystick Y (up) is doing a right snap
-    // turn, X (right) is doing left smooth rotation") means the right
-    // controller's axes[2]/[3] are SWAPPED relative to axes[0]/[1]-style X/Y
-    // on this hardware (physical up/down is landing in axes[2], physical
-    // left/right in axes[3]) -- distinct from the left stick, which reports
-    // normally (hence "lock that"). Solved directly from the two reported
-    // input->output pairs (not re-guessed from spec): swap which raw axis
-    // feeds lookX vs lookY, and negate the one now feeding lookX, or a
-    // push-right still produced a left snap after the swap alone.
-    if (rightHand) { lookX = -ay || 0; lookY = ax || 0; }
+    // RIGHT STICK ONLY, latest correction (cross-session, superseding the
+    // earlier "Y=snap/X=smooth always" fix -- this axis mapping has been
+    // gotten wrong repeatedly on this project, see the KB gotcha log):
+    // "In VR third person the up/down on the right thumbstick should not be
+    // snap turn -- it should rotate the camera up and down (pitch)... [but]
+    // only applies in VR THIRD-PERSON. In VR FIRST-PERSON, up/down on the
+    // right stick should still be snap-turn." So X (left/right) ALWAYS
+    // drives smooth yaw regardless of camera mode; Y (up/down) drives pitch
+    // in third-person and snap-turn in first-person. On this hardware the
+    // right controller's axes[2]/[3] are SWAPPED relative to axes[0]/[1]-
+    // style X/Y (physical up/down lands in axes[2] -- the `ax` var --
+    // physical left/right lands in axes[3] -- the `ay` var). lookX carries
+    // physical Y (up/down); lookY carries physical X (left/right, sign
+    // unchanged from the last confirmed-correct value).
+    if (rightHand) { lookX = ax || 0; lookY = -ay || 0; }
     else { moveX = ax || 0; moveY = ay || 0; }   // 'left' or 'none' -- default to movement -- UNCHANGED, confirmed correct
   }
   if (leftX && !xrLeftXPrev) { xrLeftXPrev = true; openMenu(); session.end().catch(() => {}); }
@@ -3676,6 +3967,8 @@ function stepXR(dt) {
   else if (!leftY) xrLeftYPrev = false;
   if (rightB && !xrRightBPrev) { xrRightBPrev = true; cameraMode = cameraMode === 'first' ? 'third' : 'first'; }
   else if (!rightB) xrRightBPrev = false;
+  if (leftStickClick && !xrLeftStickClickPrev) { xrLeftStickClickPrev = true; toggleHud(); }
+  else if (!leftStickClick) xrLeftStickClickPrev = false;
   xrWebHeld = held;
   xrKeys.KeyW = moveY < -GAMEPAD_DEADZONE;
   xrKeys.KeyS = moveY > GAMEPAD_DEADZONE;
@@ -3685,16 +3978,23 @@ function stepXR(dt) {
   // full-deflection thresholds tuned against a desktop gamepad's analog
   // curve may simply be harder to physically reach on a VR thumbstick).
   xrKeys.ShiftLeft = Math.hypot(moveX, moveY) > 0.72;
-  // Snap-turn: fires once per push past the threshold, then re-arms once
-  // the stick returns near center -- a held-over stick would otherwise
-  // spin continuously instead of discrete comfort-turns.
-  if (Math.abs(lookX) > SNAP_TURN_THRESHOLD) {
-    if (xrSnapArmed) { yaw -= Math.sign(lookX) * SNAP_TURN_ANGLE; xrSnapArmed = false; }
-  } else if (Math.abs(lookX) < GAMEPAD_DEADZONE) {
-    xrSnapArmed = true;
-  }
-  // Smooth yaw turn from the Y axis (not pitch -- see comment above).
+  // X (lookY, left/right) ALWAYS smooth-turns yaw, in both camera modes.
   if (Math.abs(lookY) > GAMEPAD_DEADZONE) yaw -= lookY * 2.2 * dt;
+  // Y (lookX, up/down): third-person pitches the camera; first-person
+  // snap-turns instead (see the correction comment above stepXR's loop).
+  if (cameraMode === 'third') {
+    xrSnapArmed = true;   // stays armed while unused, so a mode-switch back to first-person doesn't inherit a stale disarm
+    if (Math.abs(lookX) > GAMEPAD_DEADZONE) pitch = Math.max(-1.35, Math.min(0.9, pitch - lookX * 2.2 * dt));
+  } else {
+    // Snap-turn: fires once per push past the threshold, then re-arms once
+    // the stick returns near center -- a held-over stick would otherwise
+    // spin continuously instead of discrete comfort-turns.
+    if (Math.abs(lookX) > SNAP_TURN_THRESHOLD) {
+      if (xrSnapArmed) { yaw -= Math.sign(lookX) * SNAP_TURN_ANGLE; xrSnapArmed = false; }
+    } else if (Math.abs(lookX) < GAMEPAD_DEADZONE) {
+      xrSnapArmed = true;
+    }
+  }
 }
 
 // ----------------------------------------------------------- PLAYER STEP --
@@ -4133,6 +4433,7 @@ const remotePlayers = new Map();   // id -> { body, coatSegs, webLine, webLineGe
 const knownPlayerIds = new Set();
 const playerCountEl = document.getElementById('playercount');
 const playerCountTotalEl = document.getElementById('playercounttotal');
+const playersTodayEl = document.getElementById('playerstoday');
 
 // SESSION LEADERBOARD (Alex: "a leaderboard for everyone to see at all
 // times but also represented in 3D space... whenever someone becomes a new
@@ -4150,6 +4451,19 @@ function getLeaderboardEntries() {
   return entries;
 }
 function hexColor(n) { return '#' + (n != null ? n : 0x9fe8ff).toString(16).padStart(6, '0'); }
+// Pause (#start, reused via openMenu) and game-over screens each got their
+// own mirror of the same leaderboard HTML (Alex: leaderboards should be
+// clearly visible on both, on every platform) -- the flat #leaderboard/
+// #dailyboard HUD elements sit BEHIND those overlays' opaque backgrounds,
+// so showing through isn't an option; re-render the same content into
+// dedicated containers inside each overlay instead.
+const startBoardsEl = document.getElementById('startBoards');
+const gameoverBoardsEl = document.getElementById('gameoverBoards');
+function mirrorBoardsToOverlays() {
+  const html = `<div>${leaderboardEl.innerHTML}</div><div>${dailyboardEl.innerHTML}</div>`;
+  startBoardsEl.innerHTML = html;
+  gameoverBoardsEl.innerHTML = html;
+}
 function updateLeaderboard() {
   if (!MULTIPLAYER_URL) return;
   const entries = getLeaderboardEntries();
@@ -4157,7 +4471,8 @@ function updateLeaderboard() {
     `<div class="row"><span style="color:${hexColor(e.color)}">${i + 1}. ${e.initials || '???'}${e.isMe ? ' (you)' : ''}</span><span>${e.score}</span></div>`
   ).join('');
   billboardPanel.redraw(drawLeaderboardPanel(entries));
-  vrWristPanel.redraw(drawLeaderboardPanel(entries));   // visibility owned by updateXRArms()
+  vrWristPanel.redraw(drawArmTopPanel(entries, 'SESSION #1', '#4dff88'));   // visibility owned by updateXRArms()
+  mirrorBoardsToOverlays();
   // Only the client that JUST became #1 reports it (same "attacker/newly-
   // true-condition reports once" shape as joust/knock in worker.js) --
   // every other client just renders whatever banner arrives. Guarded on
@@ -4223,7 +4538,8 @@ function renderDailyboard(entries, date) {
     `<div class="row"><span style="color:${hexColor(e.color)}">${i + 1}. ${e.initials || '???'}</span><span>${e.score}</span></div>`
   ).join('');
   dailyboardEl.innerHTML = html;
-  vrDailyPanel.redraw(drawDailyboardPanel(entries, date));
+  vrDailyPanel.redraw(drawArmTopPanel(entries, 'DAILY #1', '#ffcf6b'));
+  mirrorBoardsToOverlays();
 }
 function updatePlayerCount() { playerCountTotalEl.textContent = knownPlayerIds.size + 1; }
 let mpSocket = null, myId = null, myColor = null, mpSendTimer = 0;
@@ -4417,6 +4733,17 @@ function connectMultiplayer() {
       // naturally ("YOU just became the leader" looks the same as everyone
       // else's view of it).
       showLeaderBanner(msg.initials, msg.score);
+    } else if (msg.type === 'pickup' && Array.isArray(msg.pos)) {
+      // Remote player's pickup -- excluded from the sender server-side (it
+      // already played its own sfx/popup locally), so this only ever fires
+      // for OTHER players' collections.
+      sfxPing(new THREE.Vector3(msg.pos[0], msg.pos[1], msg.pos[2]));
+      spawnScorePopup(new THREE.Vector3(msg.pos[0], msg.pos[1], msg.pos[2]), msg.amount);
+    } else if (msg.type === 'today') {
+      // Distinct from the live session PLAYERS count above -- a running
+      // count of unique CONNECTIONS today (see recordTodayPlayer in
+      // worker.js), broadcast to everyone whenever a new connection joins.
+      playersTodayEl.textContent = msg.count;
     } else if (msg.type === 'dailyboard') {
       renderDailyboard(msg.entries, msg.date);
     } else if (msg.type === 'poweractivated') {
@@ -4637,9 +4964,12 @@ function loop(now) {
   // Power-up effect timers: plain countdown, stacking is just "still >0"
   // (see triggerSoloEffect/triggerWorldEffect/extendActiveEffects).
   for (const map of [activeEffects, worldEffects]) {
-    for (const k of Object.keys(map)) if (map[k] > 0 && (map[k] -= dt) <= 0) delete map[k];
+    for (const k of Object.keys(map)) {
+      if (map[k] > 0 && (map[k] -= dt) <= 0) { delete map[k]; showEffectExpired(k); }
+    }
   }
   updatePowerupHud();
+  updatePowerupAppearance();
 
   // Signal phase is a pure function of `t % period` -- so swapping in real
   // wall-clock time here (instead of worldT, which started at 0 on each
@@ -4654,7 +4984,11 @@ function loop(now) {
   stepGamepad(playerDt);
   stepTouch(playerDt);
   stepXR(playerDt);
-  webHeld = kbMouseWebHeld || gamepadWebHeld || touchWebHeld || xrWebHeld;
+  // Touch has no dedicated web/swing button anymore (see touchsprint
+  // rename) -- taps reach kbMouseWebHeld via the browser's own synthesized
+  // mousedown/up compatibility events, so no separate touch term is needed
+  // here.
+  webHeld = kbMouseWebHeld || gamepadWebHeld || xrWebHeld;
   for (const k of ['KeyW', 'KeyA', 'KeyS', 'KeyD', 'ShiftLeft']) {
     keys[k] = !!(kbKeyDown(k) || gpKeys[k] || tKeys[k] || xrKeys[k]);
   }
@@ -4668,8 +5002,9 @@ function loop(now) {
   stepWeather(worldDt);
   stepRain(player.pos, simT);
   stepRooftopCoins(simT, player);
+  stepSpotlights(dt);
   stepScorePopups(dt);
-  updateBloom(player.pos.y);
+  updateBloom(player.pos.y, player.onGround);
   updateFallMusic(player.pos.y, player.onGround);
   // Post-processing (bloom/noir) is skipped while presenting in XR --
   // EffectComposer's multi-pass pipeline isn't WebXR-stereo-aware (it
@@ -4693,7 +5028,7 @@ renderer.setAnimationLoop(loop);
 window.__sw = { THREE, player, cars, parkedCars, pickups, colliders, EDGE, WORLD_BOUND, touchingWallNow,
                 GRID_N, VEHICLE_TYPES, buildingLabels, buildingLabelSprites, segs, cylSegs,
                 genBuildingName, isBlocked, PROFANITY_EN, PROFANITY_KATAKANA,
-                rooftopCoins, stepRooftopCoins,
+                rooftopCoins, stepRooftopCoins, spotlights, stepSpotlights, PARK_BLOCK_I, PARK_BLOCK_J,
                 triggerGameOver, resetGame, checkKnocks, knockCar, respawn,
                 stepPickups, stepPlayer, stepTraffic, stepKnocked, stepExplosion,
                 scoreForOrbHeight, spawnScorePopup, stepScorePopups, scorePopups, get score() { return score; },
@@ -4732,8 +5067,11 @@ window.__sw = { THREE, player, cars, parkedCars, pickups, colliders, EDGE, WORLD
                 keys, kbKeys, gpKeys, tKeys,
                 get kbMouseWebHeld() { return kbMouseWebHeld; },
                 get gamepadWebHeld() { return gamepadWebHeld; },
-                get touchWebHeld() { return touchWebHeld; },
-                set touchWebHeld(v) { touchWebHeld = v; },
+                get touchSprintHeld() { return touchSprintHeld; },
+                sendAnalytics, get analyticsErrors() { return analyticsErrors; },
+                get analyticsOrbsSinceReport() { return analyticsOrbsSinceReport; },
+                get analyticsPlayStart() { return analyticsPlayStart; },
+                set touchSprintHeld(v) { touchSprintHeld = v; },
                 stepGamepad, stepTouch, touchJoyVec, touchJoyUpdate,
                 get touchCapable() { return touchCapable; },
                 get yaw() { return yaw; }, set yaw(v) { yaw = v; }, get pitch() { return pitch; },
@@ -4743,7 +5081,8 @@ window.__sw = { THREE, player, cars, parkedCars, pickups, colliders, EDGE, WORLD
                 set entered(v) { entered = v; },
                 openMenu, closeMenu, get paused() { return paused; }, wallMat, WALL_CYCLE_SECONDS, windowMat,
                 xrArms, xrGrips, updateXRArms, announceEffect, announceRemoteEffect,
-                vrNotifyPanel, showVRNotification, vrWristPanel, vrDailyPanel, drawDailyboardPanel,
+                vrNotifyPanel, showVRNotification, vrWristPanel, vrDailyPanel, drawArmTopPanel,
+                updatePowerupAppearance, showEffectExpired,
                 get myInitials() { return myInitials; }, set myInitials(v) { myInitials = v; },
                 powerBannerEl,
                 get xrLeftXPrev() { return xrLeftXPrev; }, get xrLeftYPrev() { return xrLeftYPrev; },
