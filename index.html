@@ -208,7 +208,7 @@
        in-headset without needing devtools. If it EVER doesn't match what
        you expect after a hard reload, that's real signal of a caching
        problem, not a hunch. -->
-  <div id="versionLine">by ibrews &nbsp;·&nbsp; v0.0.8 built 2026-07-04 (round 9)</div><br>
+  <div id="versionLine">by ibrews &nbsp;·&nbsp; v0.0.9 built 2026-07-04 (round 10: VR reel fix)</div><br>
   A living neon city at night. Sling a web, swing between skyscrapers, and see how much
   trouble you can cause before the night's over.<br><br>
   <span id="initialsRow">callsign (optional, 3 letters): <input id="initialsInput" maxlength="3"
@@ -4667,8 +4667,22 @@ function stepPlayer(dt) {
     // rappel away/down); with neither held, a small default nudge along
     // the look direction keeps the swing making forward progress instead
     // of feeling "dead" with no input.
-    if (keys.KeyW) p.ropeLen = Math.max(REEL_MIN_ROPE, p.ropeLen - REEL_SPEED * dt);
-    else if (keys.KeyS) p.ropeLen += REEL_SPEED * dt;
+    //
+    // VR-ONLY REVERSAL (Alex, round 9 hardware test): "down on the left
+    // thumbstick was reeling me in, up was reeling me out... but running
+    // forward/backward/left/right are all correct." Ground movement's
+    // forward/back (the `inDir`/`f` block above, driven by this SAME
+    // `keys.KeyW`/`KeyS`) is confirmed correct, and desktop/gamepad reel
+    // is confirmed correct too -- only VR's reel FEELS reversed relative
+    // to VR's own (correct) forward/back. Rather than touch the shared
+    // xrKeys.KeyW/KeyS derivation (which would also flip the
+    // already-correct VR movement), swap ONLY which key means "reel in"
+    // vs "reel out" while presenting -- movement and desktop/gamepad reel
+    // both keep reading the unswapped keys.KeyW/KeyS exactly as before.
+    const reelInKey = renderer.xr.isPresenting ? keys.KeyS : keys.KeyW;
+    const reelOutKey = renderer.xr.isPresenting ? keys.KeyW : keys.KeyS;
+    if (reelInKey) p.ropeLen = Math.max(REEL_MIN_ROPE, p.ropeLen - REEL_SPEED * dt);
+    else if (reelOutKey) p.ropeLen += REEL_SPEED * dt;
     else p.vel.addScaledVector(aimDir(), SWING_FORWARD_PULL * dt);
     const d = p.pos.clone().sub(p.anchor);
     if (d.length() > p.ropeLen) {
