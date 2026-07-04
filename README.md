@@ -19,15 +19,16 @@ python3 -m http.server 8377
 
 Click to enter (pointer lock gives the best mouse-look; it'll fall back to a raw mouse-look mode automatically if your browser/embed blocks pointer lock).
 
-**Controls** — keyboard/mouse, gamepad, touch, and WebXR all work at once and drive the same actions, so mix and match freely.
+**Controls** — keyboard/mouse, gamepad, touch, and WebXR all work at once and drive the same actions, so mix and match freely. The in-game controls panel (bottom-left, collapsible) always reflects the current build; this is the short version.
 - Mouse / right stick / touch drag (right half of screen) / XR right-stick — look around
 - **Tap** left-click, Space, gamepad A, or an XR trigger — jump (hold through it to also fire a web if a building's in range)
 - Hold left-click / Space / gamepad A / touch WEB button / XR trigger against a building — swing; against a bare wall — **climb it Spider-Man style**
+- **W/S** (or push the stick forward/back while attached) — **reel the rope in/out**; A/D still steer the swing normally
 - **WASD** / left stick / touch joystick (left half of screen) / XR left-stick — run / air control
 - **Shift** / full-stick deflection / right trigger — sprint
-- **W** while swinging — pump the swing for more speed
 - **R** / gamepad X / touch R button — respawn on a nearby rooftop
 - Sprint into a car to knock it flying — chain hits on multiple cars within ~1.6s for a score combo
+- 16 power-up orbs (giant, tiny, flight, speed, invincibility, disco mode with its own procedural beat, and more) each spawn as a YOU-only version and a ringed EVERYONE-affecting version
 
 ## How it's built
 
@@ -51,11 +52,15 @@ Everything about the layout — grid size, block size, street width, building he
 
 ## Multiplayer (opt-in)
 
-Off by default — the game only connects if loaded with `?mp=<websocket-url>` pointing at a deployed instance of the relay in `multiplayer/`. It's joust rules: land on top of another player to explode them (Fortnite/[fly.pieter.com](https://fly.pieter.com)-style). See `multiplayer/README.md` for the one-time `wrangler login && wrangler deploy` to get your own live URL (free Cloudflare tier covers a casual room easily) and how to test it locally with no login at all.
+Off by default — the game only connects if loaded with `?mp=<websocket-url>` pointing at a deployed instance of the relay in `multiplayer/`. It's joust rules: land on top of another player to explode them (Fortnite/[fly.pieter.com](https://fly.pieter.com)-style). A live session leaderboard and an all-time daily leaderboard track everyone in the room. See `multiplayer/README.md` for the one-time `wrangler login && wrangler deploy` to get your own live URL (free Cloudflare tier covers a casual room easily) and how to test it locally with no login at all.
 
 ## WebXR
 
-Click **Enter VR** (bottom-right, only shown if your browser/headset supports it) for an immersive third-person view — the same follow-the-player camera desktop uses, just with real head tracking layered on top. Left controller stick moves, right stick looks, either trigger fires a web.
+Click **Enter VR** (bottom-center, only shown if your browser/headset supports it). Starts in **first-person** — arms and a jousting-rod view-model stand in for your body; **right controller B** (or double-pinch the left hand on pinch-only devices like Vision Pro, which has no physical buttons) toggles to third-person, where your full pawn is visible and the camera orbits behind you. The camera only ever turns on yaw (a flat turntable) in either mode — swinging, falling, or looking around never tilts the view, for comfort.
+
+Right stick: **X always smooth-turns yaw**; **Y snap-turns in first-person, smoothly pitches the camera in third-person** (real head tilt already covers first-person pitch, so the stick doesn't fight it there). Left stick moves and, once attached to a swing, reels the rope in/out exactly like W/S on desktop. Either trigger fires a web/jump; left controller X exits VR, Y respawns, left stick click toggles the HUD. On Vision Pro's pinch-only input, left-hand pinch walks forward and right-hand pinch fires the web.
+
+A sun/moon arcs across the sky, cycling through the same day-drift color palette as the boundary wall. Remote players' active power-ups (glow + cape recolor) are visible to everyone in multiplayer, not just the player using them.
 
 ---
 

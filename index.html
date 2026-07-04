@@ -208,7 +208,7 @@
        in-headset without needing devtools. If it EVER doesn't match what
        you expect after a hard reload, that's real signal of a caching
        problem, not a hunch. -->
-  <div id="versionLine">by ibrews &nbsp;·&nbsp; v0.0.7 built 2026-07-04 (6588b9d+)</div><br>
+  <div id="versionLine">by ibrews &nbsp;·&nbsp; v0.0.8 built 2026-07-04 (round 9)</div><br>
   A living neon city at night. Sling a web, swing between skyscrapers, and see how much
   trouble you can cause before the night's over.<br><br>
   <span id="initialsRow">callsign (optional, 3 letters): <input id="initialsInput" maxlength="3"
@@ -370,7 +370,16 @@ const KNOCK_SPEED = 6.0, KNOCK_RADIUS = 1.5;   // min player speed / range to kn
 // roll table, so one per block left most types barely appearing per city.
 const PICKUP_PER_BLOCK = 2, PICKUP_SCORE = 10, KNOCK_SCORE = 25;
 const COMBO_WINDOW = 1.6;   // seconds since the last knock that still counts as the same combo chain
-const JUMP_VEL_NORMAL = 12, JUMP_VEL_BOOSTED = 20, JUMP_BOOST_DURATION = 9;
+// 12->15 (Alex, VR: "still feels hard to get off the ground -- make the
+// initial jump bigger or a better double jump"). Chose bumping this one
+// shared constant over inventing new double-jump state: fireWeb() already
+// applies JUMP_VEL_NORMAL/BOOSTED as an upward push whenever a mid-air
+// web-fire fails to find an anchor (see its `boosted` branch) -- an
+// existing implicit "second jump" every fresh press already re-triggers.
+// Raising the base constant improves the ground jump AND that air-recovery
+// push AND the ground-to-swing assist's baseline together, in one place,
+// rather than duplicating a new tunable in three spots.
+const JUMP_VEL_NORMAL = 15, JUMP_VEL_BOOSTED = 20, JUMP_BOOST_DURATION = 9;
 const CLIMB_SPEED = 7.0;   // wall-crawl vertical speed while holding the web button against a building
 // SWING REEL (Alex: "forward... basically retract the web so you're pulled
 // directly to that spot" + "backward... let out more web and rappel down"
@@ -617,13 +626,16 @@ if (navigator.xr && navigator.xr.isSessionSupported) {
   navigator.xr.isSessionSupported('immersive-vr').then(supported => {
     if (supported) {
       const vrBtn = VRButton.createButton(renderer);
-      // Alex: "move the click to enter VR button up toward the top of the
-      // screen and make it a little bigger" -- VRButton.createButton()
-      // hardcodes `bottom`/inline styles on the element itself, which beat
-      // any CSS rule by specificity; overriding the same inline properties
-      // right after creation is the only way to actually move/resize it.
-      vrBtn.style.bottom = '';
-      vrBtn.style.top = '24px';
+      // Alex, round 1: "move it up toward the top and make it a little
+      // bigger" -- moving it all the way to the top felt wrong once seen
+      // ("put it back where it was but a little higher"). VRButton.
+      // createButton() hardcodes `bottom`/inline styles on the element
+      // itself, which beat any CSS rule by specificity; overriding the
+      // same inline properties right after creation is the only way to
+      // actually move/resize it. Back to the default BOTTOM anchor (three.
+      // js ships `bottom: 20px`), just nudged up from that, with the
+      // bigger size kept (no complaint about size, only position).
+      vrBtn.style.bottom = '64px';
       vrBtn.style.width = '160px';
       vrBtn.style.left = 'calc(50% - 80px)';
       vrBtn.style.padding = '16px 8px';
@@ -4316,10 +4328,12 @@ let xrWebHeld = false, xrLeftXPrev = false, xrLeftYPrev = false, xrRightBPrev = 
 // branch in stepXR); the double-tap only costs one brief walk-stutter.
 let xrLeftPinchPrev = false, xrLeftPinchLastStart = -1e9;
 const xrKeys = {};
-// Right-stick scheme (Alex, second VR playtest pass): X axis snap-turns in
-// fixed increments (the standard VR-comfort turn), Y axis smooth-turns
-// (yaw) continuously -- NEITHER axis touches pitch anymore; real head
-// tilt handles looking up/down in VR, a stick shouldn't fight it.
+// Right-stick scheme: see the ROUND 9 CALIBRATION ANCHOR comment further
+// down (right before the cameraMode==='third' branch) for the actual,
+// current, per-camera-mode mapping -- it has changed several times since
+// this constant was added and this comment used to describe an
+// intermediate, now-stale design; don't trust a scheme description that
+// isn't sitting directly next to the code it describes.
 const SNAP_TURN_ANGLE = Math.PI / 6, SNAP_TURN_THRESHOLD = 0.6;
 let xrSnapArmed = true;
 function stepXR(dt) {
@@ -4394,7 +4408,14 @@ function stepXR(dt) {
     // physical left/right lands in axes[3] -- the `ay` var). lookX carries
     // physical Y (up/down); lookY carries physical X (left/right, sign
     // unchanged from the last confirmed-correct value).
-    if (rightHand) { lookX = ax || 0; lookY = -ay || 0; }
+    // ROUND 9 (Alex, after the v0.0.7 hardware test): "right joystick x is
+    // inverted, right joystick y is inverted" -- a direct, doubly-confirmed
+    // observation that supersedes the round-8 anchor below. Both axes
+    // negated here, at the single derivation point, so every downstream
+    // consumer (yaw/pitch in third person, smooth-yaw/snap-turn in first
+    // person) inherits the fix without needing its own sign flip. Left
+    // stick (movement) untouched -- this report was right-stick only.
+    if (rightHand) { lookX = -ax || 0; lookY = ay || 0; }
     else { moveX = ax || 0; moveY = ay || 0; }   // 'left' or 'none' -- default to movement -- UNCHANGED, confirmed correct
   }
   if (leftX && !xrLeftXPrev) { xrLeftXPrev = true; openMenu(); session.end().catch(() => {}); }
@@ -4428,17 +4449,22 @@ function stepXR(dt) {
   // full-deflection thresholds tuned against a desktop gamepad's analog
   // curve may simply be harder to physically reach on a VR thumbstick).
   xrKeys.ShiftLeft = Math.hypot(moveX, moveY) > 0.72;
-  // RIGHT STICK -- CALIBRATION ANCHOR (do not "fix" from spec; read this):
-  // Alex confirmed on real hardware that FIRST PERSON as coded below is
-  // CORRECT: physical X (left/right) smooth-yaws, physical Y (up/down)
-  // snap-turns. Since first person drives smooth from `lookX` and snap
-  // from `lookY`, that observation pins the true identities: lookX IS
-  // physical X, lookY IS physical Y. (Earlier rounds' "hardware axes are
-  // swapped" compensations had double-crossed the labels -- the observed
-  // behavior is the only trustworthy ground truth here.) Third person had
-  // the two crossed as a result ("Y up should have nothing to do with X
-  // left but here we are") -- now: lookX (physical X) -> yaw, lookY
-  // (physical Y) -> pitch, matching every conventional camera stick.
+  // RIGHT STICK -- CALIBRATION ANCHOR, ROUND 9 (do not "fix" from spec;
+  // read this): round 8's anchor below this comment was Alex-confirmed
+  // correct on hardware at the time -- then, on the very next real-hardware
+  // pass (v0.0.7), Alex reported both axes inverted. Rather than re-derive
+  // from scratch again, the round-8 mapping identities (lookX = physical X,
+  // lookY = physical Y; first-person smooth-from-X/snap-from-Y, third-
+  // person yaw-from-X/pitch-from-Y) are being KEPT -- only the sign of both
+  // physical axes was flipped, at the single point they're read (see the
+  // `if (rightHand) { lookX = -ax ...; lookY = ay ...; }` line above). If
+  // this needs correcting AGAIN, flip the sign there, not the logic below;
+  // a "confirmed correct" anchor is only as good as the last hands-on
+  // report -- always supersede it explicitly like this, don't silently
+  // overwrite the trail of what was tried when.
+  // Mapping below UNCHANGED since round 8: lookX (physical X) -> smooth
+  // yaw in first person, yaw in third person; lookY (physical Y) -> snap-
+  // turn in first person, pitch in third person.
   if (cameraMode === 'third') {
     xrSnapArmed = true;   // stays armed while unused, so a mode-switch back to first-person doesn't inherit a stale disarm
     if (Math.abs(lookX) > GAMEPAD_DEADZONE) yaw -= lookX * 2.2 * dt;
