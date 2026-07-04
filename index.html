@@ -659,12 +659,18 @@ function updateXRArms() {
     // left arm (i=0) carries the session leaderboard, right arm (i=1) the
     // daily leaderboard -- see the ARM-TATTOO comment above vrWristPanel.
     const panel = i === 0 ? vrWristPanel.mesh : vrDailyPanel.mesh;
-    // Bug: arms/panels only ever checked `presenting`, never `cameraMode`,
-    // so they stayed visible in VR first-person even though the rest of the
-    // avatar (spidey.visible below) correctly hides there -- own-body arms
-    // floating with no torso. Hide them in first-person too, matching
-    // spidey's first/third-person rule.
-    if (!presenting || cameraMode === 'first') { arm.visible = false; panel.visible = false; continue; }
+    // CORRECTED (this gate was wrong): a prior fix here hid the arms in
+    // first-person to "match" spidey's hide rule, on the theory that a
+    // reported "body invisible + arms visible" complaint meant the player
+    // was actually stuck in first-person believing they were in third.
+    // That broke the arms' actual purpose -- they're the FIRST-PERSON
+    // substitute for the body (Alex, original VR playtest: wanted to see
+    // his own arms/hands in VR), and VR sessions default to first-person
+    // on sessionstart, so this made arms invisible almost always in
+    // practice ("I can't see any of my avatar body -- no arms or body at
+    // all"). Arms show whenever presenting, in EITHER camera mode; only
+    // the full body (spidey) hides in first-person.
+    if (!presenting) { arm.visible = false; panel.visible = false; continue; }
     xrGrips[i].getWorldPosition(xrArmHandWorld);
     xrArmShoulderWorld.copy(XR_SHOULDER_OFFSETS[i]);
     camera.localToWorld(xrArmShoulderWorld);
@@ -3742,6 +3748,30 @@ renderer.xr.addEventListener('sessionstart', () => {
   if (renderer.xr.setFoveation) renderer.xr.setFoveation(1);
 });
 renderer.xr.addEventListener('sessionend', () => { cameraMode = 'third'; });
+// Fat lines (LineMaterial: webLine, beamLine, one per remote player) size
+// themselves on-screen from a `resolution` uniform that was only EVER set
+// from innerWidth/innerHeight (the flat 2D window, via the 'resize'
+// listener above) -- never updated for WebXR, whose actual per-eye
+// framebuffer can be a very different resolution/aspect ratio than the
+// window (Vision Pro's eye buffers especially so). A stale/wrong
+// resolution makes the fat-line shader compute a wildly wrong on-screen
+// width -- likely the explanation for Alex's "big bright flash every time
+// I shoot a web... weird it doesn't happen on Quest": Quest's actual
+// buffer dimensions apparently happen to land close enough to the window
+// size that the miscalculation isn't visually dramatic there; AVP's
+// don't.
+function currentLineResolution() {
+  const gl = renderer.getContext();
+  return renderer.xr.isPresenting ? [gl.drawingBufferWidth, gl.drawingBufferHeight] : [innerWidth, innerHeight];
+}
+function syncLineResolutions() {
+  const [w, h] = currentLineResolution();
+  webLineMat.resolution.set(w, h);
+  beamLineMat.resolution.set(w, h);
+  for (const rp of remotePlayers.values()) rp.webLineMat.resolution.set(w, h);
+}
+renderer.xr.addEventListener('sessionstart', syncLineResolutions);
+renderer.xr.addEventListener('sessionend', syncLineResolutions);
 document.addEventListener('pointerlockerror', () => {
   document.getElementById('webstate').textContent = 'no pointer lock (embedded?) — mouse-look fallback on';
 });
@@ -3915,6 +3945,22 @@ function stepXR(dt) {
     const gp = src.gamepad;
     if (!gp) continue;
     const rightHand = src.handedness === 'right';
+    // Hand-tracking/pinch devices (Vision Pro Safari WebXR: no physical
+    // controllers, each pinching hand shows up as its OWN input source
+    // with targetRayMode 'transient-pointer' and a synthesized gamepad --
+    // button[0] fires on pinch, but there's no real thumbstick, so there
+    // was never a way to walk. Alex: "doesn't seem like there's a way to
+    // do the equivalent of joystick movement [on AVP]... left hand pinch
+    // = walk in the direction I'm looking". Left-hand pinch now walks
+    // forward instead of firing web; right-hand pinch keeps firing
+    // web/swing (that already worked and reads naturally). Real
+    // controllers (Quest etc.) report 'tracked-pointer', so this doesn't
+    // touch their existing either-trigger-fires-web behavior at all.
+    const isPinchDevice = src.targetRayMode === 'transient-pointer';
+    if (isPinchDevice && !rightHand) {
+      if (gp.buttons[0] && gp.buttons[0].pressed) moveY = -1;   // walk forward -- see xrKeys.KeyW below
+      continue;
+    }
     if (gp.buttons[0] && gp.buttons[0].pressed) held = true;   // either trigger fires web/jump
     // Right A (buttons[4] on the right controller) does the same thing as
     // the right trigger (Alex: "Make the Right A button do the same thing
@@ -4608,7 +4654,7 @@ function makeRemotePlayerMesh(color) {
   scene.add(body);
   const coatSegs = makeCoat();
   const webLineMat2 = new LineMaterial({ color, linewidth: 3, transparent: true, opacity: 0.95 });
-  webLineMat2.resolution.set(innerWidth, innerHeight);
+  webLineMat2.resolution.set(...currentLineResolution());   // correct even if this player joins mid-XR-session
   const webLineGeo2 = new LineGeometry();
   webLineGeo2.setPositions([0, 0, 0, 0, 0, 0]);
   const webLine2 = new Line2(webLineGeo2, webLineMat2);
@@ -5068,6 +5114,7 @@ window.__sw = { THREE, player, cars, parkedCars, pickups, colliders, EDGE, WORLD
                 get kbMouseWebHeld() { return kbMouseWebHeld; },
                 get gamepadWebHeld() { return gamepadWebHeld; },
                 get touchSprintHeld() { return touchSprintHeld; },
+                currentLineResolution, syncLineResolutions, webLineMat, beamLineMat,
                 sendAnalytics, get analyticsErrors() { return analyticsErrors; },
                 get analyticsOrbsSinceReport() { return analyticsOrbsSinceReport; },
                 get analyticsPlayStart() { return analyticsPlayStart; },
