@@ -97,6 +97,10 @@
   #score { position: fixed; right: 14px; top: 56px; color: #ffe27a; z-index: 10;
     font: 13px/1.5 ui-monospace, Menlo, monospace; text-shadow: 0 0 6px #a80;
     user-select: none; pointer-events: none; text-align: right; }
+  /* Orb category breakdown (item: "512 orbs -- sub breakdown into
+     categories") -- smaller/dimmer than the main score line so it reads as
+     a detail, not competing with it. */
+  #orbbreakdown { font-size: 10px; color: #c9a45a; }
   /* Return-to-menu button (Alex: "a button to return to the main menu
      without losing your progress -- change your name or look at the
      instructions again"). Top-center, out of the way of the left/right HUD
@@ -247,7 +251,7 @@
 <div id="warntext">LEAVING THE CITY &mdash; GET BACK</div>
 <div id="hud">swing: <b id="webstate">ready</b> · speed: <b id="speed">0</b></div>
 <div id="playercount">PLAYERS: <b id="playercounttotal">1</b><br>PLAYERS TODAY: <b id="playerstoday">1</b></div>
-<div id="score">score: <b id="scoretotal">0</b><br>cars knocked: <b id="knocked">0</b><br>orbs: <b id="orbs">0</b>/<b id="orbstotal">0</b></div>
+<div id="score">score: <b id="scoretotal">0</b><br>cars knocked: <b id="knocked">0</b><br>orbs: <b id="orbs">0</b>/<b id="orbstotal">0</b><br><span id="orbbreakdown"></span></div>
 <div id="powerups"></div>
 <div id="zombiewarn">ZOMBIES INBOUND</div>
 <div id="combotext"></div>
@@ -546,22 +550,19 @@ const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x060a18);
 scene.fog = new THREE.FogExp2(0x0a0f1e, 0.008);
 
-// Far plane cut from 900 to 280 (Alex: "cull the ones too far away... help
-// with VR framerate"). At fog density 0.008 (FogExp2), the fog factor is
-// already ~98% by ~250 units -- anything out there is visually
-// indistinguishable from the fog color regardless of what it actually is.
-// The city's diagonal (GRID_N=16 blocks) spans close to 500 units corner-
-// to-corner, so standing near one edge previously left geometry across
-// almost the WHOLE city still inside the frustum and eligible for
-// per-object culling checks even though none of it was visible past the
-// fog. Individual scene objects (cars, rooftop coins/crowns, streetlights,
-// remote players, building-name labels) each get their own bounding-sphere
-// frustum/distance test, so a tighter far plane lets Three.js actually
-// skip them once they're fog-invisible anyway. (The single city-wide
-// buildingMesh InstancedMesh doesn't benefit per-building from this --
-// splitting it into spatially-chunked instanced meshes would, but that's
-// a real city-gen restructure, not a one-line fix.)
-const camera = new THREE.PerspectiveCamera(70, innerWidth / innerHeight, 0.1, 280);
+// Far plane history: 900 originally, cut to 280 for VR framerate (cull
+// far-away geometry), which then read as a hard "edge box"/city-edge clip
+// -- fixed once by reverting VR specifically back to 900 while desktop
+// kept 280, but the boundary wall (sitting at WORLD_BOUND, ~195 units from
+// center -- up to the city's ~500-unit corner-to-corner diagonal away
+// depending on where the player stands) still clipped hard on DESKTOP,
+// which still had 280. Alex: "just turn off all clipping." Both platforms
+// now share 900 (comfortably past the city's full diagonal, so nothing in
+// the playable world can ever exceed it) -- no more per-platform far-plane
+// override. Fog (FogExp2, density 0.008, ~98% opaque by ~250 units) still
+// does ALL the actual visual distance falloff; the far plane is just a
+// backstop that should never actually engage in normal play.
+const camera = new THREE.PerspectiveCamera(70, innerWidth / innerHeight, 0.1, 900);
 // WebXR "dolly" pattern: the camera is a child of a movable rig, not moved
 // directly. Outside XR the rig just sits at identity (position/rotation
 // zeroed) so camera.position/camera.lookAt below behave EXACTLY as before
@@ -926,7 +927,11 @@ for (let i = 0; i < GRID_N; i++) for (let j = 0; j < GRID_N; j++) {
         cylSegs.push({ x: lx, y: y + sh / 2, z: lz, sx: wx, sy: sh, sz: wz, color });
         // Collider stays a box (AABB) even for a round building -- a slightly generous
         // square hitbox is the same approximation every other collider in this file uses.
-        colliders.push({ min: [lx - wx / 2, y, lz - wz / 2], max: [lx + wx / 2, y + sh, lz + wz / 2] });
+        // `cyl` (center + radius) rides along too so the wall-climb pose can sample the
+        // TRUE curved-surface tangent instead of the AABB's flat cardinal-direction face
+        // normal (Alex: "sampling the surface tangents so I stay perpendicular properly
+        // while winding my way up" a cylindrical tower) -- collision itself is unchanged.
+        colliders.push({ min: [lx - wx / 2, y, lz - wz / 2], max: [lx + wx / 2, y + sh, lz + wz / 2], cyl: { cx: lx, cz: lz, r: wx / 2 } });
         y += sh; wx *= uniform(0.82, 0.94); wz = wx;
       }
     } else {
@@ -970,7 +975,10 @@ for (let i = 0; i < GRID_N; i++) for (let j = 0; j < GRID_N; j++) {
   // density to be useful for wayfinding without labeling every single building (visual
   // clutter) or adding an unbounded number of label sprites at the 4x city scale.
   if (bestLot) {
-    buildingLabels.push({ x: bestLot.x, z: bestLot.z, y: bestLot.topY + 2.6, color: bestLot.color, text: genBuildingName() });
+    // Raised 2.6->6.5 (Alex: readable from below) -- sitting barely above
+    // the roofline itself was easy for the crown/antenna/coin props on the
+    // SAME roof to occlude when looking up at a steep angle from street level.
+    buildingLabels.push({ x: bestLot.x, z: bestLot.z, y: bestLot.topY + 6.5, color: bestLot.color, text: genBuildingName() });
   }
 }
 
@@ -1650,11 +1658,29 @@ function onEffectTriggered(name, isWorld) {
 // (pure relay architecture, see worker.js header), so this can't extend to
 // other players' pawns without a new networked message.
 const POWERUP_STACK_COLORS = [0xffe066, 0xff5566, 0xc98fff];
-const SUIT_POWERED_COLOR = 0xffe066;
+// CORRECTED: this used to overwrite the suit's base COLOR with a fixed
+// gold while powered up -- which is ALSO one of the 6 colors the server
+// can assign a player (see COLORS in worker.js), so if that happened to be
+// YOUR assigned color, activating a power-up produced literally zero
+// visible change (Alex: "are the power ups changing my color palette? I
+// can't tell"). It also fought the separate, explicit ask that identity
+// colors (Alex: "the web color should always stay as an identifier of
+// what you're doing") never get hijacked by a power-up. Fixed: the suit's
+// base color is now ALWAYS the player's own identity color, full stop --
+// power-ups instead layer a pulsing EMISSIVE glow on top (a different
+// material channel entirely, so it can never coincide with or override any
+// assignable player color).
+const SUIT_POWERED_GLOW = 0xffe066;
 function updatePowerupAppearance() {
   const stackCount = Object.values(activeEffects).filter(t => t > 0).length;
-  const normalSuitColor = myColor != null ? myColor : 0x12172c;
-  spidey.material.color.setHex(stackCount > 0 ? SUIT_POWERED_COLOR : normalSuitColor);
+  spidey.material.color.setHex(myColor != null ? myColor : 0x12172c);
+  if (stackCount > 0) {
+    spidey.material.emissive.setHex(SUIT_POWERED_GLOW);
+    spidey.material.emissiveIntensity = 0.4 + 0.35 * Math.sin(performance.now() * 0.006);
+  } else {
+    spidey.material.emissive.setHex(0x000000);
+    spidey.material.emissiveIntensity = 0;
+  }
   for (let i = 0; i < coatSegs.length; i++) {
     const seg = coatSegs[i];
     seg.segMat.color.setHex(i < stackCount ? POWERUP_STACK_COLORS[Math.min(i, POWERUP_STACK_COLORS.length - 1)] : coatMat.color.getHex());
@@ -1764,6 +1790,28 @@ for (let i = 0; i < GRID_N; i++) for (let j = 0; j < GRID_N; j++) {
   }
 }
 document.getElementById('orbstotal').textContent = pickups.length;
+// ORB CATEGORY BREAKDOWN (Alex: "512 orbs -- have a sub breakdown of them
+// into categories"). Three buckets: plain 'orb' pickups are pure points;
+// the ORB_EFFECTS-derived keys (giant/tiny/fly/... plus their 'All' world
+// variants) are power-ups; the rest (noir/slow/torusext/disco/shrinktag)
+// are one-off special mechanics, not really "power-ups" in the stacking
+// sense item 10 covers.
+function orbCategoryFor(type) {
+  if (type === 'orb') return 'points';
+  if (DUAL_KEYS.has(type) || DUAL_KEYS.has(type.endsWith('All') ? type.slice(0, -3) : type)) return 'powerup';
+  return 'special';
+}
+const orbCategoryTotals = { points: 0, powerup: 0, special: 0 };
+for (const pk of pickups) orbCategoryTotals[orbCategoryFor(pk.type)]++;
+const orbCategoryCollected = { points: 0, powerup: 0, special: 0 };
+const orbBreakdownEl = document.getElementById('orbbreakdown');
+function renderOrbBreakdown() {
+  orbBreakdownEl.textContent =
+    `pts ${orbCategoryCollected.points}/${orbCategoryTotals.points} · ` +
+    `pwr ${orbCategoryCollected.powerup}/${orbCategoryTotals.powerup} · ` +
+    `fx ${orbCategoryCollected.special}/${orbCategoryTotals.special}`;
+}
+renderOrbBreakdown();
 
 const TURNS = { 'NS,1': [[1, -1], Math.PI, 'EW', 1], 'NS,-1': [[-1, 1], 0, 'EW', -1],
                 'EW,1': [[-1, -1], Math.PI / 2, 'NS', -1], 'EW,-1': [[1, 1], -Math.PI / 2, 'NS', 1] };
@@ -1941,6 +1989,43 @@ function stepRain(center, t) {
     rainPos.set([x, y, z, x + 0.06, y + d.len, z + 0.02], i * 6);
   });
   rainGeo.attributes.position.needsUpdate = true;
+}
+
+// -------------------------------------------------------- FLIGHT WIND --
+// Same recycling-pool approach as the rain drops above (Alex: "use the
+// same way you do rain to create a look of wind coming out of a flying
+// character") -- each streak sits at a fixed random offset around the
+// player and loops backward along the travel direction via modulo,
+// instead of the rain drops' straight-down fall, so it reads as wind
+// rushing past a flying body.
+const WIND_COUNT = 140, WIND_RANGE = 16;
+const windGeo = new THREE.BufferGeometry();
+const windPos = new Float32Array(WIND_COUNT * 6);
+windGeo.setAttribute('position', new THREE.BufferAttribute(windPos, 3));
+const windStreaks = [];
+for (let i = 0; i < WIND_COUNT; i++) {
+  windStreaks.push({ ox: uniform(-2.2, 2.2), oy: uniform(-1.6, 1.6), oz: uniform(-2.2, 2.2),
+                     travel0: uniform(0, WIND_RANGE), len: uniform(0.5, 1.3) });
+}
+const windMat = new THREE.LineBasicMaterial({ color: 0xd8f0ff, transparent: true, opacity: 0 });
+const windLines = new THREE.LineSegments(windGeo, windMat);
+windLines.frustumCulled = false;
+scene.add(windLines);
+const windDirTmp = new THREE.Vector3();
+function stepWind(pos, vel, flying, t) {
+  windMat.opacity = flying ? 0.5 : 0;
+  if (!flying) return;
+  const speed = vel.length();
+  if (speed > 0.5) windDirTmp.copy(vel).normalize(); else windDirTmp.set(0, 0, 1);
+  const rate = 6 + speed;
+  windStreaks.forEach((d, i) => {
+    const travel = (d.travel0 + t * rate) % WIND_RANGE;
+    const bx = pos.x + d.ox, by = pos.y + d.oy, bz = pos.z + d.oz;
+    const px = bx - windDirTmp.x * travel, py = by - windDirTmp.y * travel, pz = bz - windDirTmp.z * travel;
+    const tx = px - windDirTmp.x * d.len, ty = py - windDirTmp.y * d.len, tz = pz - windDirTmp.z * d.len;
+    windPos.set([px, py, pz, tx, ty, tz], i * 6);
+  });
+  windGeo.attributes.position.needsUpdate = true;
 }
 
 // ------------------------------------------------------------------ AUDIO --
@@ -2302,31 +2387,51 @@ hypeBus.connect(audioCtx.destination);
 const HYPE_BPM = 132;
 const HYPE_BEAT = 60 / HYPE_BPM;
 const HYPE_SCALE = [110.00, 130.81, 146.83, 164.81, 196.00, 220.00];
-let hypeNext = 0, hypeStarted = false;
+// Repeating melodic hook (Alex: "rockin drums melodic DA DA DA DA DA
+// DADADADA!!! energy energy energy") -- scale-degree indices into
+// HYPE_SCALE, one per half-beat across an 8-step bar. Deterministic
+// (not randomized like the old arp) so it actually reads as a
+// recognizable riff instead of noodling.
+const HYPE_RIFF = [0, 0, 0, 0, 0, 2, 4, 5];
+let hypeNext = 0, hypeStarted = false, hypeStep = 0;
 function scheduleHype() {
   while (hypeNext < audioCtx.currentTime + 0.22) {
     const t = hypeNext;
+    const beatInBar = hypeStep % 8;
+    // KICK: every beat, punchier/tighter decay than before -- reads as a
+    // real rock kick, not a soft thud.
     {
       const src = audioCtx.createBufferSource(); src.buffer = noiseBuffer;
       const filt = audioCtx.createBiquadFilter(); filt.type = 'lowpass'; filt.frequency.value = 150;
       const g = audioCtx.createGain();
-      g.gain.setValueAtTime(0.5, t);
-      g.gain.exponentialRampToValueAtTime(0.001, t + HYPE_BEAT * 0.4);
+      g.gain.setValueAtTime(0.6, t);
+      g.gain.exponentialRampToValueAtTime(0.001, t + HYPE_BEAT * 0.32);
       src.connect(filt); filt.connect(g); g.connect(hypeBus);
-      src.start(t); src.stop(t + HYPE_BEAT * 0.4);
+      src.start(t); src.stop(t + HYPE_BEAT * 0.32);
     }
-    if (rng() < 0.85) {
-      const note = choice(HYPE_SCALE) * (rng() < 0.5 ? 2 : 1);
-      const o = audioCtx.createOscillator(); o.type = 'sawtooth'; o.frequency.value = note;
-      const filt = audioCtx.createBiquadFilter(); filt.type = 'lowpass'; filt.frequency.value = 2200;
+    // SNARE/BACKBEAT on beats 2 and 4 of the bar -- a kick alone doesn't
+    // read as "rockin drums," needs the actual backbeat under it.
+    if (beatInBar === 2 || beatInBar === 6) {
+      const src = audioCtx.createBufferSource(); src.buffer = noiseBuffer;
+      const filt = audioCtx.createBiquadFilter(); filt.type = 'highpass'; filt.frequency.value = 1800;
       const g = audioCtx.createGain();
-      g.gain.setValueAtTime(0.0001, t);
-      g.gain.exponentialRampToValueAtTime(0.13, t + 0.01);
-      g.gain.exponentialRampToValueAtTime(0.0001, t + HYPE_BEAT * 0.45);
-      o.connect(filt); filt.connect(g); g.connect(hypeBus);
-      o.start(t); o.stop(t + HYPE_BEAT * 0.45);
+      g.gain.setValueAtTime(0.32, t);
+      g.gain.exponentialRampToValueAtTime(0.001, t + HYPE_BEAT * 0.22);
+      src.connect(filt); filt.connect(g); g.connect(hypeBus);
+      src.start(t); src.stop(t + HYPE_BEAT * 0.22);
     }
+    // MELODIC HOOK: the HYPE_RIFF pattern above, every half-beat.
+    const note = HYPE_SCALE[HYPE_RIFF[beatInBar]] * 2;
+    const o = audioCtx.createOscillator(); o.type = 'sawtooth'; o.frequency.value = note;
+    const filt = audioCtx.createBiquadFilter(); filt.type = 'lowpass'; filt.frequency.value = 2600;
+    const g = audioCtx.createGain();
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(0.16, t + 0.01);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + HYPE_BEAT * 0.45);
+    o.connect(filt); filt.connect(g); g.connect(hypeBus);
+    o.start(t); o.stop(t + HYPE_BEAT * 0.45);
     hypeNext += HYPE_BEAT / 2;
+    hypeStep++;
   }
 }
 function startHype() {
@@ -2339,8 +2444,13 @@ function startHype() {
 let fallMusicPhase = 'hype';   // 'hype' while dropping -> 'settled' once landed/low
 function updateFallMusic(playerY, onGround) {
   if (fallMusicPhase !== 'hype') return;
-  hypeBus.gain.setTargetAtTime(0.45, audioCtx.currentTime, 0.4);
-  if (onGround || playerY < 45) {
+  hypeBus.gain.setTargetAtTime(0.6, audioCtx.currentTime, 0.4);
+  // Was ALSO crossfading to the pensive noir loop once below y=45, even
+  // still mid-air -- Alex: keep it "energy energy energy" through the
+  // WHOLE fall, only settle once actually landed on a horizontal surface
+  // (`onGround`, set on real ground/rooftop contact -- see stepPlayer),
+  // not from an altitude threshold alone.
+  if (onGround) {
     fallMusicPhase = 'settled';
     hypeBus.gain.setTargetAtTime(0, audioCtx.currentTime, 1.0);
     musicBus.gain.setTargetAtTime(0.4, audioCtx.currentTime, 1.6);
@@ -2604,6 +2714,7 @@ function stepPickups(t, p) {
     if (pk.ring) pk.ring.rotation.z = t * 2.4 + pk.phase;   // halo spins faster/independent of the orb
     if (p.pos.distanceTo(pk.mesh.position) < 1.6) {
       pk.got = true; pk.mesh.visible = false; collectedNow++;
+      orbCategoryCollected[orbCategoryFor(pk.type)]++;
       sfxPing(pk.mesh.position);
       pickupBurst(pk.mesh.position, pk.color);
       if (DUAL_KEYS.has(pk.type)) {
@@ -2627,7 +2738,11 @@ function stepPickups(t, p) {
       }
     }
   }
-  if (collectedNow) { orbsEl.textContent = (parseInt(orbsEl.textContent) || 0) + collectedNow; analyticsOrbsSinceReport += collectedNow; }
+  if (collectedNow) {
+    orbsEl.textContent = (parseInt(orbsEl.textContent) || 0) + collectedNow;
+    analyticsOrbsSinceReport += collectedNow;
+    renderOrbBreakdown();
+  }
 }
 
 // ---------------------------------------------------------------- ZOMBIES --
@@ -3075,6 +3190,8 @@ function resetGame() {
   goEl.style.display = 'none';
   knockedCount = 0; knockedEl.textContent = 0; orbsEl.textContent = 0;
   score = 0; scoreEl.textContent = 0;
+  orbCategoryCollected.points = orbCategoryCollected.powerup = orbCategoryCollected.special = 0;
+  renderOrbBreakdown();
   for (const pk of pickups) { pk.got = false; pk.mesh.visible = true; }
   for (const entry of parkedCars) if (entry.knocked) { entry.knocked = null; entry.obj.position.copy(entry.origPos); entry.obj.rotation.set(0, entry.origRot, 0); }
   for (const entry of cars) if (entry.knocked) { entry.knocked = null; }
@@ -3285,22 +3402,28 @@ function makeCoat() {
   }
   return segs;
 }
-function stepCoatFor(segs, pos, vel, activeCount) {
+// `scale` (giant/tiny/shrunk combined, same value the body itself uses --
+// see playerScale in stepPlayer) was missing entirely before -- the cape
+// never resized with the pawn (Alex: "in tiny mode the size of my cape
+// doesn't change"), since each segment's mesh scale was never touched here
+// at all.
+function stepCoatFor(segs, pos, vel, activeCount, scale = 1) {
   const n = activeCount || COAT_N;
   let prev = pos.clone().add(new THREE.Vector3(0, 0.55, 0));
   for (let i = 0; i < segs.length; i++) {
     const seg = segs[i];
     seg.mesh.visible = i < n;
     if (i >= n) continue;
-    const target = prev.clone().add(new THREE.Vector3(0, -0.33, 0)).addScaledVector(vel, -0.028);
+    const target = prev.clone().add(new THREE.Vector3(0, -0.33, 0)).addScaledVector(vel, -0.028 * scale);
     seg.pos.lerp(target, 0.4);
     seg.mesh.position.copy(seg.pos);
+    seg.mesh.scale.setScalar(scale);
     seg.mesh.lookAt(prev);
     prev = seg.pos;
   }
 }
 const coatSegs = makeCoat();
-function stepCoat(p) { stepCoatFor(coatSegs, p.pos, p.vel, coatLengthFor(playerKillCount)); }
+function stepCoat(p, scale) { stepCoatFor(coatSegs, p.pos, p.vel, coatLengthFor(playerKillCount), scale); }
 
 // ------------------------------------------------------ CANVAS TEXT PANELS --
 // Shared "render text into a 3D scene" primitive -- backs both the floating
@@ -3619,6 +3742,10 @@ function closeMenu() {
 }
 const menuBtnEl = document.getElementById('menubtn');
 menuBtnEl.addEventListener('click', e => { e.stopPropagation(); openMenu(); });
+// Alex: "'controls tap to expand' kicks us out of the menu" -- clicking the
+// <summary> bubbles up to startEl's own click handler below (enter/close),
+// same class of bug the menu button already had to guard against above.
+document.querySelector('.controlsDetails summary').addEventListener('click', e => e.stopPropagation());
 startEl.addEventListener('click', () => {
   if (!entered) { enterGame(); try { renderer.domElement.requestPointerLock(); } catch (e) { /* fallback look */ } return; }
   if (paused) closeMenu();
@@ -3724,13 +3851,6 @@ renderer.xr.addEventListener('sessionend', () => {
   camera.add(fpStick);
   fpStick.position.set(-0.26, -0.28, -0.55);
 });
-// Far plane 900->280 (see comment above camera's constructor) helped VR
-// framerate but Alex later reported it "looks awkward" in VR -- a hard
-// clip at world edges reads as worse than the framerate problem it fixed.
-// Revert to the original 900 specifically while presenting (desktop never
-// had this complaint, so it keeps the tighter 280 default).
-renderer.xr.addEventListener('sessionstart', () => { camera.far = 900; camera.updateProjectionMatrix(); });
-renderer.xr.addEventListener('sessionend', () => { camera.far = 280; camera.updateProjectionMatrix(); });
 // VR PERFORMANCE (Alex: "performance goes up and down, maybe based on how
 // much of the city I see"). The city's buildings/windows already render as
 // a handful of InstancedMesh draw calls (one draw call regardless of view
@@ -4047,6 +4167,7 @@ function stepXR(dt) {
 const GRAV = 26, RUN = 11, AIR_CTRL = 11;
 let reticleClock = 0;
 const wallClimbFwd = new THREE.Vector3(), wallClimbSide = new THREE.Vector3(), wallClimbMatrix = new THREE.Matrix4();
+const wallClimbRadial = new THREE.Vector3();
 function stepPlayer(dt) {
   const p = player;
   if (gameOver) return;   // frozen behind the game-over overlay until Try Again
@@ -4087,7 +4208,14 @@ function stepPlayer(dt) {
   // constraint math ran on the very same tick and clamped it). Checking
   // yesterday's state first guarantees the jump gets at least one full
   // frame to itself before the web mechanic can take over.
-  if (pendingAirWeb) {
+  // FLIGHT MODE (Alex: "in flight mode no climbing buildings and no web").
+  // Dropping the whole web/jump block below (and never letting wallCrawling
+  // arm, see its declaration further down) is simpler and safer than
+  // threading a flying check through every branch inside it individually.
+  // Any in-progress swing is released the instant flight starts.
+  const flying = myEffectActive('fly');
+  if (flying) p.anchor = null;
+  if (!flying && pendingAirWeb) {
     if (!webHeld) pendingAirWeb = false;   // let go before it fired -- no thwip
     else if (!p.onGround && !p.anchor && !p.onWall) {
       pendingAirWeb = false;
@@ -4116,7 +4244,7 @@ function stepPlayer(dt) {
       }
     }
   }
-  if (pendingSwingAssist) {
+  if (!flying && pendingSwingAssist) {
     if (!webHeld || p.onGround || p.anchor || p.onWall) {
       pendingSwingAssist = false;
     } else {
@@ -4133,7 +4261,7 @@ function stepPlayer(dt) {
   // airborne press: skip the jump (can't jump on nothing) and go straight
   // to the web mechanic, same as before.
   const webPressed = webHeld && !prevWebHeld;
-  if (webPressed && !p.anchor) {
+  if (!flying && webPressed && !p.anchor) {
     if (p.onGround) {
       p.vel.y = (jumpBoostTimer > 0 ? JUMP_VEL_BOOSTED : JUMP_VEL_NORMAL) * (myEffectActive('superjump') ? SUPERJUMP_MULT : 1);
       p.onGround = false;
@@ -4243,9 +4371,10 @@ function stepPlayer(dt) {
   // reads as a constant climb speed, not a decaying one. Letting go of the
   // button (or losing contact) just stops the override and you fall/walk
   // off normally -- no separate "let go of wall" logic needed.
-  const wallCrawling = webHeld && !p.anchor;
+  const wallCrawling = webHeld && !p.anchor && !flying;
   let buildingHit = false;
   let wallFaceAxis = null;   // which wall face we're pressed against this frame, for pawn rotation
+  let wallCollider = null;   // the actual collider hit (carries .cyl for round buildings) -- see the pose code below
   // GHOST power-up: skip building collision entirely -- "pass through
   // buildings/cars/players, no collision."
   if (!ghosting) for (const c of colliders) {
@@ -4271,6 +4400,7 @@ function stepPlayer(dt) {
       p.onWall = true;
       p.vel.y = CLIMB_SPEED;
       wallFaceAxis = axis;
+      wallCollider = c;
       // Ease onto the roof as the climb nears the top, so cresting a
       // building doesn't need a release-and-re-press of the web button.
       // Without this, the player straddles the wall/roof corner where the
@@ -4344,7 +4474,18 @@ function stepPlayer(dt) {
   spidey.position.copy(p.pos);
   spidey.scale.setScalar(playerScale);
   const sp = Math.hypot(p.vel.x, p.vel.z);
-  if (p.onWall && wallFaceAxis !== null) {
+  if (flying) {
+    // FLIGHT POSE (Alex: "the avatar should become horizontal and
+    // basically be perpendicular from the camera"). Superman-style: a full
+    // 90-degree forward tip instead of the small speed-scaled lean below,
+    // facing the same direction actually being flown (aimDir(), matching
+    // the flight movement code above -- not the velocity vector, since
+    // flight can strafe/look independent of travel direction).
+    const fwd = aimDir();
+    spidey.rotation.z = 0;
+    spidey.rotation.y = Math.atan2(fwd.x, fwd.z);
+    spidey.rotation.x = Math.PI / 2;
+  } else if (p.onWall && wallFaceAxis !== null) {
     // PERPENDICULAR WALL-CLIMB POSE (Alex: "climbing a building should
     // make the pawn perpendicular to the building, so it's like we're
     // running up the building just like it's the road"). A flat rotation.x
@@ -4359,7 +4500,17 @@ function stepPlayer(dt) {
     // horizontal running direction) now points along world +Y, the
     // climbing direction -- exactly the same relationship a runner has to
     // the actual ground, just with the wall's normal standing in for "up."
-    const wallUp = WALL_OUTWARD_NORMAL[wallFaceAxis];
+    // CYLINDRICAL TOWERS (Alex: "if I'm climbing a cylindrical tower, we
+    // need to be sampling the surface tangents so I stay perpendicular
+    // properly while winding my way up"). Collision itself stays AABB (see
+    // the collider loop above), but the POSE now samples the true radial
+    // outward direction from the tower's actual center axis (carried on
+    // the collider as `.cyl`) whenever the wall being climbed is round --
+    // continuously varying as the player winds around the curve, instead
+    // of snapping to one of the AABB's 4 fixed cardinal-direction faces.
+    const wallUp = (wallCollider && wallCollider.cyl)
+      ? wallClimbRadial.set(p.pos.x - wallCollider.cyl.cx, 0, p.pos.z - wallCollider.cyl.cz).normalize()
+      : WALL_OUTWARD_NORMAL[wallFaceAxis];
     const climbFwd = wallClimbFwd.set(0, 1, 0);
     const wallSide = wallClimbSide.crossVectors(wallUp, climbFwd);
     wallClimbMatrix.makeBasis(wallSide, wallUp, climbFwd);
@@ -4378,7 +4529,7 @@ function stepPlayer(dt) {
     if (sp > 0.5) spidey.rotation.y = Math.atan2(p.vel.x, p.vel.z);
     spidey.rotation.x = THREE.MathUtils.clamp(sp * 0.02 * (p.anchor ? 1.6 : 0.4), 0, 0.9);
   }
-  stepCoat(p);
+  stepCoat(p, playerScale);
   stepPowerupFX(dt, p, playerScale);
 
   // camera -- in an XR session this steers cameraRig (the camera's parent),
@@ -4830,6 +4981,10 @@ const predictedRemotePos = new THREE.Vector3();   // scratch, reused every rp ev
 const REMOTE_EXTRAPOLATION_CAP = 0.25;   // seconds -- cap dead-reckoning so a stalled/dropped connection doesn't send the ghost running off
 function stepMultiplayer(dt, p) {
   if (!MULTIPLAYER_URL) return;
+  // GIANT/TINY world-effect scale, computed up front so the coat-step loop
+  // below can apply it too (a remote player's cape never resized before --
+  // same bug as the local player's, see stepCoatFor's `scale` param).
+  const remoteScale = (worldEffects.giant > 0 ? GIANT_SCALE : 1) * (worldEffects.tiny > 0 ? TINY_SCALE : 1);
   for (const id of playerKnockCooldowns.keys()) {
     const t = playerKnockCooldowns.get(id) - dt;
     if (t <= 0) playerKnockCooldowns.delete(id); else playerKnockCooldowns.set(id, t);
@@ -4863,7 +5018,7 @@ function stepMultiplayer(dt, p) {
     rp.body.position.lerp(predictedRemotePos, Math.min(1, dt * 16));
     rp.body.rotation.y = rp.targetYaw;
     rp.vel.copy(rp.body.position).sub(rp.prevPos).divideScalar(Math.max(dt, 1e-4));
-    stepCoatFor(rp.coatSegs, rp.body.position, rp.vel, coatLengthFor(rp.kills));
+    stepCoatFor(rp.coatSegs, rp.body.position, rp.vel, coatLengthFor(rp.kills), remoteScale);
     if (rp.anchorPos) {
       rp.webLine.visible = true;
       rp.webLineGeo.setPositions([rp.body.position.x, rp.body.position.y, rp.body.position.z, rp.anchorPos.x, rp.anchorPos.y, rp.anchorPos.z]);
@@ -4968,7 +5123,6 @@ function stepMultiplayer(dt, p) {
   }
   // GIANT/TINY/GHOST/CONFETTI rendering for OTHER players -- world effects
   // only (a solo buff never touches how anyone else is drawn).
-  const remoteScale = (worldEffects.giant > 0 ? GIANT_SCALE : 1) * (worldEffects.tiny > 0 ? TINY_SCALE : 1);
   for (const rp of remotePlayers.values()) rp.body.scale.setScalar(remoteScale);
   mpSendTimer -= dt;
   if (mpSendTimer <= 0 && mpSocket && mpSocket.readyState === WebSocket.OPEN) {
@@ -5016,6 +5170,7 @@ function loop(now) {
   }
   updatePowerupHud();
   updatePowerupAppearance();
+  updatePowerupMusicReactivity();   // was defined but never wired up -- music never actually reacted to power-ups until now
 
   // Signal phase is a pure function of `t % period` -- so swapping in real
   // wall-clock time here (instead of worldT, which started at 0 on each
@@ -5047,6 +5202,7 @@ function loop(now) {
   stepSparkles(dt);
   stepWeather(worldDt);
   stepRain(player.pos, simT);
+  stepWind(player.pos, player.vel, myEffectActive('fly'), simT);
   stepRooftopCoins(simT, player);
   stepSpotlights(dt);
   stepScorePopups(dt);
@@ -5115,6 +5271,8 @@ window.__sw = { THREE, player, cars, parkedCars, pickups, colliders, EDGE, WORLD
                 get gamepadWebHeld() { return gamepadWebHeld; },
                 get touchSprintHeld() { return touchSprintHeld; },
                 currentLineResolution, syncLineResolutions, webLineMat, beamLineMat,
+                get powerupMusicBoost() { return powerupMusicBoost; }, updatePowerupMusicReactivity,
+                stepWind, windMat, orbCategoryTotals, orbCategoryCollected,
                 sendAnalytics, get analyticsErrors() { return analyticsErrors; },
                 get analyticsOrbsSinceReport() { return analyticsOrbsSinceReport; },
                 get analyticsPlayStart() { return analyticsPlayStart; },
