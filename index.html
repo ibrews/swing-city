@@ -695,12 +695,20 @@ const XR_SHOULDER_OFFSETS = [
 ];
 const xrArmHandWorld = new THREE.Vector3(), xrArmShoulderWorld = new THREE.Vector3(), xrArmMid = new THREE.Vector3();
 const xrArmSideAxis = new THREE.Vector3(), xrArmForwardAxis = new THREE.Vector3();
-// Alex: the arm panels were "bisecting the arms facing toward the torso"
-// -- copying the arm's own quaternion directly pointed the panel's face
-// along the arm's length (toward the torso/shoulder), edge-on to the
-// player instead of readable. Pitching 90 degrees around the panel's own
-// local X turns that same face to point outward/up instead.
-const XR_PANEL_PITCH = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), Math.PI / 2);
+// Alex, round 2 ("now they're INSIDE the arms and the text reads
+// BACKWARDS"): the previous +90deg X pitch left the plane's face normal
+// pointing at arm-local -Y (DOWN into the forearm) -- what showed through
+// was the panel's DoubleSide back face, i.e. mirrored text, half-sunk in
+// the arm mesh. Now composed as R_x(-90deg) * R_z(180deg): the -90 pitch
+// flips the face normal to arm-local +Y (up out of the arm's top
+// surface), and the 180 roll keeps the text upright after that flip
+// (text-top lands toward the HAND, which is "away from you" when you
+// look down your own outstretched arm -- normal reading orientation).
+// Right-handedness check: text-right = text-up x normal = Z x Y = -X,
+// which matches where the roll puts it, so the front face is NOT
+// mirrored.
+const XR_PANEL_PITCH = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), -Math.PI / 2)
+  .multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), Math.PI));
 function updateXRArms() {
   const presenting = renderer.xr.isPresenting;
   // Re-parent the aim stick to whichever grip is CURRENTLY the left hand
@@ -771,11 +779,15 @@ function updateXRArms() {
     // sitting at the arm's midpoint -- Alex: "go further toward the hands
     // along the arm for easier readability."
     panel.quaternion.copy(arm.quaternion).multiply(XR_PANEL_PITCH);
-    xrArmSideAxis.set(1, 0, 0).applyQuaternion(arm.quaternion);
+    // Offset UP off the arm's top surface (arm-local +Y), not sideways --
+    // the old sideways (local X) offset is what left the panel embedded
+    // in / beside the arm (Alex, round 2: "inside the arms"). Slightly
+    // more clearance than half the arm thickness so it floats just off
+    // the surface like a screen strapped to the forearm.
+    xrArmSideAxis.set(0, 1, 0).applyQuaternion(arm.quaternion);
     xrArmForwardAxis.set(0, 0, 1).applyQuaternion(arm.quaternion);
-    const outwardSign = i === 0 ? -1 : 1;
     panel.position.copy(arm.position)
-      .addScaledVector(xrArmSideAxis, outwardSign * (XR_ARM_THICKNESS * 0.55 + 0.002))
+      .addScaledVector(xrArmSideAxis, XR_ARM_THICKNESS * 0.55 + 0.01)
       .addScaledVector(xrArmForwardAxis, length * 0.28);
     panel.visible = true;
   }
@@ -1165,7 +1177,26 @@ function instancedMeshes(list, geometry, material, glow = 0) {
   return m;
 }
 const instancedBoxes = (list, material, glow = 0) => instancedMeshes(list, boxGeo, material, glow);
-const buildingMesh = instancedBoxes(segs, windowMat);
+// SPATIALLY CHUNKED building instancing (perf, flagged in the far-plane
+// round): one city-wide InstancedMesh has a bounding sphere covering the
+// whole map, so three.js frustum culling could never drop ANY of it --
+// every window-shader instance drew every frame no matter where you
+// looked. Split into a CHUNKS_N x CHUNKS_N grid of independent
+// InstancedMeshes; r170 frustum-culls each against its own instance-aware
+// boundingSphere (computed below), so looking down a street culls the
+// blocks behind you. Raycasts against buildings now go through
+// buildingChunkMeshes (see findAnchor / the label placer).
+const CHUNKS_N = 4;
+const buildingChunkMeshes = (() => {
+  const buckets = Array.from({ length: CHUNKS_N * CHUNKS_N }, () => []);
+  const chunkIdx = v => Math.min(CHUNKS_N - 1, Math.max(0, Math.floor((v + EDGE) / (2 * EDGE / CHUNKS_N))));   // city spans +/-EDGE (see blockCenter)
+  for (const b of segs) buckets[chunkIdx(b.x) * CHUNKS_N + chunkIdx(b.z)].push(b);
+  return buckets.filter(list => list.length).map(list => {
+    const m = instancedBoxes(list, windowMat);
+    m.computeBoundingSphere();   // instance-aware -- REQUIRED, else culling uses the unit box geometry's sphere
+    return m;
+  });
+})();
 const cylBuildingMesh = cylSegs.length ? instancedMeshes(cylSegs, cylGeo, windowMat) : null;
 
 // crowns + antennas: raw emissive (unlit basic material, vertex-colored)
@@ -1389,6 +1420,54 @@ const wallMat = new THREE.ShaderMaterial({
   mkWall(-WORLD_BOUND, 0, Math.PI / 2, wallSpan);
   mkWall(0, WORLD_BOUND, 0, wallSpan);
   mkWall(0, -WORLD_BOUND, 0, wallSpan);
+}
+
+// SUN/MOON (Alex: "a celestial body up in the sky that moves across it
+// over time and cycles the same color scheme as the boundary wall").
+// One arc across the sky per WALL_CYCLE_SECONDS -- the same uTime the
+// wall shader eats -- so the body's tint and the horizon's tint drift
+// through blue/yellow/green/orange/red/pink together by construction,
+// not by two clocks that happen to agree. celestialPalette is a direct
+// JS port of the wall shader's 6-stop `palette()` cascade (keep them in
+// sync if the wall's stops ever change). fog:false on both materials --
+// at ~550 units out, scene fog would otherwise swallow it entirely.
+const CELESTIAL_STOPS = [
+  [0.25, 0.45, 0.95], [0.95, 0.85, 0.35], [0.35, 0.85, 0.55],
+  [0.95, 0.55, 0.20], [0.90, 0.20, 0.25], [0.95, 0.45, 0.75],
+];
+function celestialPalette(t, out) {
+  t = (t - Math.floor(t)) * 6;
+  const c = CELESTIAL_STOPS;
+  let r = c[0][0], g = c[0][1], b = c[0][2];
+  for (let i = 0; i < 6; i++) {
+    const k = Math.min(Math.max(t - i, 0), 1), n = c[(i + 1) % 6];
+    r += (n[0] - r) * k; g += (n[1] - g) * k; b += (n[2] - b) * k;
+  }
+  return out.setRGB(r, g, b);
+}
+const celestialMat = new THREE.MeshBasicMaterial({ fog: false });
+const celestialGlowMat = new THREE.MeshBasicMaterial({
+  fog: false, transparent: true, opacity: 0.28,
+  blending: THREE.AdditiveBlending, depthWrite: false,
+});
+const celestialBody = new THREE.Mesh(new THREE.SphereGeometry(26, 20, 14), celestialMat);
+const celestialGlow = new THREE.Mesh(new THREE.SphereGeometry(44, 20, 14), celestialGlowMat);
+celestialBody.add(celestialGlow);
+scene.add(celestialBody);
+const CELESTIAL_R = 550, CELESTIAL_TILT = 0.5;   // orbit radius (inside far=900) + plane tilt so it doesn't ride a wall edge
+function stepCelestial(cycleT) {
+  // Half-turn per cycle: rises at one horizon, sets at the other, then
+  // wraps back to a fresh rise -- like a time-lapse day. Height peaks at
+  // ~310, safely under the 340-tall boundary walls but well over the
+  // tallest spires.
+  const a = (cycleT - Math.floor(cycleT)) * Math.PI;
+  celestialBody.position.set(
+    Math.cos(a) * CELESTIAL_R * Math.cos(CELESTIAL_TILT),
+    20 + Math.sin(a) * 290,
+    Math.cos(a) * CELESTIAL_R * Math.sin(CELESTIAL_TILT) - 120
+  );
+  celestialPalette(cycleT, celestialMat.color);
+  celestialGlowMat.color.copy(celestialMat.color);
 }
 
 const roadMat = new THREE.MeshStandardMaterial({ color: 0x0a0a0d, roughness: 0.85 });
@@ -2398,8 +2477,29 @@ let musicNext = 0, musicStep = 0, musicStarted = false;
 // side) -- read by scheduleMusic() above to decide whether to brighten the
 // loop. Updated once per frame from the main loop.
 let powerupMusicBoost = 0;
+// DISTINCT MUSIC PER POWER-UP FAMILY (Alex: "special music for every
+// power-up mode"). Disco already has a whole separate beat
+// (scheduleDiscoBeat below); giving each of the other ~19 effects its own
+// full track would be 19 more schedulers, so effects are grouped into
+// three musical FAMILIES that layer extra voices onto the base noir loop
+// inside scheduleMusic: movement (driving eighth-note bass + hats),
+// combat (backbeat snare + low staccato stabs), chaos (high skittering
+// arp). Family detection is priority-ordered combat > movement > chaos so
+// stacked effects pick the most aggressive flavor rather than mushing.
+const MUSIC_FAMILY = {
+  fly: 'movement', speed: 'movement', superjump: 'movement', lowg: 'movement',
+  giant: 'movement', tiny: 'movement',
+  energyblast: 'combat', pong: 'combat', bomber: 'combat', fire: 'combat',
+  invincible: 'combat', ghost: 'combat', shrinktag: 'combat',
+  webanywhere: 'chaos', magnet: 'chaos', confetti: 'chaos',
+  zombiesummon: 'chaos', slow: 'chaos',
+};
+let powerupMusicFamily = null;
 function updatePowerupMusicReactivity() {
   powerupMusicBoost = Object.values(activeEffects).filter(t => t > 0).length;
+  const fams = new Set();
+  for (const [name, t] of Object.entries(activeEffects)) if (t > 0 && MUSIC_FAMILY[name]) fams.add(MUSIC_FAMILY[name]);
+  powerupMusicFamily = fams.has('combat') ? 'combat' : fams.has('movement') ? 'movement' : fams.has('chaos') ? 'chaos' : null;
 }
 function scheduleMusic() {
   // Reactive brightening while a power-up is active (Alex: "make the music
@@ -2432,6 +2532,66 @@ function scheduleMusic() {
       g.gain.exponentialRampToValueAtTime(0.0001, t + BEAT * 0.55);
       o.connect(filt); filt.connect(g); g.connect(musicBus);
       o.start(t); o.stop(t + BEAT * 0.55);
+    }
+    // Family layers (see MUSIC_FAMILY above) -- each family adds its own
+    // voice on top of the base loop while its effects are active, so
+    // "which kind of power-up is running" is audible, not just "brighter."
+    if (powerupMusicFamily === 'movement') {
+      // Driving eighth-note bass pulse + offbeat hats: makes the loop feel
+      // twice the tempo without actually changing the scheduler grid.
+      const o = audioCtx.createOscillator(); o.type = 'sawtooth';
+      o.frequency.value = NOIR_SCALE[musicStep % 2 === 0 ? 0 : 4];
+      const filt = audioCtx.createBiquadFilter(); filt.type = 'lowpass'; filt.frequency.value = 700;
+      const g = audioCtx.createGain();
+      g.gain.setValueAtTime(0.0001, t);
+      g.gain.exponentialRampToValueAtTime(0.14, t + 0.015);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + BEAT * 0.4);
+      o.connect(filt); filt.connect(g); g.connect(musicBus);
+      o.start(t); o.stop(t + BEAT * 0.4);
+      if (musicStep % 2 === 1) {
+        const hat = audioCtx.createBufferSource(); hat.buffer = noiseBuffer;
+        const hf = audioCtx.createBiquadFilter(); hf.type = 'highpass'; hf.frequency.value = 7000;
+        const hg = audioCtx.createGain();
+        hg.gain.setValueAtTime(0.07, t);
+        hg.gain.exponentialRampToValueAtTime(0.001, t + 0.04);
+        hat.connect(hf); hf.connect(hg); hg.connect(musicBus);
+        hat.start(t); hat.stop(t + 0.05);
+      }
+    } else if (powerupMusicFamily === 'combat') {
+      // Backbeat snare + a low minor-second stab every bar: tense,
+      // percussive, unmistakably "fight music" against the noir base.
+      if (musicStep % 4 === 2) {
+        const sn = audioCtx.createBufferSource(); sn.buffer = noiseBuffer;
+        const sf = audioCtx.createBiquadFilter(); sf.type = 'bandpass'; sf.frequency.value = 1900;
+        const sg = audioCtx.createGain();
+        sg.gain.setValueAtTime(0.16, t);
+        sg.gain.exponentialRampToValueAtTime(0.001, t + 0.11);
+        sn.connect(sf); sf.connect(sg); sg.connect(musicBus);
+        sn.start(t); sn.stop(t + 0.12);
+      }
+      if (musicStep % 8 === 0) {
+        for (const f of [NOIR_SCALE[0], NOIR_SCALE[1]]) {   // root + b2 together = the stab
+          const o = audioCtx.createOscillator(); o.type = 'square'; o.frequency.value = f;
+          const filt = audioCtx.createBiquadFilter(); filt.type = 'lowpass'; filt.frequency.value = 900;
+          const g = audioCtx.createGain();
+          g.gain.setValueAtTime(0.0001, t);
+          g.gain.exponentialRampToValueAtTime(0.10, t + 0.01);
+          g.gain.exponentialRampToValueAtTime(0.0001, t + BEAT * 0.6);
+          o.connect(filt); filt.connect(g); g.connect(musicBus);
+          o.start(t); o.stop(t + BEAT * 0.6);
+        }
+      }
+    } else if (powerupMusicFamily === 'chaos') {
+      // High skittering arp two octaves up, random note each half-beat:
+      // playful/unhinged, reads as "something weird is active."
+      const note = choice(NOIR_SCALE) * 4;
+      const o = audioCtx.createOscillator(); o.type = 'triangle'; o.frequency.value = note;
+      const g = audioCtx.createGain();
+      g.gain.setValueAtTime(0.0001, t);
+      g.gain.exponentialRampToValueAtTime(0.06, t + 0.01);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + BEAT * 0.3);
+      o.connect(g); g.connect(musicBus);
+      o.start(t); o.stop(t + BEAT * 0.3);
     }
     musicNext += BEAT / 2;
     musicStep++;
@@ -2956,7 +3116,7 @@ function aimDir() {
 // ENERGY BLAST: auto-fires forward every ~0.6s while active (no new input
 // binding introduced -- the manifest didn't specify a trigger key, so this
 // reuses the existing "jousting stick" idea as a passive turret instead).
-// Raycasts against buildingMesh first (blocked by buildings) then checks
+// Raycasts against the building chunk meshes first (blocked by buildings) then checks
 // remote players along the same ray, whichever is closer wins.
 function stepEnergyBlast(dt, p) {
   if (!myEffectActive('energyblast')) { beamLineMat.opacity = Math.max(0, beamLineMat.opacity - dt * 3); return; }
@@ -2966,7 +3126,7 @@ function stepEnergyBlast(dt, p) {
     const dir = aimDir();
     raycaster.set(p.pos, dir);
     raycaster.far = ENERGY_BEAM_RANGE;
-    const hit = raycaster.intersectObject(buildingMesh, false)[0];
+    const hit = raycaster.intersectObjects(buildingChunkMeshes, false)[0];   // chunked -- see buildingChunkMeshes; result stays distance-sorted
     let range = hit ? hit.distance : ENERGY_BEAM_RANGE;
     for (const [id, rp] of remotePlayers) {
       const toRp = rp.body.position.clone().sub(p.pos);
@@ -3611,7 +3771,7 @@ function findAnchor() {
     const dir = fwd.clone().addScaledVector(up, u).addScaledVector(right, r).normalize();
     raycaster.set(player.pos, dir);
     raycaster.far = 80;
-    const hit = raycaster.intersectObject(buildingMesh, false)[0];
+    const hit = raycaster.intersectObjects(buildingChunkMeshes, false)[0];   // chunked -- see buildingChunkMeshes
     if (hit && hit.point.y > player.pos.y + 1.5 && (!best || hit.point.y > best.y)) {
       best = hit.point.clone();
     }
@@ -4116,6 +4276,11 @@ function stepTouch(dt) {
 // separate "xr look" primitive to combine, same as how the desktop
 // gamepad's right stick works). Either trigger fires the web/jump action.
 let xrWebHeld = false, xrLeftXPrev = false, xrLeftYPrev = false, xrRightBPrev = false, xrLeftStickClickPrev = false;
+// Vision Pro first/third toggle (pinch-only devices have no B-button
+// equivalent): DOUBLE-pinch the LEFT hand -- two pinch starts within
+// 400ms. A single held pinch still just walks (see the transient-pointer
+// branch in stepXR); the double-tap only costs one brief walk-stutter.
+let xrLeftPinchPrev = false, xrLeftPinchLastStart = -1e9;
 const xrKeys = {};
 // Right-stick scheme (Alex, second VR playtest pass): X axis snap-turns in
 // fixed increments (the standard VR-comfort turn), Y axis smooth-turns
@@ -4131,7 +4296,7 @@ function stepXR(dt) {
     return;
   }
   let held = false, moveX = 0, moveY = 0, lookX = 0, lookY = 0;
-  let leftX = false, leftY = false, rightB = false, leftStickClick = false;
+  let leftX = false, leftY = false, rightB = false, leftStickClick = false, leftPinchNow = false;
   for (const src of session.inputSources) {
     const gp = src.gamepad;
     if (!gp) continue;
@@ -4149,7 +4314,7 @@ function stepXR(dt) {
     // touch their existing either-trigger-fires-web behavior at all.
     const isPinchDevice = src.targetRayMode === 'transient-pointer';
     if (isPinchDevice && !rightHand) {
-      if (gp.buttons[0] && gp.buttons[0].pressed) moveY = -1;   // walk forward -- see xrKeys.KeyW below
+      if (gp.buttons[0] && gp.buttons[0].pressed) { moveY = -1; leftPinchNow = true; }   // walk forward -- see xrKeys.KeyW below
       continue;
     }
     if (gp.buttons[0] && gp.buttons[0].pressed) held = true;   // either trigger fires web/jump
@@ -4206,6 +4371,20 @@ function stepXR(dt) {
   else if (!rightB) xrRightBPrev = false;
   if (leftStickClick && !xrLeftStickClickPrev) { xrLeftStickClickPrev = true; toggleHud(); }
   else if (!leftStickClick) xrLeftStickClickPrev = false;
+  // DOUBLE-PINCH first/third toggle for pinch-only devices (Vision Pro:
+  // no B-button equivalent exists, so there was NO way to change camera
+  // mode there at all). Edge-detected on a frame-local flag, NOT per-
+  // source state: transient-pointer input sources only EXIST while the
+  // pinch is held (they vanish from session.inputSources on release), so
+  // any prev-state stored on the source itself would never reset. Two
+  // pinch STARTS within 400ms = toggle; a single held pinch still just
+  // walks, the double-tap only costs a brief walk stutter.
+  if (leftPinchNow && !xrLeftPinchPrev) {
+    const nowMs = performance.now();
+    if (nowMs - xrLeftPinchLastStart < 400) cameraMode = cameraMode === 'first' ? 'third' : 'first';
+    xrLeftPinchLastStart = nowMs;
+  }
+  xrLeftPinchPrev = leftPinchNow;
   xrWebHeld = held;
   xrKeys.KeyW = moveY < -GAMEPAD_DEADZONE;
   xrKeys.KeyS = moveY > GAMEPAD_DEADZONE;
@@ -4680,7 +4859,23 @@ function stepPlayer(dt) {
     // head 1:1 (no lerp lag), which matters doubly in VR where any
     // positional lag on your own head reads as nausea, not smoothing.
     camTarget.position.set(p.pos.x, renderer.xr.isPresenting ? xrGroundY : eyeY, p.pos.z);
-    camTarget.lookAt(camTarget.position.x + lookDir.x, camTarget.position.y + lookDir.y, camTarget.position.z + lookDir.z);
+    if (renderer.xr.isPresenting) {
+      // YAW-ONLY IN XR (Alex: "the game must NEVER move the camera in any
+      // rotation except yaw" -- turntable only; anything else while a
+      // headset is on is a comfort violation). The rig's orientation is a
+      // pure Y rotation; the headset's own head pose supplies all pitch.
+      // yaw + PI, NOT yaw: cameraRig is a Group, and Object3D.lookAt on a
+      // non-camera points +Z at the target (cameras point -Z), so the old
+      // lookAt call here had the rig facing 180deg AWAY from lookDir.
+      // First person is position-exact so nothing ever looked wrong, and
+      // the right-stick calibration (see stepXR) was anchored on real
+      // hardware against that flipped facing -- bake the same PI in here
+      // to keep the confirmed-correct heading byte-equivalent. Do NOT
+      // "fix" this to plain yaw without re-calibrating the stick.
+      camTarget.rotation.set(0, yaw + Math.PI, 0);
+    } else {
+      camTarget.lookAt(camTarget.position.x + lookDir.x, camTarget.position.y + lookDir.y, camTarget.position.z + lookDir.z);
+    }
   } else {
     const camOff = lookDir.clone().multiplyScalar(-8.5);
     const target = p.pos.clone().add(camOff).add(new THREE.Vector3(0, 2.2, 0));
@@ -4690,7 +4885,28 @@ function stepPlayer(dt) {
     // camera position underneath the ground plane; hard-clamp it above the
     // surface (ground top is y=0) regardless of what the orbit math wants.
     camTarget.position.y = Math.max(camTarget.position.y, 0.35);
-    camTarget.lookAt(p.pos.x, eyeY, p.pos.z);
+    if (renderer.xr.isPresenting) {
+      // VR THIRD-PERSON AVATAR WAS INVISIBLE (3 prior fix attempts, all
+      // visibility-flag flips -- the flag was never the problem). ROOT
+      // CAUSE: cameraRig is a Group, and Object3D.lookAt on a NON-camera
+      // orients +Z toward the target; only cameras/lights point -Z. So
+      // `cameraRig.lookAt(player)` aimed the VR view 180deg AWAY from the
+      // avatar -- spidey sat directly BEHIND the camera every frame with
+      // its visible flag correctly true the whole time. (Desktop never
+      // showed it because camTarget is the real camera there, which
+      // lookAt handles with the camera convention.) Fixed with an
+      // explicit yaw-only facing: the rig sits at -8.5*lookDir from the
+      // player, so rotation.y = yaw points camera-local -Z straight back
+      // at them. Yaw-only also enforces the same "never rotate except
+      // yaw" comfort rule as first person above: starting a swing or
+      // falling no longer tilts the view down via lookAt's vertical
+      // tracking -- the avatar just rides up/down in view while the
+      // horizon stays level. (Stick Y still pitch-orbits the rig's
+      // POSITION via lookDir above -- height changes, never view tilt.)
+      camTarget.rotation.set(0, yaw, 0);
+    } else {
+      camTarget.lookAt(p.pos.x, eyeY, p.pos.z);
+    }
   }
 
   document.getElementById('webstate').textContent =
@@ -4953,6 +5169,14 @@ function connectMultiplayer() {
           netVel: new THREE.Vector3(), lastStateTime: nowMs,
           targetYaw: 0, prevPos: new THREE.Vector3(msg.pos[0], msg.pos[1], msg.pos[2]),
           vel: new THREE.Vector3(), anchorPos: null, color: msg.color, initials: '', score: 0, kills: 0,
+          // name -> secondsRemaining, mirroring the local activeEffects
+          // shape -- fed by 'poweractivated' below so OTHER players'
+          // power-up glow/cape stacking finally replicates (was flagged
+          // "can't extend without a new network message" -- turns out the
+          // existing solo broadcast already carries byId + name, so the
+          // receiver can just run its own countdown; only torusext
+          // duration EXTENSIONS aren't visible, an acceptable drift).
+          effects: {},
         }, makeRemotePlayerMesh(msg.color));
         rp.body.position.copy(rp.targetPos);
         remotePlayers.set(msg.id, rp);
@@ -5051,6 +5275,12 @@ function connectMultiplayer() {
         worldEffects[msg.name] = EFFECT_DURATION;
         if (msg.name === 'magnet' && msg.pos) worldMagnetOrigin = new THREE.Vector3(msg.pos[0], msg.pos[1], msg.pos[2]);
         onEffectTriggered(msg.name, true);
+      } else if (msg.byId !== myId) {
+        // Solo effect on ANOTHER player: start a local countdown on their
+        // avatar so their glow/cape stacking renders here too (see
+        // rp.effects above + the appearance pass in stepMultiplayer).
+        const rp = remotePlayers.get(msg.byId);
+        if (rp) rp.effects[msg.name] = EFFECT_DURATION;
       }
       // A world effect's broadcast reaches the ORIGIN player too (no
       // server-side exclude, see worker.js) -- prefer "YOU" over an empty
@@ -5117,6 +5347,25 @@ function stepMultiplayer(dt, p) {
     rp.body.rotation.y = rp.targetYaw;
     rp.vel.copy(rp.body.position).sub(rp.prevPos).divideScalar(Math.max(dt, 1e-4));
     stepCoatFor(rp.coatSegs, rp.body.position, rp.vel, coatLengthFor(rp.kills), remoteScale);
+    // REMOTE POWER-UP APPEARANCE (same rules as the local player's
+    // updatePowerupAppearance: identity color untouched, pulsing emissive
+    // glow + one cape segment recolored per stacked effect). rp.effects
+    // is a local countdown seeded by the 'poweractivated' broadcast.
+    let rpStack = 0;
+    for (const k of Object.keys(rp.effects)) {
+      if ((rp.effects[k] -= dt) <= 0) delete rp.effects[k];
+      else rpStack++;
+    }
+    if (rpStack > 0) {
+      rp.body.material.emissive.setHex(SUIT_POWERED_GLOW);
+      rp.body.material.emissiveIntensity = 0.4 + 0.35 * Math.sin(performance.now() * 0.006);
+    } else if (rp.body.material.emissiveIntensity !== 0) {
+      rp.body.material.emissive.setHex(0x000000);
+      rp.body.material.emissiveIntensity = 0;
+    }
+    for (let ci = 0; ci < rp.coatSegs.length; ci++) {
+      rp.coatSegs[ci].segMat.color.setHex(ci < rpStack ? POWERUP_STACK_COLORS[Math.min(ci, POWERUP_STACK_COLORS.length - 1)] : coatMat.color.getHex());
+    }
     if (rp.anchorPos) {
       rp.webLine.visible = true;
       rp.webLineGeo.setPositions([rp.body.position.x, rp.body.position.y, rp.body.position.z, rp.anchorPos.x, rp.anchorPos.y, rp.anchorPos.z]);
@@ -5243,6 +5492,7 @@ function loop(now) {
   last = now;
   simT += dt;
   wallMat.uniforms.uTime.value = simT / WALL_CYCLE_SECONDS;
+  stepCelestial(simT / WALL_CYCLE_SECONDS);   // sun/moon shares the wall's exact cycle clock -- see stepCelestial
 
   // SLOW-TIME powerup: the WORLD (traffic, lights, knocked-car physics,
   // zombies) runs on a scaled-down dt; the player's own dt is scaled much
@@ -5327,6 +5577,8 @@ renderer.setAnimationLoop(loop);
 // needing a build step (e.g. `__sw.player.pos.set(x,y,z)` to teleport).
 window.__sw = { THREE, player, cars, parkedCars, pickups, colliders, EDGE, WORLD_BOUND, touchingWallNow,
                 GRID_N, VEHICLE_TYPES, buildingLabels, buildingLabelSprites, segs, cylSegs,
+                buildingChunkMeshes, celestialBody, stepCelestial, celestialMat,
+                get powerupMusicFamily() { return powerupMusicFamily; },
                 genBuildingName, isBlocked, PROFANITY_EN, PROFANITY_KATAKANA,
                 rooftopCoins, stepRooftopCoins, spotlights, stepSpotlights, PARK_BLOCK_I, PARK_BLOCK_J,
                 triggerGameOver, resetGame, checkKnocks, knockCar, respawn,
