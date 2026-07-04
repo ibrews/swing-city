@@ -58,6 +58,18 @@
     #start, #gameover { font: 14px/1.5 ui-monospace, Menlo, monospace; }
     #start h1, #gameover h1 { font-size: 22px; }
     .controlsGrid { font-size: 12px; line-height: 1.5; }
+    /* TOP-ALIGN + SCROLL (Alex: "text often overflows on mobile -- justify
+       to the top so we can always read the first few lines, right now it
+       goes to the middle, and let's have a scroll"). The shared #start/
+       #gameover rule below centers content vertically with no scroll
+       escape hatch -- fine on a tall desktop viewport, but on a short
+       phone viewport (especially landscape, or a small phone with the
+       full controls list expanded) content taller than the screen got
+       vertically centered AND clipped top-and-bottom with no way to reach
+       either end. Pin to the top and make the overlay itself scrollable,
+       phones only -- desktop's centered layout is untouched. */
+    #start, #gameover { align-items: flex-start; overflow-y: auto; -webkit-overflow-scrolling: touch; }
+    #start > div, #gameover > div { padding-top: 28px; padding-bottom: 28px; }
   }
   /* Callsign input (Alex: "the box for typing your name... too small and
      hard to click"). No rule existed before this -- it was rendering at
@@ -106,10 +118,18 @@
      instructions again"). Top-center, out of the way of the left/right HUD
      columns; unlike the read-only HUD elements above this one takes clicks
      (pointer-events: auto). */
+  /* width/height explicit (Alex's rasterization round): the label used to
+     be live text, which gave this shrink-to-fit block its size for free.
+     Rasterizing to a background-image (see rasterizeButtonLabel) removed
+     that text node, and a block with no content and no explicit size
+     collapses to just its padding box -- far too small a tap target.
+     Sized to comfortably fit the "MENU (M)" label at the font size the
+     SVG renders it at. */
   #menubtn { position: fixed; left: 50%; top: 10px; transform: translateX(-50%); z-index: 12;
+    width: 110px; height: 26px; box-sizing: content-box;
     font: 11px ui-monospace, Menlo, monospace; letter-spacing: 1px; color: #cfe8ff;
     background: #0a1424b0; border: 1px solid #2a4868; border-radius: 4px; padding: 4px 10px;
-    cursor: pointer; user-select: none; }
+    cursor: pointer; user-select: none; -webkit-touch-callout: none; }
   #menubtn:hover { background: #12203aca; }
   /* Bumped 124->150px -- #orbbreakdown (the category sub-line) was added
      to #score AFTER the 124px value was tuned against a 3-line box
@@ -169,10 +189,11 @@
     transition: opacity 0.3s linear; }
   /* Touch controls -- hidden by default, shown only on touch-capable devices
      (see the 'touch-active' class toggle in the INPUT section below). */
-  #touchjoyBase, #touchjoyThumb, #touchsprint, #touchrespawn { display: none; z-index: 20;
-    position: fixed; touch-action: none; user-select: none; }
+  #touchjoyBase, #touchjoyThumb, #touchsprint, #touchrespawn, #touchhud { display: none; z-index: 20;
+    position: fixed; touch-action: none; user-select: none; -webkit-touch-callout: none; }
   body.touch-active #touchjoyBase, body.touch-active #touchjoyThumb,
-  body.touch-active #touchsprint, body.touch-active #touchrespawn { display: block; }
+  body.touch-active #touchsprint, body.touch-active #touchrespawn,
+  body.touch-active #touchhud { display: block; }
   #touchjoyBase { left: 26px; bottom: 26px; width: 108px; height: 108px; border-radius: 50%;
     background: rgba(140, 200, 255, 0.10); border: 2px solid rgba(140, 200, 255, 0.35); }
   #touchjoyThumb { left: 62px; bottom: 62px; width: 52px; height: 52px; margin: -26px 0 0 -26px;
@@ -189,6 +210,14 @@
   #touchrespawn { right: 28px; bottom: 128px; width: 46px; height: 46px; border-radius: 50%;
     background: rgba(255, 255, 255, 0.08); border: 1px solid rgba(255, 255, 255, 0.3);
     color: #cfd8ea; font: 11px ui-monospace, Menlo, monospace; text-align: center; line-height: 46px; }
+  /* Mobile HUD toggle (Alex: "mobile still needs a way to toggle hiding the
+     leaderboard and all that -- too little screen real estate otherwise").
+     Every other platform already has one (keyboard H, gamepad Y/Triangle,
+     VR left stick click) -- touch was the one input method missing it
+     entirely. Stacked directly above touchrespawn, same size/style family. */
+  #touchhud { right: 28px; bottom: 186px; width: 46px; height: 46px; border-radius: 50%;
+    background: rgba(255, 255, 255, 0.08); border: 1px solid rgba(255, 255, 255, 0.3);
+    color: #cfd8ea; font: 10px ui-monospace, Menlo, monospace; text-align: center; line-height: 46px; }
   /* UI toggle (item 19): hide persistent HUD chrome, leave transient
      warnings/banners (boundary warning, combo/power-up popups) working. */
   body.hudHidden #hud, body.hudHidden #score, body.hudHidden #playercount,
@@ -208,7 +237,7 @@
        in-headset without needing devtools. If it EVER doesn't match what
        you expect after a hard reload, that's real signal of a caching
        problem, not a hunch. -->
-  <div id="versionLine">by ibrews &nbsp;·&nbsp; v0.1.0 built 2026-07-04 (round 11: batch of 11)</div><br>
+  <div id="versionLine">by ibrews &nbsp;·&nbsp; v0.1.1 built 2026-07-04 (round 12: mobile/touch polish)</div><br>
   A living neon city at night. Sling a web, swing between skyscrapers, and see how much
   trouble you can cause before the night's over.<br><br>
   <span id="initialsRow">callsign (optional, 3 letters): <input id="initialsInput" maxlength="3"
@@ -241,14 +270,15 @@
       <h3>MENU / EXIT VR</h3>
       keyboard: M — menu &nbsp;·&nbsp; VR: left X — exit VR (opens menu too)
       <h3>SHOW/HIDE HUD</h3>
-      keyboard: H &nbsp;·&nbsp; gamepad: Y/Triangle &nbsp;·&nbsp; VR: left stick click
+      keyboard: H &nbsp;·&nbsp; gamepad: Y/Triangle &nbsp;·&nbsp; VR: left stick click &nbsp;·&nbsp;
+      touch: HUD button
     </div>
   </details><br>
   <b>HOW TO WIN:</b> there's no ending — just a high score. Smash into cars while swinging to send
   them flying (+25), grab the glowing orbs for points (+10), and joust or knock other players
   around to rack up bonus points too — a few unusual-looking orbs do something other than add
-  points. Cross the glowing boundary wall and the screen turns red -- you've got about 2 seconds
-  to get back inside before it's over.
+  points. Cross the glowing boundary wall and you'll get bounced hard back toward the city --
+  no falling off the edge.
   <div id="startBoards" class="overlayBoards"></div>
 </div></div>
 <div id="gameover"><div>
@@ -276,6 +306,7 @@
 <div id="touchjoyThumb"></div>
 <div id="touchsprint">SPRINT</div>
 <div id="touchrespawn">R</div>
+<div id="touchhud">HUD</div>
 <div id="center"></div>
 
 <script>
@@ -4340,18 +4371,57 @@ function stepGamepad(dt) {
 // Left half of the screen = a virtual joystick (drag from touch-down point,
 // same digital-threshold trick as the gamepad, feeding tKeys instead of
 // gpKeys); right half = drag-to-look (mirrors the mousemove handler); plus
-// a dedicated SPRINT button and a small respawn button. Web/swing itself
-// doesn't need a dedicated button -- any tap already fires it via the
-// browser's synthesized mousedown/up compatibility events on touch (same
-// path as kbMouseWebHeld below), which is why the old WEB button was
-// redundant and got turned into SPRINT instead. Only shown on touch-
-// capable devices (feature-detected once at load) so desktop players never
-// see it.
-const touchCapable = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
+// a dedicated SPRINT button, a respawn button, and a HUD-toggle button.
+// Web/swing fires directly off pointerdown/pointerup below (see
+// touchWebPointers) -- it used to rely on the browser's own synthesized
+// mousedown/up compatibility events for a tap, which Alex found flaky
+// ("middle tap to swing doesn't seem to work"): compat mouse-event timing
+// relative to the next rAF frame is not something this code controls, so
+// a fast tap could land entirely between two reads of `keys` and never
+// register as a held-then-released edge. Driving kbMouseWebHeld directly
+// from our OWN pointer events removes that uncertainty entirely.
+//
+// TOUCH-CAPABLE DETECTION (Alex: "don't show touch controls on desktop
+// browsers"). `ontouchstart`/`maxTouchPoints` alone are a known-unreliable
+// signal -- plenty of actual desktop/laptop hardware (touchscreen Windows
+// laptops, Chrome's touch-emulation devtools flag, hybrid 2-in-1s used
+// with a mouse) reports touch support even though touch isn't how the
+// person is actually playing. `(pointer: coarse)` is the standards way to
+// ask "is the PRIMARY pointing device touch-like" (a mouse/trackpad
+// reports 'fine' even on a touchscreen machine) -- requiring BOTH signals
+// is what actually distinguishes "phone/tablet, touch is primary" from
+// "desktop with an incidental touchscreen."
+const touchCapable = ('ontouchstart' in window || navigator.maxTouchPoints > 0) &&
+  matchMedia('(pointer: coarse)').matches;
 if (touchCapable) document.body.classList.add('touch-active');
 const touchJoyThumb = document.getElementById('touchjoyThumb');
 const touchSprintEl = document.getElementById('touchsprint');
 const TOUCH_JOY_RADIUS = 46;
+// RASTERIZED BUTTON LABELS (Alex: "rasterize the text in the buttons so I
+// can't accidentally select them"). `user-select: none` (already applied
+// broadly) and `-webkit-touch-callout: none` (added alongside this) still
+// aren't universally honored by every mobile browser's long-press
+// selection/callout heuristics on live DOM text -- rendering the label as
+// an SVG background-image instead removes the actual text NODE, so
+// there's nothing there for any browser to select regardless of which CSS
+// property it does or doesn't respect. Applied to every touch button plus
+// the top menu button (the other tap targets styled as plain divs, not
+// native <button> elements which don't have this problem).
+function rasterizeButtonLabel(el, text, color, fontSize) {
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="200" height="60">` +
+    `<text x="100" y="33" text-anchor="middle" dominant-baseline="central" ` +
+    `font-family="ui-monospace, Menlo, monospace" font-size="${fontSize}" ` +
+    `letter-spacing="1" fill="${color}">${text}</text></svg>`;
+  el.textContent = '';
+  el.style.backgroundImage = `url("data:image/svg+xml,${encodeURIComponent(svg)}")`;
+  el.style.backgroundRepeat = 'no-repeat';
+  el.style.backgroundPosition = 'center';
+  el.style.backgroundSize = '80% auto';
+}
+rasterizeButtonLabel(touchSprintEl, 'SPRINT', '#ffe27a', 26);
+rasterizeButtonLabel(document.getElementById('touchrespawn'), 'R', '#cfd8ea', 32);
+rasterizeButtonLabel(document.getElementById('touchhud'), 'HUD', '#cfd8ea', 22);
+rasterizeButtonLabel(document.getElementById('menubtn'), 'MENU (M)', '#cfe8ff', 22);
 let touchJoyId = null, touchJoyOrigin = { x: 0, y: 0 }, touchJoyVec = { x: 0, y: 0 };
 let touchLookId = null, touchLookPrev = { x: 0, y: 0 };
 
@@ -4367,6 +4437,11 @@ function touchJoyReset() {
   touchJoyId = null; touchJoyVec.x = 0; touchJoyVec.y = 0;
   touchJoyThumb.style.transform = 'translate(0px, 0px)';
 }
+// Tracks which active touch pointers count as "holding the web button" --
+// a Set (not a single boolean) so releasing ONE finger of a two-finger
+// hold (joystick + look at once) doesn't wrongly clear kbMouseWebHeld
+// while the other is still down. See the TOUCH section comment above.
+const touchWebPointers = new Set();
 addEventListener('pointerdown', e => {
   if (!entered || !touchCapable || e.pointerType !== 'touch') return;
   if (e.target === touchSprintEl) {
@@ -4375,6 +4450,9 @@ addEventListener('pointerdown', e => {
     return;
   }
   if (e.target.id === 'touchrespawn') { respawn(); return; }
+  if (e.target.id === 'touchhud') { toggleHud(); return; }
+  touchWebPointers.add(e.pointerId);
+  kbMouseWebHeld = true;
   const leftHalf = e.clientX < innerWidth / 2;
   if (leftHalf && touchJoyId === null) {
     touchJoyId = e.pointerId;
@@ -4399,6 +4477,8 @@ function touchEnd(e) {
   if (e.pointerId === touchJoyId) touchJoyReset();
   if (e.pointerId === touchLookId) touchLookId = null;
   if (e.target === touchSprintEl) { touchSprintHeld = false; touchSprintEl.classList.remove('active'); }
+  touchWebPointers.delete(e.pointerId);
+  if (touchWebPointers.size === 0) kbMouseWebHeld = false;
 }
 addEventListener('pointerup', touchEnd);
 addEventListener('pointercancel', touchEnd);
