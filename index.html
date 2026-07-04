@@ -148,8 +148,7 @@
   them flying (+25), grab the glowing orbs for points (+10), and joust or knock other players
   around to rack up bonus points too — a few unusual-looking orbs do something other than add
   points. Cross the glowing boundary wall and the screen turns red -- you've got about 2 seconds
-  to get back inside before it's over.<br><br>
-  <span id="vrBloomRow"><label><input type="checkbox" id="vrBloomToggle"> try bloom/glow in VR (experimental -- may render incorrectly in one eye)</label></span>
+  to get back inside before it's over.
 </div></div>
 <div id="gameover"><div>
   <h1>SWING&hellip; SWANG&hellip; SWUNG</h1>
@@ -299,7 +298,6 @@ const ENERGY_BEAM_SPEED = 90, ENERGY_BEAM_RANGE = 70, ENERGY_BEAM_RADIUS = 0.5;
 const PONG_BALL_SPEED = 16, PONG_BALL_RADIUS = 0.85, PONG_BALL_LIFE = 12;
 const BOMBER_INTERVAL = 0.45, BOMBER_FALL_SPEED = 15, BOMBER_RADIUS = 1.0, BOMBER_BLAST_RADIUS = 3.2;
 const CONFETTI_RATE = 22;
-const DISCO_CYCLE_SPEED = 2.6;
 
 const PITCH = BLOCK_SIZE + STREET_W;
 const HALF = (GRID_N - 1) / 2 * PITCH;
@@ -621,7 +619,12 @@ const windowMat = new THREE.ShaderMaterial({
     // approximation that still reads as "the windows right around me dim
     // so I can see the ledge/roof surface," and it matters most exactly
     // when standing close to a wall of windows, i.e. at a rooftop.
-    playerPos: { value: new THREE.Vector3() }, fadeRadius: { value: 13 },
+    playerPos: { value: new THREE.Vector3() }, fadeRadius: { value: 7 },
+    // DISCO (Alex: "disco city should make the whole city pulse with
+    // different colors... synchronized sometimes and sometimes different").
+    // Real per-building color cycling in the material itself now, not a
+    // canvas CSS filter (which also never rendered in VR -- see stepDisco).
+    discoActive: { value: 0 }, discoTime: { value: 0 }, discoSync: { value: 0 },
   },
   vertexShader: /* glsl */`
     attribute vec3 instColor;
@@ -635,6 +638,7 @@ const windowMat = new THREE.ShaderMaterial({
     varying vec3 vWorld, vColor;
     uniform vec3 fogColor; uniform float fogDensity;
     uniform vec3 playerPos; uniform float fadeRadius;
+    uniform float discoActive; uniform float discoTime; uniform float discoSync;
     float hash(vec3 c) { return fract(sin(dot(c, vec3(12.9898, 78.233, 37.719))) * 43758.5453); }
     void main() {
       float Pz = 1.35, Ph = 1.15;                    // window row/col pitch
@@ -643,7 +647,16 @@ const windowMat = new THREE.ShaderMaterial({
       vec3 cell = floor(vec3(vWorld.x / Ph, vWorld.z / Ph, vWorld.y / Pz));
       float lit = step(0.38, hash(cell));            // ~62% of cells lit
       float win = row * col * lit;
-      float nearFade = smoothstep(fadeRadius * 0.35, fadeRadius, distance(vWorld, playerPos));
+      // Was firing at ANY altitude, including plain ground-level running
+      // (Alex: "why do I have a big black smoke cloud around me at all
+      // times" -- a screenshot showed the dark halo following the player
+      // at street level, nowhere near a rooftop). Ramp the effect in only
+      // once the player is actually elevated (H_LOW buildings start at 6
+      // units, so 6-14 covers "starting to be near even a short roofline"
+      // up through "definitely near a real rooftop") -- at ground level
+      // heightFactor is 0 and windows render at full brightness always.
+      float heightFactor = smoothstep(6.0, 14.0, playerPos.y);
+      float nearFade = mix(1.0, smoothstep(fadeRadius * 0.35, fadeRadius, distance(vWorld, playerPos)), heightFactor);
       // Round 2 brightness pass (Alex: "brighten the world a little...
       // still night, but not 90% black"). This raw shader computes its own
       // color and ignores scene lighting entirely -- the ambient-light and
@@ -652,7 +665,22 @@ const windowMat = new THREE.ShaderMaterial({
       // those. This constant is the actual lever: it's the base wall tone,
       // now a visible dim teal-navy instead of near-zero.
       vec3 base = vec3(0.045, 0.052, 0.075);
-      vec3 colr = base + vColor * win * 1.6 * nearFade;
+      vec3 windowColor = vColor;
+      if (discoActive > 0.5) {
+        // Per-building phase from a coarse (city-block-scale) hash of world
+        // XZ -- not the true per-instance building ID (would need extra
+        // plumbing through the instanced attributes), but a bucket roughly
+        // the size of a building footprint reads the same visually. discoSync
+        // blends between 0 (each bucket keeps its own offset -- "different
+        // colors") and 1 (offset zeroed out -- every building the SAME
+        // phase, "synchronized"); stepDisco animates discoSync over a slow
+        // cycle so the mode itself alternates while the effect is active.
+        vec2 buildingBucket = floor(vWorld.xz / 4.0);
+        float buildingPhase = hash(vec3(buildingBucket, 0.0)) * 6.2831853;
+        float phase = discoTime * 1.6 + buildingPhase * (1.0 - discoSync);
+        windowColor = 0.55 + 0.45 * cos(phase + vec3(0.0, 2.0944, 4.1888));
+      }
+      vec3 colr = base + windowColor * win * 1.6 * nearFade;
       float d = length(vWorld - cameraPosition);
       float f = 1.0 - exp(-fogDensity * fogDensity * d * d);
       gl_FragColor = vec4(mix(colr, fogColor, f), 1.0);
@@ -1266,8 +1294,14 @@ function announceEffect(name, isWorld) {
   const label = EFFECT_NAMES[name] || name.toUpperCase();
   showPowerBanner(isWorld ? `${myInitials || 'YOU'} TRIGGERED ${label}!!` : `${label}!!`);
 }
-function announceRemoteEffect(name, initials) {
-  showPowerBanner(`${initials || 'PLAYER'} TRIGGERED ${EFFECT_NAMES[name] || name.toUpperCase()}!!`);
+// Alex: "when text appears about a player getting a power that wasn't
+// global, we need to clarify that it's just for them" -- a bystander
+// watching someone ELSE trigger a SOLO effect had no way to tell it from
+// a world effect (both read as "X TRIGGERED Y!!"). "(solo)" only gets
+// appended for solo triggers; world triggers are unchanged.
+function announceRemoteEffect(name, initials, isWorld) {
+  const label = EFFECT_NAMES[name] || name.toUpperCase();
+  showPowerBanner(`${initials || 'PLAYER'} TRIGGERED ${label}${isWorld ? '' : ' (solo)'}!!`);
 }
 // SOLO trigger: applies instantly (no network round-trip -- your own buff
 // shouldn't wait on a WebSocket) and, if in multiplayer, tells everyone else
@@ -1936,11 +1970,42 @@ function updateFallMusic(playerY, onGround) {
 }
 
 // ------------------------------------------------------- GAMEPLAY SYSTEMS --
-let knockedCount = 0, score = 0;
+let knockedCount = 0, score = 0, playerKillCount = 0;
 const knockedEl = document.getElementById('knocked'), orbsEl = document.getElementById('orbs');
 const scoreEl = document.getElementById('scoretotal');
 const powerupsEl = document.getElementById('powerups');
 function addScore(n) { score += n; scoreEl.textContent = score; if (MULTIPLAYER_URL) updateLeaderboard(); }
+// ORB SCORE POPUPS (Alex: "when we get the orbs at the top of buildings we
+// should see points given for them, more points for taller buildings").
+// Plain orbs now scale with spawn height (baseY 0.8 at ground up to 15 at
+// swing height) instead of a flat PICKUP_SCORE, and a floating "+N" sprite
+// confirms the amount at the exact pickup point -- otherwise a
+// height-scaled reward is invisible feedback, indistinguishable from the
+// flat one it replaced.
+function scoreForOrbHeight(baseY) { return Math.round(PICKUP_SCORE * (1 + baseY / 10)); }
+const scorePopups = [];
+function spawnScorePopup(pos, amount) {
+  const { sprite, redraw } = makeTextSprite(160, 64, 1.1, 0.44);
+  redraw((ctx, w, h) => {
+    ctx.font = 'bold 40px ui-monospace, Menlo, monospace';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.shadowColor = '#000'; ctx.shadowBlur = 8;
+    ctx.fillStyle = '#ffe27a';
+    ctx.fillText('+' + amount, w / 2, h / 2);
+  });
+  sprite.position.copy(pos);
+  scene.add(sprite);
+  scorePopups.push({ sprite, t: 0 });
+}
+function stepScorePopups(dt) {
+  for (let i = scorePopups.length - 1; i >= 0; i--) {
+    const p = scorePopups[i];
+    p.t += dt;
+    p.sprite.position.y += dt * 1.2;
+    p.sprite.material.opacity = Math.max(0, 1 - p.t);
+    if (p.t > 1.0) { scene.remove(p.sprite); scorePopups.splice(i, 1); }
+  }
+}
 
 // Powerup timers -- all just count down in the main loop; whichever are >0
 // are "active." See stepPickups() for what picks them up, updatePowerupHud()
@@ -2164,7 +2229,11 @@ function stepPickups(t, p) {
           break;
         case 'disco': triggerWorldEffect('disco'); break;
         case 'shrinktag': triggerSoloEffect('shrinktag'); break;
-        default: addScore(PICKUP_SCORE);   // plain orb -- the effect IS the points
+        default: {   // plain orb -- the effect IS the points, scaled by how high it spawned
+          const amount = scoreForOrbHeight(pk.baseY);
+          addScore(amount);
+          spawnScorePopup(pk.mesh.position, amount);
+        }
       }
     }
   }
@@ -2278,6 +2347,7 @@ function stepZombies(dt, p) {
 function reportPowerKill(victimId) {
   if (mpSocket && mpSocket.readyState === WebSocket.OPEN) {
     mpSocket.send(JSON.stringify({ type: 'powerkill', victimId }));
+    playerKillCount++;
   }
 }
 function nearestRemoteHit(pos, radius) {
@@ -2465,18 +2535,82 @@ function stepConfetti(dt, p) {
   }
 }
 
-// DISCO: environment-only, everyone-only (see manifest exceptions) -- cheap
-// CSS hue-rotate on the render canvas cycles every building's neon instead
-// of touching the material graph directly.
+// DISCO (Alex: "disco city should make the whole city pulse with different
+// colors right? or synchronized sometimes and sometimes different -- play
+// a sick beat during it"). The old version was a CSS hue-rotate filter on
+// the render canvas -- cheap, but (a) it just re-tints whatever's already
+// lit rather than making the CITY pulse, and (b) a canvas CSS filter never
+// composites into the WebXR framebuffer, so it was invisible in VR, same
+// class of bug as the HTML-overlay banners earlier this session. Replaced
+// with real uniforms on windowMat: every window computes its own rainbow
+// phase per-frame, with a `discoSync` factor that smoothly drifts between
+// 0 (every building on its own offset phase -- "different colors") and 1
+// (every building locked to the same phase -- "synchronized") over a slow
+// cycle, so the mode itself alternates while active, not just the color.
 function stepDisco(dt) {
-  if (worldEffects.disco > 0) {
-    discoHue = (discoHue + dt * DISCO_CYCLE_SPEED * 57.3) % 360;
-    renderer.domElement.style.filter = `hue-rotate(${discoHue.toFixed(0)}deg) saturate(1.6)`;
-  } else if (renderer.domElement.style.filter) {
-    renderer.domElement.style.filter = '';
+  const active = worldEffects.disco > 0;
+  windowMat.uniforms.discoActive.value = active ? 1 : 0;
+  if (active) {
+    discoT += dt;
+    windowMat.uniforms.discoTime.value = discoT;
+    windowMat.uniforms.discoSync.value = 0.5 + 0.5 * Math.sin(discoT * (2 * Math.PI / DISCO_SYNC_PERIOD));
+  }
+  stepDiscoBeat(dt, active);
+}
+let discoT = 0;
+const DISCO_SYNC_PERIOD = 6;   // seconds for one full synced<->desynced cycle
+
+// DISCO BEAT (Alex: "play a sick beat during it"). Same procedural,
+// lookahead-scheduler approach as the noir/hype music loops above (own
+// bus, own BPM), rather than a static audio file -- a four-on-the-floor
+// kick every beat, an off-beat hi-hat, and a simple sawtooth bassline.
+// Gain crossfades in/out with the effect instead of hard-cutting, and the
+// beat phase resets each time disco is (re)triggered so it always starts
+// clean on the downbeat rather than picking up mid-bar from a stale timer.
+const discoBus = audioCtx.createGain();
+discoBus.gain.value = 0;
+discoBus.connect(audioCtx.destination);
+const DISCO_BPM = 128, DISCO_BEAT = 60 / DISCO_BPM;
+const DISCO_BASS = [82.41, 82.41, 110.00, 98.00];   // E2 E2 A2 G2
+let discoNext = 0, discoStep = 0, discoBeatWasActive = false;
+function scheduleDiscoBeat() {
+  while (discoNext < audioCtx.currentTime + 0.22) {
+    const t = discoNext;
+    const kick = audioCtx.createOscillator(); kick.type = 'sine';
+    kick.frequency.setValueAtTime(140, t);
+    kick.frequency.exponentialRampToValueAtTime(48, t + 0.12);
+    const kg = audioCtx.createGain();
+    kg.gain.setValueAtTime(0.5, t);
+    kg.gain.exponentialRampToValueAtTime(0.001, t + 0.18);
+    kick.connect(kg); kg.connect(discoBus);
+    kick.start(t); kick.stop(t + 0.2);
+    if (discoStep % 2 === 1) {
+      const hat = audioCtx.createBufferSource(); hat.buffer = noiseBuffer;
+      const hf = audioCtx.createBiquadFilter(); hf.type = 'highpass'; hf.frequency.value = 6000;
+      const hg = audioCtx.createGain();
+      hg.gain.setValueAtTime(0.12, t);
+      hg.gain.exponentialRampToValueAtTime(0.001, t + 0.05);
+      hat.connect(hf); hf.connect(hg); hg.connect(discoBus);
+      hat.start(t); hat.stop(t + 0.06);
+    }
+    const bass = audioCtx.createOscillator(); bass.type = 'sawtooth';
+    bass.frequency.value = DISCO_BASS[Math.floor(discoStep / 2) % DISCO_BASS.length];
+    const bf = audioCtx.createBiquadFilter(); bf.type = 'lowpass'; bf.frequency.value = 500;
+    const bg = audioCtx.createGain();
+    bg.gain.setValueAtTime(0.18, t);
+    bg.gain.exponentialRampToValueAtTime(0.001, t + DISCO_BEAT * 0.4);
+    bass.connect(bf); bf.connect(bg); bg.connect(discoBus);
+    bass.start(t); bass.stop(t + DISCO_BEAT * 0.4);
+    discoNext += DISCO_BEAT / 2;
+    discoStep++;
   }
 }
-let discoHue = 0;
+function stepDiscoBeat(dt, active) {
+  if (active && !discoBeatWasActive) { discoNext = audioCtx.currentTime + 0.05; discoStep = 0; }
+  discoBeatWasActive = active;
+  discoBus.gain.setTargetAtTime(active ? 0.7 : 0, audioCtx.currentTime, 0.15);
+  if (active) scheduleDiscoBeat();
+}
 
 function stepPowerupFX(dt, p) {
   stepEnergyBlast(dt, p);
@@ -2671,6 +2805,28 @@ fpStick.rotation.x = -Math.PI / 2;   // cylinder's local +Y -> camera-local -Z (
 fpStick.position.set(-0.26, -0.28, -0.55);
 fpStick.visible = false;
 camera.add(fpStick);
+// LEADER CROWN (Alex: "let's also have a crown, readably a crown, on the
+// head of whoever the current leader is"). One shared crown mesh,
+// reparented onto whichever pawn (local `spidey` or a remote player's
+// body) currently holds the #1 session-leaderboard spot -- see
+// updateLeaderboard(). A cylinder base + 5 cone spikes around the rim
+// reads as an unambiguous crown silhouette at pawn scale.
+function makeCrown() {
+  const g = new THREE.Group();
+  const goldMat = new THREE.MeshStandardMaterial({ color: 0xffd700, metalness: 0.7, roughness: 0.25 });
+  g.add(new THREE.Mesh(new THREE.CylinderGeometry(0.16, 0.18, 0.09, 8), goldMat));
+  const SPIKES = 5;
+  for (let i = 0; i < SPIKES; i++) {
+    const a = (i / SPIKES) * Math.PI * 2;
+    const spike = new THREE.Mesh(new THREE.ConeGeometry(0.045, 0.12, 4), goldMat);
+    spike.position.set(Math.cos(a) * 0.14, 0.09, Math.sin(a) * 0.14);
+    g.add(spike);
+  }
+  return g;
+}
+const leaderCrown = makeCrown();
+leaderCrown.visible = false;
+scene.add(leaderCrown);
 const spidey = makePawnBody(0x12172c);
 scene.add(spidey);
 // Own name tag -- defined here (before makeNameTag's textual declaration
@@ -2698,25 +2854,36 @@ function refreshMyNameTag() { myNameTag.redraw(drawNameTag(myInitials, myColor !
 // lining is Alex's established look, not something that should vary by
 // player color and clash), but each pawn needs its OWN independent chain
 // of segments since they're positioned per-instance every frame.
-const COAT_N = 5;
+// COAT_N is the STARTING length; the pool itself is pre-allocated at
+// COAT_MAX and only the first `activeCount` segments (see coatLengthFor)
+// are shown/stepped each frame -- avoids allocating new meshes at kill
+// time, just reveals more of an already-built pool (Alex: "do we get a
+// longer cape after each person we defeat? I like the idea of a super
+// long cape based on kills").
+const COAT_N = 5, COAT_MAX = 22;
 const coatMat = new THREE.MeshStandardMaterial({ color: 0x3f72e8, roughness: 0.6, metalness: 0.05 });
 const coatLiningMat = new THREE.MeshBasicMaterial({ color: 0xdd1f2f });
+function coatLengthFor(kills) { return Math.min(COAT_MAX, COAT_N + (kills || 0) * 2); }
 function makeCoat() {
   const segs = [];
-  for (let i = 0; i < COAT_N; i++) {
-    const mesh = new THREE.Mesh(new THREE.BoxGeometry(0.46 - i * 0.03, 0.34, 0.05), coatMat);
-    const lining = new THREE.Mesh(new THREE.BoxGeometry(0.5 - i * 0.03, 0.38, 0.02), coatLiningMat);
+  for (let i = 0; i < COAT_MAX; i++) {
+    const mesh = new THREE.Mesh(new THREE.BoxGeometry(Math.max(0.1, 0.46 - i * 0.03), 0.34, 0.05), coatMat);
+    const lining = new THREE.Mesh(new THREE.BoxGeometry(Math.max(0.12, 0.5 - i * 0.03), 0.38, 0.02), coatLiningMat);
     lining.position.z = -0.045;
     mesh.add(lining);
+    mesh.visible = i < COAT_N;
     scene.add(mesh);
     segs.push({ mesh, pos: new THREE.Vector3() });
   }
   return segs;
 }
-function stepCoatFor(segs, pos, vel) {
+function stepCoatFor(segs, pos, vel, activeCount) {
+  const n = activeCount || COAT_N;
   let prev = pos.clone().add(new THREE.Vector3(0, 0.55, 0));
-  for (let i = 0; i < COAT_N; i++) {
+  for (let i = 0; i < segs.length; i++) {
     const seg = segs[i];
+    seg.mesh.visible = i < n;
+    if (i >= n) continue;
     const target = prev.clone().add(new THREE.Vector3(0, -0.33, 0)).addScaledVector(vel, -0.028);
     seg.pos.lerp(target, 0.4);
     seg.mesh.position.copy(seg.pos);
@@ -2725,7 +2892,7 @@ function stepCoatFor(segs, pos, vel) {
   }
 }
 const coatSegs = makeCoat();
-function stepCoat(p) { stepCoatFor(coatSegs, p.pos, p.vel); }
+function stepCoat(p) { stepCoatFor(coatSegs, p.pos, p.vel, coatLengthFor(playerKillCount)); }
 
 // ------------------------------------------------------ CANVAS TEXT PANELS --
 // Shared "render text into a 3D scene" primitive -- backs both the floating
@@ -2938,7 +3105,13 @@ let pendingAirWeb = false;
 // the initial jump+fireWeb attempt whiffs -- if still held past it, one
 // extra upward pull (SWING_ASSIST_BOOST) and a second attach attempt.
 let pendingSwingAssist = false, swingAssistHoldTime = 0;
-const SWING_ASSIST_DELAY = 0.16, SWING_ASSIST_BOOST = 7;
+// Bumped from 0.16/7 (Alex: "Double jump effect to get higher faster isn't
+// working"). Verified the trigger/arm/retry mechanism itself fires
+// correctly through the real webHeld pipeline (including a simulated XR
+// trigger via stepXR) -- the likely issue is the effect being too subtle
+// to notice rather than not firing, so made both the window and the boost
+// more generous.
+const SWING_ASSIST_DELAY = 0.22, SWING_ASSIST_BOOST = 10;
 // Raw keyboard state lives in kbKeys, not `keys` -- `keys` (what stepPlayer
 // actually reads) is a per-frame OR-combine of kbKeys/gpKeys/tKeys, same
 // reasoning as the webHeld combine above: gamepad/touch poll their state
@@ -3063,18 +3236,6 @@ initialsInput.addEventListener('input', () => {
   myInitials = v.length === 3 ? v : '';
   refreshMyNameTag();
 });
-// VR BLOOM TOGGLE (Alex: "are we able to get the bloom glow effect... in
-// VR? It might be too expensive on the GPU but I'd love to see it, maybe
-// as a toggle (off by default)"). Off by default because EffectComposer
-// isn't WebXR-stereo-aware (see the render-branch comment in the main
-// loop) -- this is a genuine experimental/may-break-one-eye opt-in, not
-// just a performance tradeoff, hence the checkbox's own warning text.
-let vrBloomEnabled = false;
-const vrBloomToggle = document.getElementById('vrBloomToggle');
-for (const evt of ['click', 'mousedown']) {
-  vrBloomToggle.addEventListener(evt, e => e.stopPropagation());
-}
-vrBloomToggle.addEventListener('change', () => { vrBloomEnabled = vrBloomToggle.checked; });
 // Entering VR via the VRButton is its own "start the game" gesture -- run
 // the same unlock/hide-overlay/start-music side effects the desktop click
 // handler does (minus pointer lock, meaningless once the headset owns
@@ -3083,6 +3244,22 @@ renderer.xr.addEventListener('sessionstart', enterGame);
 renderer.xr.addEventListener('sessionstart', () => { cameraMode = 'first'; });
 renderer.xr.addEventListener('sessionstart', () => { vrWristPanel.mesh.visible = true; });
 renderer.xr.addEventListener('sessionend', () => { vrWristPanel.mesh.visible = false; });
+// STICK FOLLOWS THE LEFT HAND IN VR (Alex: "jousting rod should actually
+// stay relative to the same vector of your left arm and help with aiming
+// an attack in VR"). The fixed camera-space offset was fine for desktop
+// (no hand tracking exists there), but in VR real hand tracking is
+// available via the left grip -- reparenting onto it means the rod
+// visually points wherever the player's actual hand points, which is what
+// makes it useful as an aiming reference. Re-parented back to the camera
+// on session end so desktop first-person is unaffected.
+renderer.xr.addEventListener('sessionstart', () => {
+  xrGrips[0].add(fpStick);
+  fpStick.position.set(0, 0, -(STICK_LEN / 2 + 0.05));
+});
+renderer.xr.addEventListener('sessionend', () => {
+  camera.add(fpStick);
+  fpStick.position.set(-0.26, -0.28, -0.55);
+});
 // VR PERFORMANCE (Alex: "performance goes up and down, maybe based on how
 // much of the city I see"). The city's buildings/windows already render as
 // a handful of InstancedMesh draw calls (one draw call regardless of view
@@ -3243,7 +3420,7 @@ function stepTouch(dt) {
 // controller's stick drives look (yaw/pitch, directly -- there's no
 // separate "xr look" primitive to combine, same as how the desktop
 // gamepad's right stick works). Either trigger fires the web/jump action.
-let xrWebHeld = false, xrLeftXPrev = false, xrLeftYPrev = false;
+let xrWebHeld = false, xrLeftXPrev = false, xrLeftYPrev = false, xrRightBPrev = false;
 const xrKeys = {};
 // Right-stick scheme (Alex, second VR playtest pass): X axis snap-turns in
 // fixed increments (the standard VR-comfort turn), Y axis smooth-turns
@@ -3259,7 +3436,7 @@ function stepXR(dt) {
     return;
   }
   let held = false, moveX = 0, moveY = 0, lookX = 0, lookY = 0;
-  let leftX = false, leftY = false;
+  let leftX = false, leftY = false, rightB = false;
   for (const src of session.inputSources) {
     const gp = src.gamepad;
     if (!gp) continue;
@@ -3267,8 +3444,14 @@ function stepXR(dt) {
     if (gp.buttons[0] && gp.buttons[0].pressed) held = true;   // either trigger fires web/jump
     // Right A (buttons[4] on the right controller) does the same thing as
     // the right trigger (Alex: "Make the Right A button do the same thing
-    // as right trigger").
-    if (rightHand && gp.buttons[4] && gp.buttons[4].pressed) held = true;
+    // as right trigger"). Right B (buttons[5]) toggles first/third person
+    // (Alex: "I can't toggle first and third person [in VR]" -- the
+    // desktop 'V' key is explicitly disabled while presenting, and nothing
+    // else did this in VR).
+    if (rightHand) {
+      if (gp.buttons[4] && gp.buttons[4].pressed) held = true;
+      if (gp.buttons[5] && gp.buttons[5].pressed) rightB = true;
+    }
     // Left X/Y (buttons[4]/[5] on the left controller): X exits VR
     // (Alex: "Make the left X button exit VR mode"), Y respawns (Alex:
     // "Y button for Respawn -- that fall feels so cool"). Edge-triggered
@@ -3290,12 +3473,17 @@ function stepXR(dt) {
   else if (!leftX) xrLeftXPrev = false;
   if (leftY && !xrLeftYPrev) { xrLeftYPrev = true; respawn(); }
   else if (!leftY) xrLeftYPrev = false;
+  if (rightB && !xrRightBPrev) { xrRightBPrev = true; cameraMode = cameraMode === 'first' ? 'third' : 'first'; }
+  else if (!rightB) xrRightBPrev = false;
   xrWebHeld = held;
   xrKeys.KeyW = moveY < -GAMEPAD_DEADZONE;
   xrKeys.KeyS = moveY > GAMEPAD_DEADZONE;
   xrKeys.KeyA = moveX < -GAMEPAD_DEADZONE;
   xrKeys.KeyD = moveX > GAMEPAD_DEADZONE;
-  xrKeys.ShiftLeft = Math.hypot(moveX, moveY) > 0.88;
+  // Threshold lowered from 0.88 (Alex: "how do I run faster in VR?" --
+  // full-deflection thresholds tuned against a desktop gamepad's analog
+  // curve may simply be harder to physically reach on a VR thumbstick).
+  xrKeys.ShiftLeft = Math.hypot(moveX, moveY) > 0.72;
   // Snap-turn: fires once per push past the threshold, then re-arms once
   // the stick returns near center -- a held-over stick would otherwise
   // spin continuously instead of discrete comfort-turns.
@@ -3426,7 +3614,15 @@ function stepPlayer(dt) {
   const speedMult = myEffectActive('speed') ? SPEED_MULT : 1;
   if (myEffectActive('fly')) {
     p.vel.y *= Math.pow(0.05, dt);   // gentle air drag stands in for gravity so flight doesn't run away
-    const fwd = new THREE.Vector3(-Math.sin(yaw) * Math.cos(pitch), Math.sin(pitch), -Math.cos(yaw) * Math.cos(pitch));
+    // Alex: "Fly mode in VR needs to go on the vector you're looking."
+    // The yaw/pitch variables are the desktop mouse-look angles; in VR the
+    // REAL look direction is yaw/pitch (rig) PLUS the headset's own head
+    // tilt layered on top, which yaw/pitch alone never capture -- worse,
+    // pitch isn't even driven by any VR control anymore since the
+    // right-stick redesign moved its Y axis to smooth yaw. aimDir() (the
+    // actual camera direction, already the correct choice for swing/web
+    // aim in VR) is correct here for the same reason.
+    const fwd = aimDir();
     const rgt = new THREE.Vector3(-fwd.z, 0, fwd.x).normalize();
     const flyDir = new THREE.Vector3();
     if (keys.KeyW) flyDir.add(fwd);
@@ -3622,6 +3818,16 @@ function stepPlayer(dt) {
     wallClimbMatrix.makeBasis(wallSide, wallUp, climbFwd);
     spidey.quaternion.setFromRotationMatrix(wallClimbMatrix);
   } else {
+    // BUG (Alex: "sometimes my character just walking on the street is
+    // totally sideways"): the wall-climb pose above sets a full quaternion
+    // via setFromRotationMatrix, which Euler-decomposes to a NON-ZERO
+    // rotation.z for 3 of the 4 wall faces (confirmed via the debug hook --
+    // a climb left rotation.z at 90deg). This branch only ever wrote
+    // rotation.x/y, so that stale 90deg roll survived every subsequent
+    // frame of normal ground movement once you'd climbed anything. Reset
+    // rotation.z explicitly every frame here -- it should never be
+    // anything but 0 outside the wall-climb pose.
+    spidey.rotation.z = 0;
     if (sp > 0.5) spidey.rotation.y = Math.atan2(p.vel.x, p.vel.z);
     spidey.rotation.x = THREE.MathUtils.clamp(sp * 0.02 * (p.anchor ? 1.6 : 0.4), 0, 0.9);
   }
@@ -3665,6 +3871,13 @@ function stepPlayer(dt) {
   // it still renders normally for every OTHER player's third-person view of
   // you (remote players use their own separate mesh instances).
   spidey.visible = cameraMode !== 'first';
+  // The coat/cape is a SEPARATE set of meshes added directly to `scene`
+  // (not children of spidey, since it's driven by its own lagged-follow
+  // physics in stepCoat), so hiding spidey alone never hid it -- it kept
+  // trailing right around the camera in first-person, which is exactly
+  // "a big black smoke cloud around me at all times" (Alex, VR playtest):
+  // 5 dark, poorly-lit boxes clustered inches from your own eye.
+  for (const seg of coatSegs) seg.mesh.visible = cameraMode !== 'first';
   fpStick.visible = cameraMode === 'first';
   if (cameraMode === 'first') {
     // Sit exactly at head height, no offset -- first-person tracks the
@@ -3757,6 +3970,21 @@ function updateLeaderboard() {
     if (leader.isMe && mpSocket && mpSocket.readyState === WebSocket.OPEN) {
       mpSocket.send(JSON.stringify({ type: 'leader', initials: myInitials || '???', score: leader.score }));
     }
+  }
+  // Crown always tracks the CURRENT #1, not just who most recently became
+  // #1 -- moves every call, not gated on lastLeaderId, so it follows the
+  // lead immediately if it changes hands.
+  if (leader && leader.score > 0) {
+    const targetBody = leader.isMe ? spidey : remotePlayers.get(leader.id)?.body;
+    if (targetBody) {
+      targetBody.add(leaderCrown);
+      leaderCrown.position.set(0, 0.88, 0);
+      leaderCrown.visible = true;
+    } else {
+      leaderCrown.visible = false;
+    }
+  } else {
+    leaderCrown.visible = false;
   }
   // Daily leaderboard entry: report OUR OWN score only when it just beat our
   // own prior-reported best (never on every tick -- that'd spam the DO's
@@ -3899,7 +4127,7 @@ function connectMultiplayer() {
           targetPos: new THREE.Vector3(msg.pos[0], msg.pos[1], msg.pos[2]),
           netVel: new THREE.Vector3(), lastStateTime: nowMs,
           targetYaw: 0, prevPos: new THREE.Vector3(msg.pos[0], msg.pos[1], msg.pos[2]),
-          vel: new THREE.Vector3(), anchorPos: null, color: msg.color, initials: '', score: 0,
+          vel: new THREE.Vector3(), anchorPos: null, color: msg.color, initials: '', score: 0, kills: 0,
         }, makeRemotePlayerMesh(msg.color));
         rp.body.position.copy(rp.targetPos);
         remotePlayers.set(msg.id, rp);
@@ -3930,6 +4158,7 @@ function connectMultiplayer() {
       if (rp.initials !== (msg.initials || '') && rp.nameTag) rp.nameTag.redraw(drawNameTag(msg.initials || '', rp.color));
       rp.initials = msg.initials || '';
       rp.score = typeof msg.score === 'number' ? msg.score : 0;
+      rp.kills = typeof msg.kills === 'number' ? msg.kills : 0;
       updateLeaderboard();
     } else if (msg.type === 'leave') {
       const rp = remotePlayers.get(msg.id);
@@ -3991,7 +4220,7 @@ function connectMultiplayer() {
       // server-side exclude, see worker.js) -- prefer "YOU" over an empty
       // initials string for that specific case, same fallback the old
       // color-based version used.
-      announceRemoteEffect(msg.name, msg.byId === myId ? (myInitials || 'YOU') : msg.initials);
+      announceRemoteEffect(msg.name, msg.byId === myId ? (myInitials || 'YOU') : msg.initials, msg.world);
     } else if (msg.type === 'powerkilled') {
       // Energy blast / pong / bomber instakill -- same "attacker reports,
       // victim applies to itself" shape as jousted.
@@ -4043,7 +4272,7 @@ function stepMultiplayer(dt, p) {
     rp.body.position.lerp(predictedRemotePos, Math.min(1, dt * 16));
     rp.body.rotation.y = rp.targetYaw;
     rp.vel.copy(rp.body.position).sub(rp.prevPos).divideScalar(Math.max(dt, 1e-4));
-    stepCoatFor(rp.coatSegs, rp.body.position, rp.vel);
+    stepCoatFor(rp.coatSegs, rp.body.position, rp.vel, coatLengthFor(rp.kills));
     if (rp.anchorPos) {
       rp.webLine.visible = true;
       rp.webLineGeo.setPositions([rp.body.position.x, rp.body.position.y, rp.body.position.z, rp.anchorPos.x, rp.anchorPos.y, rp.anchorPos.z]);
@@ -4085,6 +4314,7 @@ function stepMultiplayer(dt, p) {
         heightAbove > JOUST_HEIGHT_MIN && heightAbove < JOUST_HEIGHT_MAX) {
       if (mpSocket && mpSocket.readyState === WebSocket.OPEN) {
         mpSocket.send(JSON.stringify({ type: 'joust', victimId: id }));
+        playerKillCount++;
       }
       p.vel.y = JUMP_VEL_NORMAL * 0.6;   // a little bounce off the kill, Mario-stomp style
       continue;   // a head-stomp this frame shouldn't ALSO resolve as a body knock below
@@ -4105,6 +4335,7 @@ function stepMultiplayer(dt, p) {
         playerPokeCooldowns.set(id, 0.6);
         if (mpSocket && mpSocket.readyState === WebSocket.OPEN) {
           mpSocket.send(JSON.stringify({ type: 'poke', victimId: id }));
+          playerKillCount++;
         }
         sfxKnock(rp.body.position);
         continue;   // a poke this frame shouldn't ALSO resolve as a body knock below
@@ -4140,7 +4371,7 @@ function stepMultiplayer(dt, p) {
     mpSocket.send(JSON.stringify({
       pos: [p.pos.x, p.pos.y, p.pos.z], type: 'state',
       yaw: spidey.rotation.y, anchor: p.anchor ? [p.anchor.x, p.anchor.y, p.anchor.z] : null, alive: !gameOver,
-      initials: myInitials, score,
+      initials: myInitials, score, kills: playerKillCount,
     }));
   }
 }
@@ -4205,6 +4436,7 @@ function loop(now) {
   stepWeather(worldDt);
   stepRain(player.pos, simT);
   stepRooftopCoins(simT);
+  stepScorePopups(dt);
   updateBloom(player.pos.y);
   updateFallMusic(player.pos.y, player.onGround);
   // Post-processing (bloom/noir) is skipped while presenting in XR --
@@ -4212,10 +4444,11 @@ function loop(now) {
   // renders one eye's worth of buffers, not the stereo camera array the XR
   // session provides), so mixing them risks a broken or single-eye render.
   // A straight renderer.render() is always correct for both eyes; the
-  // tradeoff is no bloom/desaturation while in VR.
-  if (renderer.xr.isPresenting) {
-    if (vrBloomEnabled) composer.render(); else renderer.render(scene, camera);
-  } else composer.render();
+  // tradeoff is no bloom/desaturation while in VR. (Tried an opt-in toggle
+  // for this -- Alex confirmed on real hardware it doesn't just risk a
+  // broken render, it stops the scene from rendering at all. Removed.)
+  if (renderer.xr.isPresenting) renderer.render(scene, camera);
+  else composer.render();
 }
 // setAnimationLoop (not requestAnimationFrame) is required for WebXR: it's
 // how Three.js hands control of frame scheduling to the active XRSession
@@ -4231,6 +4464,7 @@ window.__sw = { THREE, player, cars, parkedCars, pickups, colliders, EDGE, WORLD
                 rooftopCoins, stepRooftopCoins,
                 triggerGameOver, resetGame, checkKnocks, knockCar, respawn,
                 stepPickups, stepPlayer, stepTraffic, stepKnocked, stepExplosion,
+                scoreForOrbHeight, spawnScorePopup, stepScorePopups, scorePopups, get score() { return score; },
                 zombies, spawnZombieWave, stepZombies, scene, spidey, coatSegs, camera,
                 resolveCarCollisions, stepWeather, triggerLightning, updateBloom, stepRain, rain, findAnchor,
                 updateFallMusic, bloom, musicBus, hypeBus,
@@ -4257,6 +4491,8 @@ window.__sw = { THREE, player, cars, parkedCars, pickups, colliders, EDGE, WORLD
                 get pendingSwingAssist() { return pendingSwingAssist; },
                 get swingAssistHoldTime() { return swingAssistHoldTime; },
                 get comboCount() { return comboCount; },
+                get playerKillCount() { return playerKillCount; }, set playerKillCount(v) { playerKillCount = v; },
+                coatLengthFor, COAT_MAX, COAT_N, reportPowerKill, leaderCrown,
                 get comboTimer() { return comboTimer; },
                 rainBus, audioCtx, findQueuedCar, stepHonks,
                 get CLIMB_SPEED() { return CLIMB_SPEED; }, KNOCK_SPEED,
@@ -4273,15 +4509,15 @@ window.__sw = { THREE, player, cars, parkedCars, pickups, colliders, EDGE, WORLD
                 get entered() { return entered; },
                 set entered(v) { entered = v; },
                 openMenu, closeMenu, get paused() { return paused; }, wallMat, WALL_CYCLE_SECONDS, windowMat,
-                get vrBloomEnabled() { return vrBloomEnabled; }, set vrBloomEnabled(v) { vrBloomEnabled = v; }, vrBloomToggle,
                 xrArms, xrGrips, updateXRArms, announceEffect, announceRemoteEffect,
                 vrNotifyPanel, showVRNotification, vrWristPanel,
                 get myInitials() { return myInitials; }, set myInitials(v) { myInitials = v; },
                 powerBannerEl,
                 get xrLeftXPrev() { return xrLeftXPrev; }, get xrLeftYPrev() { return xrLeftYPrev; },
+                get xrRightBPrev() { return xrRightBPrev; },
                 get xrSnapArmed() { return xrSnapArmed; },
                 kbKeyDown, aimDir, fpStick,
-                stepXR, xrKeys, get xrWebHeld() { return xrWebHeld; },
+                stepXR, xrKeys, get xrWebHeld() { return xrWebHeld; }, set xrWebHeld(v) { xrWebHeld = v; },
                 cameraRig, renderer, enterGame,
                 remotePlayers, stepMultiplayer, makeRemotePlayerMesh, connectMultiplayer,
                 get mpSocket() { return mpSocket; }, set mpSocket(v) { mpSocket = v; },
@@ -4302,7 +4538,7 @@ window.__sw = { THREE, player, cars, parkedCars, pickups, colliders, EDGE, WORLD
                 triggerSoloEffect, triggerWorldEffect, extendActiveEffects, myEffectActive,
                 pongBalls, bombs, confettiParts,
                 get worldMagnetOrigin() { return worldMagnetOrigin; },
-                get discoHue() { return discoHue; } };
+                get discoT() { return discoT; }, stepDisco, stepDiscoBeat, discoBus };
 </script>
 </body>
 </html>
