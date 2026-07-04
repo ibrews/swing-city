@@ -111,11 +111,13 @@
     background: #0a1424b0; border: 1px solid #2a4868; border-radius: 4px; padding: 4px 10px;
     cursor: pointer; user-select: none; }
   #menubtn:hover { background: #12203aca; }
-  /* Bumped 76->124px -- #score is a fixed-height 3-line box (score/cars
-     knocked/orbs) starting at 56px, so 76px already sat inside it,
-     overlapping the "orbs" line with power-up MODE text whenever any
-     effect was active (Alex: HUD text in the upper-right overlapping). */
-  #powerups { position: fixed; right: 14px; top: 124px; z-index: 10; text-align: right;
+  /* Bumped 124->150px -- #orbbreakdown (the category sub-line) was added
+     to #score AFTER the 124px value was tuned against a 3-line box
+     (score/cars knocked/orbs), making it a 4th line and pushing #score's
+     real bottom edge below 124 again (Alex, round 2: HUD text in the
+     upper-right overlapping, same recurring class of bug). Recompute this
+     if #score ever grows another line. */
+  #powerups { position: fixed; right: 14px; top: 150px; z-index: 10; text-align: right;
     font: 12px/1.6 ui-monospace, Menlo, monospace; user-select: none; pointer-events: none; }
   #powerups div { text-shadow: 0 0 6px currentColor; }
   #zombiewarn { position: fixed; left: 50%; top: 14%; transform: translateX(-50%);
@@ -197,7 +199,16 @@
 <body>
 <div id="start"><div>
   <h1>SWING CITY</h1>
-  <div id="versionLine">by ibrews &nbsp;·&nbsp; v0.0.6 built 2026-07-03</div><br>
+  <!-- Alex: "the version I'm looking at in VR says v0.0.6 built 2026-07-03
+       -- have you been updating that?" This string was a hand-typed
+       constant nobody had bumped in a while, so it couldn't answer that
+       question -- it looked stale even on a fresh build. Bumped to
+       reflect the actual commit this round shipped from; bump this same
+       line whenever you ship, so "what build am I on" is always readable
+       in-headset without needing devtools. If it EVER doesn't match what
+       you expect after a hard reload, that's real signal of a caching
+       problem, not a hunch. -->
+  <div id="versionLine">by ibrews &nbsp;·&nbsp; v0.0.7 built 2026-07-04 (6588b9d+)</div><br>
   A living neon city at night. Sling a web, swing between skyscrapers, and see how much
   trouble you can cause before the night's over.<br><br>
   <span id="initialsRow">callsign (optional, 3 letters): <input id="initialsInput" maxlength="3"
@@ -604,7 +615,21 @@ document.body.appendChild(renderer.domElement);
 // an immersive-vr session is actually possible.
 if (navigator.xr && navigator.xr.isSessionSupported) {
   navigator.xr.isSessionSupported('immersive-vr').then(supported => {
-    if (supported) document.body.appendChild(VRButton.createButton(renderer));
+    if (supported) {
+      const vrBtn = VRButton.createButton(renderer);
+      // Alex: "move the click to enter VR button up toward the top of the
+      // screen and make it a little bigger" -- VRButton.createButton()
+      // hardcodes `bottom`/inline styles on the element itself, which beat
+      // any CSS rule by specificity; overriding the same inline properties
+      // right after creation is the only way to actually move/resize it.
+      vrBtn.style.bottom = '';
+      vrBtn.style.top = '24px';
+      vrBtn.style.width = '160px';
+      vrBtn.style.left = 'calc(50% - 80px)';
+      vrBtn.style.padding = '16px 8px';
+      vrBtn.style.fontSize = '16px';
+      document.body.appendChild(vrBtn);
+    }
   }).catch(() => {});
 }
 
@@ -1711,12 +1736,12 @@ function drawVRNotify(text) {
     ctx.fillText(text, w / 2, h / 2);
   };
 }
-function showVRNotification(text) {
+function showVRNotification(text, holdMs = 2600) {
   if (!renderer.xr.isPresenting) return;
   vrNotifyPanel.redraw(drawVRNotify(text));
   vrNotifyPanel.mesh.visible = true;
   clearTimeout(vrNotifyPanel._hideT);
-  vrNotifyPanel._hideT = setTimeout(() => { vrNotifyPanel.mesh.visible = false; }, 2600);
+  vrNotifyPanel._hideT = setTimeout(() => { vrNotifyPanel.mesh.visible = false; }, holdMs);
 }
 
 const powerBannerEl = document.getElementById('powerbanner');
@@ -3413,6 +3438,15 @@ function triggerGameOver(force) {
       `score: ${score}  ·  cars knocked: ${knockedCount}  ·  orbs: ${orbsEl.textContent}/${document.getElementById('orbstotal').textContent}`;
     goEl.style.display = 'flex';
     if (document.pointerLockElement) document.exitPointerLock();
+    // VR NEVER SEES goEl (Alex: "when I die I can't see the Try Again
+    // menu" -- HTML overlays like goEl never composite into the WebXR
+    // framebuffer at all, same reason vrNotifyPanel exists in the first
+    // place; see its own comment above). The auto-restart below already
+    // skips the menu entirely, but with nothing else on screen for
+    // VR_AUTO_RESTART_DELAY seconds it read as "stuck," not "restarting" --
+    // reuse the same in-world camera-locked panel every other VR
+    // notification uses, held exactly as long as the restart delay.
+    showVRNotification(`GAME OVER  ·  ${score} pts  ·  restarting...`, VR_AUTO_RESTART_DELAY * 1000);
   }, 550);
   if (renderer.xr.isPresenting) setTimeout(resetGame, VR_AUTO_RESTART_DELAY * 1000);
 }
