@@ -208,7 +208,7 @@
        in-headset without needing devtools. If it EVER doesn't match what
        you expect after a hard reload, that's real signal of a caching
        problem, not a hunch. -->
-  <div id="versionLine">by ibrews &nbsp;·&nbsp; v0.0.9 built 2026-07-04 (round 10: VR reel fix)</div><br>
+  <div id="versionLine">by ibrews &nbsp;·&nbsp; v0.1.0 built 2026-07-04 (round 11: batch of 11)</div><br>
   A living neon city at night. Sling a web, swing between skyscrapers, and see how much
   trouble you can cause before the night's over.<br><br>
   <span id="initialsRow">callsign (optional, 3 letters): <input id="initialsInput" maxlength="3"
@@ -412,7 +412,7 @@ const FALL_SPAWN_Y = 240;   // "battle bus" drop height, above city center
 // scattered torus pickups add EFFECT_EXTEND to every one of YOUR
 // currently-active effects.
 const EFFECT_DURATION = 30, EFFECT_EXTEND = 30;
-const GIANT_SCALE = 10, TINY_SCALE = 0.22, SHRINKTAG_SCALE = 0.22;
+const GIANT_SCALE = 8, TINY_SCALE = 0.22, SHRINKTAG_SCALE = 0.22;   // 10 -> 8, Alex: "in giant mode let's make it 80% of the current size"
 const SPEED_MULT = 2, LOWG_GRAV_MULT = 0.28, SUPERJUMP_MULT = 5;
 // Strengthened per Alex feedback (radius 16->26, pull 14->24) -- magnet felt
 // too weak/small to reliably matter during a run.
@@ -606,6 +606,21 @@ scene.add(cameraRig);
 cameraRig.add(camera);
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.xr.enabled = true;
+// VR PERF (Alex: "framerate really chugs in VR sometimes, other platforms
+// have no problem"). Headset GPUs are far weaker than a desktop GPU, and
+// stereo rendering already doubles the per-frame draw/fill cost (one pass
+// per eye) before any of that gap is accounted for. setFramebufferScaleFactor
+// is the single biggest lever available without touching visual features --
+// it scales the actual per-eye render-target resolution (must be set before
+// any XR session starts; three.js honors it for every session after this
+// point regardless of how many times Enter VR is clicked). 0.85 trades a
+// modest, hard-to-notice sharpness drop for a real ~28% pixel-fill saving
+// (0.85^2). Desktop is completely unaffected -- this only ever applies
+// inside an active XR session. See also: EffectComposer/bloom is ALREADY
+// skipped entirely in XR (search "isPresenting) renderer.render" below --
+// that was true before this round), and stepRain's presenting-gated count
+// cut just above.
+renderer.xr.setFramebufferScaleFactor(0.85);
 renderer.setSize(innerWidth, innerHeight);
 renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
@@ -1194,6 +1209,12 @@ function stepRooftopCoins(t, p) {
       spawnScorePopup(mesh.position, amount);
       broadcastPickup(mesh.position, amount);
       analyticsOrbsSinceReport++;
+      // Counter fix (Alex: "orbs on top of buildings don't register in our
+      // counter, even though I do get points") -- this branch always
+      // awarded score but never touched the "orbs: X/Y" HUD counter, since
+      // rooftop coins are a separate pool from `pickups` (see orbstotal's
+      // assignment above, now sized to include rooftopCoins.length too).
+      orbsEl.textContent = (parseInt(orbsEl.textContent) || 0) + 1;
     }
   });
 }
@@ -1707,6 +1728,7 @@ const EFFECT_NAMES = {
   webanywhere: 'SWING ANYWHERE', magnet: 'MAGNET MODE', confetti: 'CONFETTI MODE',
   zombiesummon: 'ZOMBIE SUMMON', disco: 'DISCO CITY', slow: 'SLOW-MO',
   shrinktag: 'SHRINK TOUCH', shrunk: 'SHRUNKEN', torusext: 'DURATION UP',
+  longlance: 'LONG LANCE',
 };
 // Still used by the shrinktag banner (a targeted player-vs-player attack,
 // not a self/everyone power-up effect -- out of scope for the initials
@@ -1873,6 +1895,21 @@ function updatePowerupAppearance() {
     seg.segMat.color.setHex(i < stackCount ? POWERUP_STACK_COLORS[Math.min(i, POWERUP_STACK_COLORS.length - 1)] : coatMat.color.getHex());
   }
 }
+// LONG LANCE (Alex: "an orb type for making the lance 5x as long"). Scale
+// is applied in the GEOMETRY-LOCAL frame before the mesh's own rotation
+// (Three.js composes local matrices as T*R*S) -- both `stick` and
+// `fpStick` are built from a CylinderGeometry whose authored length runs
+// along local Y, and get rotated onto body-local/camera-local Z
+// afterward, so `.scale.y` (not `.scale.z`) is the one that actually
+// stretches the visible length regardless of that rotation. Grows/shrinks
+// around the cylinder's own center (no position compensation) -- a
+// slightly-into-the-body near end is an acceptable trade for not needing
+// a bespoke offset per mesh for a power-up prop.
+function updateLanceLength() {
+  const s = myEffectActive('longlance') ? 5 : 1;
+  spidey.stick.scale.y = s;
+  fpStick.scale.y = s;
+}
 const effectExpireEl = document.getElementById('effectexpire');
 function showEffectExpired(name) {
   effectExpireEl.textContent = `${EFFECT_NAMES[name] || name} EXPIRED`;
@@ -1924,6 +1961,14 @@ const ORB_EFFECTS = [
   { key: 'magnet',      color: 0xff0066, geo: () => new THREE.CylinderGeometry(0.18, 0.18, 0.5, 8) },
   { key: 'confetti',    color: 0xff99ff, geo: () => new THREE.IcosahedronGeometry(0.4, 1) },
   { key: 'zombiesummon', color: 0xaa2244, geo: () => new THREE.IcosahedronGeometry(0.5, 1) },
+  // LONG LANCE (Alex: "an orb type for making the lance 5x as long, keep
+  // the total orbs at 512"). Adding an entry here needs no other change
+  // to hit that -- DUAL_ODDS below auto-redistributes across however many
+  // ORB_EFFECTS exist, and the 512 total comes from GRID_N*PICKUP_PER_BLOCK
+  // (unrelated to how many TYPES are in the roll table), so the pickup
+  // COUNT never moves. Thin cone reads as a lance-tip silhouette, distinct
+  // from every rounder/boxier shape above.
+  { key: 'longlance',   color: 0xffb347, geo: () => new THREE.ConeGeometry(0.14, 0.9, 5) },
 ];
 const DUAL_ODDS = 0.51 / (ORB_EFFECTS.length * 2);
 const DUAL_KEYS = new Set(ORB_EFFECTS.map(e => e.key));
@@ -1970,13 +2015,31 @@ for (let i = 0; i < GRID_N; i++) for (let j = 0; j < GRID_N; j++) {
     // only by actually swinging. ~25% now spawn near ground level instead,
     // so there's always something to grab just by running/jumping around
     // too, not only while airborne on a web.
-    const baseY = rng() < 0.25 ? uniform(0.8, 1.6) : uniform(6, 15);
+    const isGroundOrb = rng() < 0.25;
+    // SCATTER (Alex: "scatter some of the orbs through the air, make the
+    // ones floating in the air about 50% bigger"). Widened the airborne
+    // band from a narrow 6-15 (basically one swing-height shelf) to 4-26
+    // (reaching up toward rooftop height), so airborne orbs actually read
+    // as scattered through the sky at varied altitudes instead of
+    // clustered at one height. Airborne orbs also scale up 1.5x (applied
+    // to `mesh`, which is the halo-ring GROUP for "everyone" pickups, so
+    // the ring grows with it) -- bigger and easier to spot against the
+    // city from a distance, ground orbs unchanged.
+    const baseY = isGroundOrb ? uniform(0.8, 1.6) : uniform(4, 26);
     mesh.position.set(blockCenter(i) + uniform(-4, 4), baseY, blockCenter(j) + uniform(-4, 4));
+    if (!isGroundOrb) mesh.scale.setScalar(1.5);
     scene.add(mesh);
     pickups.push({ mesh, ring, baseY, phase: uniform(0, 6.28), got: false, type: type.key, color: type.color, world: !!type.world });
   }
 }
-document.getElementById('orbstotal').textContent = pickups.length;
+// Includes rooftopCoins (Alex: "orbs on top of buildings don't register
+// in our counter, even though I do get points") -- stepRooftopCoins() DID
+// award score for a roof coin, it just never touched orbsEl/orbstotal at
+// all, so the "orbs: X/Y" HUD counter silently excluded an entire
+// collectible category. Folding rooftop coins into this SAME total (not
+// a separate counter) keeps the displayed fraction honest -- see the
+// matching orbsEl.textContent bump added in stepRooftopCoins below.
+document.getElementById('orbstotal').textContent = pickups.length + rooftopCoins.length;
 // ORB CATEGORY BREAKDOWN (Alex: "512 orbs -- have a sub breakdown of them
 // into categories"). Three buckets: plain 'orb' pickups are pure points;
 // the ORB_EFFECTS-derived keys (giant/tiny/fly/... plus their 'All' world
@@ -2165,7 +2228,15 @@ function triggerLightning() {
 }
 
 function stepRain(center, t) {
-  const liveCount = Math.floor(RAIN_COUNT * rainIntensity);
+  // VR PERF (Alex: "framerate really chugs in VR sometimes, other
+  // platforms have no problem -- any optimizations we can trigger
+  // specifically for VR?"). A headset's GPU is far weaker than a desktop
+  // one AND renders every particle TWICE (stereo, one draw per eye) --
+  // halving the live rain count while presenting cuts real per-frame
+  // vertex/fill cost for one of the cheaper-looking wins available (see
+  // renderer.xr.setFramebufferScaleFactor + the other VR-gated cuts below
+  // for the bigger levers).
+  const liveCount = Math.floor(RAIN_COUNT * rainIntensity * (renderer.xr.isPresenting ? 0.5 : 1));
   rainDrops.forEach((d, i) => {
     if (i >= liveCount) {
       rainPos.set([0, -999, 0, 0, -999, 0], i * 6);
@@ -2244,6 +2315,35 @@ rainBus.connect(audioCtx.destination);
   filt.frequency.value = 3400; filt.Q.value = 0.5;
   src.connect(filt); filt.connect(rainBus);
   src.start(0);
+}
+
+// REEL SOUND (Alex: "when reeling in/out let's have a sound effect,
+// inverted from one to the other"). Same PERSISTENT-source pattern as
+// rainBus above -- two oscillators that never stop, gain-gated on/off by
+// which key is currently held, so starting/stopping never clicks or
+// respins a fresh audio graph. "Inverted from one to the other" is taken
+// literally: reeling IN glides pitch UP (tightening), reeling OUT glides
+// pitch DOWN (loosening) -- opposite directions from a shared middle,
+// not just two arbitrary blips.
+const reelBus = audioCtx.createGain();
+reelBus.gain.value = 0.32;
+reelBus.connect(audioCtx.destination);
+const reelInGain = audioCtx.createGain(), reelOutGain = audioCtx.createGain();
+reelInGain.gain.value = 0; reelOutGain.gain.value = 0;
+reelInGain.connect(reelBus); reelOutGain.connect(reelBus);
+const reelInOsc = audioCtx.createOscillator(); reelInOsc.type = 'sawtooth'; reelInOsc.frequency.value = 220;
+const reelOutOsc = audioCtx.createOscillator(); reelOutOsc.type = 'sawtooth'; reelOutOsc.frequency.value = 480;
+const reelInFilt = audioCtx.createBiquadFilter(); reelInFilt.type = 'lowpass'; reelInFilt.frequency.value = 1400;
+const reelOutFilt = audioCtx.createBiquadFilter(); reelOutFilt.type = 'lowpass'; reelOutFilt.frequency.value = 1400;
+reelInOsc.connect(reelInFilt); reelInFilt.connect(reelInGain);
+reelOutOsc.connect(reelOutFilt); reelOutFilt.connect(reelOutGain);
+reelInOsc.start(0); reelOutOsc.start(0);
+function stepReelSound(reelingIn, reelingOut) {
+  const now = audioCtx.currentTime;
+  reelInGain.gain.setTargetAtTime(reelingIn ? 0.55 : 0, now, 0.05);
+  reelOutGain.gain.setTargetAtTime(reelingOut ? 0.55 : 0, now, 0.05);
+  reelInOsc.frequency.setTargetAtTime(reelingIn ? 520 : 220, now, reelingIn ? 0.15 : 0.3);
+  reelOutOsc.frequency.setTargetAtTime(reelingOut ? 180 : 480, now, reelingOut ? 0.15 : 0.3);
 }
 
 function playSpatialAt(pos, build) {
@@ -3581,6 +3681,7 @@ function makePawnBody(suitColor) {
   stick.rotation.x = Math.PI / 2;   // cylinder's local +Y -> body-local +Z (forward)
   stick.position.set(0.2, 0.18, 0.35);
   body.add(stick);
+  body.stick = stick;   // exposed for LONG LANCE power-up scaling (see updateLanceLength)
   return body;
 }
 // FIRST-PERSON STICK VIEW-MODEL (Alex, VR playtest: "you should still see
@@ -4321,7 +4422,7 @@ function stepTouch(dt) {
 // controller's stick drives look (yaw/pitch, directly -- there's no
 // separate "xr look" primitive to combine, same as how the desktop
 // gamepad's right stick works). Either trigger fires the web/jump action.
-let xrWebHeld = false, xrLeftXPrev = false, xrLeftYPrev = false, xrRightBPrev = false, xrLeftStickClickPrev = false;
+let xrWebHeld = false, xrLeftXPrev = false, xrLeftYPrev = false, xrRightBPrev = false, xrLeftStickClickPrev = false, xrRightStickClickPrev = false;
 // Vision Pro first/third toggle (pinch-only devices have no B-button
 // equivalent): DOUBLE-pinch the LEFT hand -- two pinch starts within
 // 400ms. A single held pinch still just walks (see the transient-pointer
@@ -4336,6 +4437,79 @@ const xrKeys = {};
 // isn't sitting directly next to the code it describes.
 const SNAP_TURN_ANGLE = Math.PI / 6, SNAP_TURN_THRESHOLD = 0.6;
 let xrSnapArmed = true;
+// VR RECENTER (Alex: "do we have a recenter button for VR?" -- we didn't).
+// Our own `yaw` variable only rotates `cameraRig`, which the headset's
+// REAL tracked orientation is then composed on TOP of (see the yaw-only
+// camera comment further down) -- so `yaw` alone can never fix "I'm
+// physically facing the wrong way relative to my play space," since that
+// real-world facing is tracked in the XR REFERENCE SPACE itself, upstream
+// of anything our rig does. The only correct fix is to shift the
+// reference space -- the standard WebXR recentering recipe (used by
+// A-Frame's look-controls and common in three.js community examples):
+// read the camera's current LOCAL orientation (which reflects the
+// headset's real physical yaw within the current reference space) and
+// offset the reference space by exactly that much, so "forward" becomes
+// whichever way the player is physically facing RIGHT NOW. Position is
+// deliberately left at (0,0,0) in the offset transform -- only yaw is
+// recentered; recentering height/position too could shove the player
+// through a wall or off a rooftop they're currently standing on.
+function recenterVR() {
+  const baseRefSpace = renderer.xr.getReferenceSpace();
+  if (!baseRefSpace) return;
+  const e = new THREE.Euler().setFromQuaternion(camera.quaternion, 'YXZ');
+  const halfYaw = e.y / 2;
+  const transform = new XRRigidTransform(
+    { x: 0, y: 0, z: 0 },
+    { x: 0, y: Math.sin(halfYaw), z: 0, w: Math.cos(halfYaw) }
+  );
+  renderer.xr.setReferenceSpace(baseRefSpace.getOffsetReferenceSpace(transform));
+}
+// LEFT-ARM SWING PHYSICS (Alex: "make sure the physics of the world,
+// including players and cars, respond to swinging my left arm around").
+// WebXR doesn't expose linear velocity on a gamepad/input source directly
+// -- tracked by simple frame-to-frame differencing of the left grip's
+// WORLD position instead, same idea as remote players' own dead-
+// reckoning `netVel`. Cars reuse the EXISTING knockCar() physics
+// (identical launch/spin/combo path as sprinting into one), so a fast arm
+// swing feels like the same kind of hit, just thrown by your hand instead
+// of your whole body. Remote players can't be touched directly here --
+// pure relay architecture, no server authority over anyone else's client
+// -- so this broadcasts a new 'armpush' message naming the victim; only
+// THAT client applies the velocity kick to itself, the same "attacker
+// reports, victim applies" shape as every other cross-player effect in
+// this file (joust, shrink-tag, powerkill). See worker.js for the relay.
+const ARM_SWING_SPEED_THRESH = 4.5, ARM_SWING_RADIUS = 3.2, ARM_SWING_PUSH = 10;
+const xrLeftGripPrevPos = new THREE.Vector3(), xrLeftGripCur = new THREE.Vector3(), xrLeftGripVel = new THREE.Vector3();
+let xrLeftGripHasPrev = false;
+function stepArmSwingPhysics(dt) {
+  if (!renderer.xr.isPresenting || dt <= 0) { xrLeftGripHasPrev = false; return; }
+  const grip = xrGrips[xrGripIndexFor('left')];
+  grip.getWorldPosition(xrLeftGripCur);
+  if (!xrLeftGripHasPrev) { xrLeftGripPrevPos.copy(xrLeftGripCur); xrLeftGripHasPrev = true; return; }
+  xrLeftGripVel.copy(xrLeftGripCur).sub(xrLeftGripPrevPos).divideScalar(dt);
+  xrLeftGripPrevPos.copy(xrLeftGripCur);
+  const speed = xrLeftGripVel.length();
+  if (speed < ARM_SWING_SPEED_THRESH || !isFinite(speed)) return;
+  const dir = xrLeftGripVel.clone().normalize();
+  for (const list of [cars, parkedCars]) {
+    for (const entry of list) {
+      if (entry.knocked) continue;
+      // Arm swing alone is a lighter touch than a full sprint -- 0.6x the
+      // usual knock threshold, so it can still budge a car but a truck's
+      // higher knockSpeedMult still resists a gentle swing.
+      const knockThresh = KNOCK_SPEED * (entry.knockSpeedMult || 1) * 0.6;
+      if (speed < knockThresh) continue;
+      if (xrLeftGripCur.distanceTo(entry.obj.position) < ARM_SWING_RADIUS) knockCar(entry, dir, list === parkedCars, speed);
+    }
+  }
+  if (mpSocket && mpSocket.readyState === WebSocket.OPEN) {
+    for (const [id, rp] of remotePlayers) {
+      if (xrLeftGripCur.distanceTo(rp.body.position) < ARM_SWING_RADIUS) {
+        mpSocket.send(JSON.stringify({ type: 'armpush', victimId: id, dir: [dir.x, dir.y, dir.z], speed }));
+      }
+    }
+  }
+}
 function stepXR(dt) {
   const session = renderer.xr.getSession && renderer.xr.getSession();
   if (!session) {
@@ -4344,7 +4518,7 @@ function stepXR(dt) {
     return;
   }
   let held = false, moveX = 0, moveY = 0, lookX = 0, lookY = 0;
-  let leftX = false, leftY = false, rightB = false, leftStickClick = false, leftPinchNow = false;
+  let leftX = false, leftY = false, rightB = false, leftStickClick = false, leftPinchNow = false, rightStickClick = false;
   for (const src of session.inputSources) {
     const gp = src.gamepad;
     if (!gp) continue;
@@ -4375,6 +4549,11 @@ function stepXR(dt) {
     if (rightHand) {
       if (gp.buttons[4] && gp.buttons[4].pressed) held = true;
       if (gp.buttons[5] && gp.buttons[5].pressed) rightB = true;
+      // Right stick click (buttons[3], xr-standard) recenters the view
+      // (Alex: "do we have a recenter button for VR?" -- we didn't).
+      // Mirrors the left stick click's HUD toggle -- edge-triggered below
+      // via xrRightStickClickPrev.
+      if (gp.buttons[3] && gp.buttons[3].pressed) rightStickClick = true;
     }
     // Left X/Y (buttons[4]/[5] on the left controller): X exits VR
     // (Alex: "Make the left X button exit VR mode"), Y respawns (Alex:
@@ -4426,6 +4605,8 @@ function stepXR(dt) {
   else if (!rightB) xrRightBPrev = false;
   if (leftStickClick && !xrLeftStickClickPrev) { xrLeftStickClickPrev = true; toggleHud(); }
   else if (!leftStickClick) xrLeftStickClickPrev = false;
+  if (rightStickClick && !xrRightStickClickPrev) { xrRightStickClickPrev = true; recenterVR(); }
+  else if (!rightStickClick) xrRightStickClickPrev = false;
   // DOUBLE-PINCH first/third toggle for pinch-only devices (Vision Pro:
   // no B-button equivalent exists, so there was NO way to change camera
   // mode there at all). Edge-detected on a frame-local flag, NOT per-
@@ -4449,19 +4630,26 @@ function stepXR(dt) {
   // full-deflection thresholds tuned against a desktop gamepad's analog
   // curve may simply be harder to physically reach on a VR thumbstick).
   xrKeys.ShiftLeft = Math.hypot(moveX, moveY) > 0.72;
-  // RIGHT STICK -- CALIBRATION ANCHOR, ROUND 9 (do not "fix" from spec;
-  // read this): round 8's anchor below this comment was Alex-confirmed
-  // correct on hardware at the time -- then, on the very next real-hardware
-  // pass (v0.0.7), Alex reported both axes inverted. Rather than re-derive
-  // from scratch again, the round-8 mapping identities (lookX = physical X,
-  // lookY = physical Y; first-person smooth-from-X/snap-from-Y, third-
-  // person yaw-from-X/pitch-from-Y) are being KEPT -- only the sign of both
-  // physical axes was flipped, at the single point they're read (see the
-  // `if (rightHand) { lookX = -ax ...; lookY = ay ...; }` line above). If
-  // this needs correcting AGAIN, flip the sign there, not the logic below;
-  // a "confirmed correct" anchor is only as good as the last hands-on
-  // report -- always supersede it explicitly like this, don't silently
-  // overwrite the trail of what was tried when.
+  // RIGHT STICK -- LOCKED, ROUND 10 (v0.0.9). Alex, after testing the
+  // round-9 sign flip on real hardware: "all the VR joysticks are behaving
+  // perfectly -- LOCK THAT." Both sticks (right: yaw/pitch/snap-turn per
+  // camera mode; left: movement AND reel-in/out, see the VR-ONLY REVERSAL
+  // comment at the rope-constraint block in stepPlayer) are CONFIRMED
+  // CORRECT as of this build. This is the end of a 10-round saga (see
+  // intelligence/techniques/webxr-vr-input-and-rendering-gotchas.md) --
+  // DO NOT touch any sign/axis/threshold in this function again without a
+  // FRESH, EXPLICIT hardware report from Alex describing exactly which
+  // physical stick, which axis, and which direction misbehaves. A vague
+  // "controls feel off" is not enough to justify re-opening this.
+  //
+  // Round 8/9 history, kept for context: round 8's anchor was confirmed
+  // correct at the time, then round 9's next hardware pass found both
+  // right-stick axes inverted -- fixed by flipping sign at the single
+  // derivation point below (`if (rightHand) { lookX = -ax ...; lookY = ay
+  // ...; }`), keeping the round-8 mapping IDENTITIES (lookX=physical X,
+  // lookY=physical Y; first-person smooth-from-X/snap-from-Y; third-person
+  // yaw-from-X/pitch-from-Y) unchanged. That flip is now the confirmed,
+  // locked state.
   // Mapping below UNCHANGED since round 8: lookX (physical X) -> smooth
   // yaw in first person, yaw in third person; lookY (physical Y) -> snap-
   // turn in first person, pitch in third person.
@@ -4490,6 +4678,7 @@ function stepXR(dt) {
       xrSnapArmed = true;
     }
   }
+  stepArmSwingPhysics(dt);
 }
 
 // ----------------------------------------------------------- PLAYER STEP --
@@ -4684,6 +4873,7 @@ function stepPlayer(dt) {
     if (reelInKey) p.ropeLen = Math.max(REEL_MIN_ROPE, p.ropeLen - REEL_SPEED * dt);
     else if (reelOutKey) p.ropeLen += REEL_SPEED * dt;
     else p.vel.addScaledVector(aimDir(), SWING_FORWARD_PULL * dt);
+    stepReelSound(!!reelInKey, !!reelOutKey);
     const d = p.pos.clone().sub(p.anchor);
     if (d.length() > p.ropeLen) {
       d.setLength(p.ropeLen);
@@ -4700,7 +4890,8 @@ function stepPlayer(dt) {
     webLine.visible = true;
     webLineGeo.setPositions([p.pos.x, p.pos.y, p.pos.z,
       phantomGrappleTarget.x, phantomGrappleTarget.y, phantomGrappleTarget.z]);
-  } else webLine.visible = false;
+    stepReelSound(false, false);   // not attached -- silence reel sound if it was still ramping down from a release mid-reel
+  } else { webLine.visible = false; stepReelSound(false, false); }
 
   // ground + building AABB collisions
   p.onGround = false;
@@ -4722,7 +4913,9 @@ function stepPlayer(dt) {
   // reads as a constant climb speed, not a decaying one. Letting go of the
   // button (or losing contact) just stops the override and you fall/walk
   // off normally -- no separate "let go of wall" logic needed.
-  const wallCrawling = webHeld && !p.anchor && !flying;
+  // `let`, not `const` -- see the SEAMLESS SWING -> WALL-CLIMB comment
+  // below, which flips this mid-loop the instant a swing smacks a wall.
+  let wallCrawling = webHeld && !p.anchor && !flying;
   let buildingHit = false;
   let wallFaceAxis = null;   // which wall face we're pressed against this frame, for pawn rotation
   let wallCollider = null;   // the actual collider hit (carries .cyl for round buildings) -- see the pose code below
@@ -4745,7 +4938,21 @@ function stepPlayer(dt) {
     if (axis === 3) { p.pos.y = c.max[1] + 0.9; if (p.vel.y < 0) p.vel.y = 0; p.onGround = true; }
     if (axis === 4) { p.pos.z = c.min[2] - R; if (p.vel.z > 0) p.vel.z = 0; }
     if (axis === 5) { p.pos.z = c.max[2] + R; if (p.vel.z < 0) p.vel.z = 0; }
-    if (axis === 0 || axis === 1 || axis === 4 || axis === 5) buildingHit = true;
+    if (axis === 0 || axis === 1 || axis === 4 || axis === 5) {
+      buildingHit = true;
+      // SEAMLESS SWING -> WALL-CLIMB (Alex: "if I swing and smack directly
+      // into a building and I'm still pushing toward the building with
+      // swing button held, now I'm immediately in run-up-the-building
+      // mode"). Previously hitting a wall mid-swing just push-out-clamped
+      // this axis and left the anchor/rope intact -- you'd dangle there
+      // awkwardly instead of climbing, even though "still holding the web
+      // button, aimed at the wall I just hit" is a clear climb intent.
+      // Release the anchor and flip `wallCrawling` true right HERE, at
+      // first contact, so the very next check (same iteration, same
+      // frame) already treats this as a fresh wall-crawl -- no one-frame
+      // gap where you'd visibly bounce off before climbing kicks in.
+      if (p.anchor && webHeld && !flying) { p.anchor = null; wallCrawling = true; }
+    }
     if ((axis === 0 || axis === 1 || axis === 4 || axis === 5) && wallCrawling &&
         p.pos.y < c.max[1] + 0.9) {   // don't climb past the roofline -- just walk onto it instead
       p.onWall = true;
@@ -4797,6 +5004,21 @@ function stepPlayer(dt) {
   // from the power-up manifest -- there's no more OOB death to bypass.)
   const beyondWall = Math.abs(p.pos.x) > WORLD_BOUND || Math.abs(p.pos.z) > WORLD_BOUND;
   if (p.pos.y < -25) { triggerGameOver(true); return; }
+  // FLIGHT CEILING (Alex: "make sure you can't fly above the boundary
+  // walls and exit the map"). The horizontal bounce below already clamps
+  // x/z at any height, so escaping was never actually possible in terms
+  // of raw position -- but flying up past the wall's own visible top
+  // (FLIGHT_CEILING sits just under it, at 300 vs the wall's 320) reads
+  // as "I got over the wall" regardless of what the invisible bound does,
+  // since there's nothing left to visually confirm you're still
+  // contained. Bounce straight down the same way the horizontal wall
+  // bounces you back, so going up hits a hard, visible ceiling before you
+  // ever clear the wall's top edge.
+  const FLIGHT_CEILING = 300;
+  if (p.pos.y > FLIGHT_CEILING) {
+    p.pos.y = FLIGHT_CEILING;
+    if (p.vel.y > 0) p.vel.y = -Math.abs(BOUNCE_UP) * 0.5;
+  }
   if (beyondWall) {
     const toCenter = new THREE.Vector3(-p.pos.x, 0, -p.pos.z);
     if (toCenter.lengthSq() > 0) toCenter.normalize();
@@ -5372,6 +5594,14 @@ function connectMultiplayer() {
       const victimColor = msg.victimId === myId ? myColor : (remotePlayers.get(msg.victimId)?.color ?? null);
       if (msg.victimId === myId) activeEffects.shrunk = EFFECT_DURATION;
       showPowerBanner(`${colorLabel(msg.byColor)} SHRUNK ${colorLabel(victimColor)}!!`);
+    } else if (msg.type === 'armpushed' && msg.victimId === myId && Array.isArray(msg.dir)) {
+      // LEFT-ARM SWING PHYSICS (see stepArmSwingPhysics) -- attacker's
+      // client already computed direction/speed from their own hand
+      // velocity; this client (the victim) just applies the kick to its
+      // own local player, same "attacker reports, victim applies" shape
+      // as every other cross-player effect above.
+      const kick = Math.min(2, (msg.speed || 0) / ARM_SWING_SPEED_THRESH) * ARM_SWING_PUSH;
+      player.vel.addScaledVector(new THREE.Vector3(msg.dir[0], msg.dir[1], msg.dir[2]), kick);
     }
   });
   mpSocket.addEventListener('close', () => { mpSocket = null; setTimeout(connectMultiplayer, 3000); });
@@ -5440,6 +5670,7 @@ function stepMultiplayer(dt, p) {
     for (let ci = 0; ci < rp.coatSegs.length; ci++) {
       rp.coatSegs[ci].segMat.color.setHex(ci < rpStack ? POWERUP_STACK_COLORS[Math.min(ci, POWERUP_STACK_COLORS.length - 1)] : coatMat.color.getHex());
     }
+    rp.body.stick.scale.y = (rp.effects.longlance > 0) ? 5 : 1;   // LONG LANCE replicated the same way as the glow/cape above
     if (rp.anchorPos) {
       rp.webLine.visible = true;
       rp.webLineGeo.setPositions([rp.body.position.x, rp.body.position.y, rp.body.position.z, rp.anchorPos.x, rp.anchorPos.y, rp.anchorPos.z]);
@@ -5510,7 +5741,13 @@ function stepMultiplayer(dt, p) {
     const spHoriz = Math.hypot(p.vel.x, p.vel.z);
     if (spHoriz > STICK_POKE_MIN_SPEED && Math.abs(heightAbove) < STICK_POKE_HEIGHT_GATE && !playerPokeCooldowns.has(id)) {
       const fwdX = Math.sin(spidey.rotation.y), fwdZ = Math.cos(spidey.rotation.y);
-      const tipX = p.pos.x + fwdX * STICK_POKE_REACH, tipZ = p.pos.z + fwdZ * STICK_POKE_REACH;
+      // LONG LANCE (Alex: "an orb type for making the lance 5x as long") --
+      // real reach, not just a visual prop: 5x'ing STICK_POKE_REACH while
+      // active actually extends how far this poke connects, matching the
+      // 5x visual stretch applied to the stick meshes (see
+      // updateLanceLength).
+      const reach = STICK_POKE_REACH * (myEffectActive('longlance') ? 5 : 1);
+      const tipX = p.pos.x + fwdX * reach, tipZ = p.pos.z + fwdZ * reach;
       const tipDist = Math.hypot(tipX - rp.body.position.x, tipZ - rp.body.position.z);
       if (tipDist < STICK_POKE_RADIUS) {
         playerPokeCooldowns.set(id, 0.6);
@@ -5592,6 +5829,7 @@ function loop(now) {
   }
   updatePowerupHud();
   updatePowerupAppearance();
+  updateLanceLength();
   updatePowerupMusicReactivity();   // was defined but never wired up -- music never actually reacted to power-ups until now
 
   // Signal phase is a pure function of `t % period` -- so swapping in real
@@ -5720,7 +5958,8 @@ window.__sw = { THREE, player, cars, parkedCars, pickups, colliders, EDGE, WORLD
                 get xrSnapArmed() { return xrSnapArmed; },
                 kbKeyDown, aimDir, fpStick,
                 stepXR, xrKeys, get xrWebHeld() { return xrWebHeld; }, set xrWebHeld(v) { xrWebHeld = v; },
-                cameraRig, renderer, enterGame,
+                cameraRig, renderer, enterGame, recenterVR, stepReelSound, stepArmSwingPhysics, updateLanceLength,
+                get GIANT_SCALE() { return GIANT_SCALE; },
                 remotePlayers, stepMultiplayer, makeRemotePlayerMesh, connectMultiplayer,
                 get mpSocket() { return mpSocket; }, set mpSocket(v) { mpSocket = v; },
                 get myId() { return myId; }, set myId(v) { myId = v; },

@@ -255,6 +255,12 @@ export class Room {
       // THEM), not a self/everyone buff -- same shape again, byColor rides
       // along so bystanders can render "X SHRUNK Y!!" without a lookup.
       this.broadcast({ type: 'shrinktagged', victimId: msg.victimId, byId: id, byColor: Number(colorStr) });
+    } else if (msg.type === 'armpush' && typeof msg.victimId === 'string' && Array.isArray(msg.dir)) {
+      // VR left-arm-swing physics push (see stepArmSwingPhysics in
+      // index.html) -- same targeted "attacker reports, victim applies"
+      // shape as shrinktag/powerkill. dir/speed are computed entirely on
+      // the swinger's own client from their hand velocity; relayed as-is.
+      this.broadcast({ type: 'armpushed', victimId: msg.victimId, dir: msg.dir, speed: typeof msg.speed === 'number' ? msg.speed : 0 });
     } else if (msg.type === 'effect' && typeof msg.name === 'string') {
       // Power-up orb system (Alex's "Delegation Manifest" item 14). SOLO
       // triggers (solid orb) apply instantly on the toucher's own client
