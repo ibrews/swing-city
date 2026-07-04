@@ -4206,38 +4206,39 @@ function stepXR(dt) {
   // full-deflection thresholds tuned against a desktop gamepad's analog
   // curve may simply be harder to physically reach on a VR thumbstick).
   xrKeys.ShiftLeft = Math.hypot(moveX, moveY) > 0.72;
-  // RIGHT STICK, latest correction (Alex, explicit, after the previous fix
-  // was "still wrong"): physX = lookY (physical left/right), physY =
-  // lookX (physical up/down) -- see the hardware-swap note above the loop
-  // for why the raw axes carry those names. Alex's own words: "Left
-  // (X<-0.5) needs to swap with Up (Y>0.5)" and "Right (X>0.5) needs to
-  // swap with Down (Y<-0.5)" -- i.e. swap which FIRST-PERSON function
-  // physX vs physY drives. THIRD PERSON is explicitly UNCHANGED ("needs to
-  // continue... as a full camera controller"): continuous 2-axis yaw+pitch.
-  const physX = lookY, physY = lookX;
+  // RIGHT STICK -- CALIBRATION ANCHOR (do not "fix" from spec; read this):
+  // Alex confirmed on real hardware that FIRST PERSON as coded below is
+  // CORRECT: physical X (left/right) smooth-yaws, physical Y (up/down)
+  // snap-turns. Since first person drives smooth from `lookX` and snap
+  // from `lookY`, that observation pins the true identities: lookX IS
+  // physical X, lookY IS physical Y. (Earlier rounds' "hardware axes are
+  // swapped" compensations had double-crossed the labels -- the observed
+  // behavior is the only trustworthy ground truth here.) Third person had
+  // the two crossed as a result ("Y up should have nothing to do with X
+  // left but here we are") -- now: lookX (physical X) -> yaw, lookY
+  // (physical Y) -> pitch, matching every conventional camera stick.
   if (cameraMode === 'third') {
     xrSnapArmed = true;   // stays armed while unused, so a mode-switch back to first-person doesn't inherit a stale disarm
-    if (Math.abs(physX) > GAMEPAD_DEADZONE) yaw -= physX * 2.2 * dt;
-    if (Math.abs(physY) > GAMEPAD_DEADZONE) pitch = Math.max(-1.35, Math.min(0.9, pitch - physY * 2.2 * dt));
+    if (Math.abs(lookX) > GAMEPAD_DEADZONE) yaw -= lookX * 2.2 * dt;
+    if (Math.abs(lookY) > GAMEPAD_DEADZONE) pitch = Math.max(-1.35, Math.min(0.9, pitch - lookY * 2.2 * dt));
   } else {
-    // FIRST PERSON ONLY: "a lot of deadzone, and really only respond to
-    // directions (not NW or SE or anything like that which should be
-    // deadzone)" -- a diagonal push (both axes significant at once) is
-    // explicitly deadzone, not a blend of both functions. STICK_DIR_PURITY
-    // is how small the OTHER axis must stay for a push to count as clean.
-    // Functions SWAPPED per the correction above: X (left/right) now
-    // SNAP-TURNS (used to be Y's job); Y (up/down) now SMOOTH-TURNS
-    // continuously while held (used to be X's job).
+    // FIRST PERSON -- confirmed correct on hardware, LEAVE AS IS:
+    // physical X (lookX) smooth-yaws, physical Y (lookY) snap-turns.
+    // "A lot of deadzone, and really only respond to directions (not NW
+    // or SE or anything like that which should be deadzone)" -- a
+    // diagonal push (both axes significant at once) is explicitly
+    // deadzone, not a blend. STICK_DIR_PURITY is how small the OTHER
+    // axis must stay for a push to count as clean.
     const STICK_DIR_THRESHOLD = 0.5, STICK_DIR_PURITY = 0.3;
-    const yIsClean = Math.abs(physY) > STICK_DIR_THRESHOLD && Math.abs(physX) < STICK_DIR_PURITY;
-    const xIsClean = Math.abs(physX) > STICK_DIR_THRESHOLD && Math.abs(physY) < STICK_DIR_PURITY;
-    if (yIsClean) yaw -= physY * 2.2 * dt;
+    const xIsClean = Math.abs(lookX) > STICK_DIR_THRESHOLD && Math.abs(lookY) < STICK_DIR_PURITY;
+    const yIsClean = Math.abs(lookY) > STICK_DIR_THRESHOLD && Math.abs(lookX) < STICK_DIR_PURITY;
+    if (xIsClean) yaw -= lookX * 2.2 * dt;
     // Snap-turn: fires once per clean push past the threshold, then
     // re-arms once the stick returns near center -- a held-over stick
     // would otherwise spin continuously instead of discrete comfort-turns.
-    if (xIsClean) {
-      if (xrSnapArmed) { yaw -= Math.sign(physX) * SNAP_TURN_ANGLE; xrSnapArmed = false; }
-    } else if (Math.abs(physX) < GAMEPAD_DEADZONE) {
+    if (yIsClean) {
+      if (xrSnapArmed) { yaw -= Math.sign(lookY) * SNAP_TURN_ANGLE; xrSnapArmed = false; }
+    } else if (Math.abs(lookY) < GAMEPAD_DEADZONE) {
       xrSnapArmed = true;
     }
   }
