@@ -262,7 +262,7 @@
        in-headset without needing devtools. If it EVER doesn't match what
        you expect after a hard reload, that's real signal of a caching
        problem, not a hunch. -->
-  <div id="versionLine">by ibrews &nbsp;·&nbsp; v0.1.9 built 2026-07-06 13:09 (round 20: climb speed cap, direction-honest web aim, wind boost, analog stick speed)</div><br>
+  <div id="versionLine">by ibrews &nbsp;·&nbsp; v0.2.0 built 2026-07-06 13:20 (round 21: fixed all-black park -- tonemapping was crushing its dark materials)</div><br>
   A living neon city at night. Sling a web, swing between skyscrapers, and see how much
   trouble you can cause before the night's over.<br><br>
   <span id="initialsRow">callsign (optional, 3 letters): <input id="initialsInput" maxlength="3"
@@ -1220,9 +1220,23 @@ for (let i = 0; i < GRID_N; i++) for (let j = 0; j < GRID_N; j++) {
 // filling the block reserved above (PARK_BLOCK_I/J). Trees are decorative
 // only (no colliders) -- a swinging player just passes through them, same
 // as the game already treats every other purely cosmetic prop.
-const parkGroundMat = new THREE.MeshStandardMaterial({ color: 0x1c3a22, roughness: 0.95 });
-const treeTrunkMat = new THREE.MeshStandardMaterial({ color: 0x4a3420, roughness: 0.9 });
-const treeFoliageMat = new THREE.MeshStandardMaterial({ color: 0x2f6b3a, roughness: 0.8 });
+// BRIGHTENED (Alex: "the park is entirely black"). These were originally
+// dark, muted MeshStandardMaterial colors -- fine on paper, but at this
+// scene's actual night-time light levels (AmbientLight 1.7 + a 0.8
+// DirectionalLight "moon"), ACESFilmicToneMapping crushes a color this
+// dark to flat black; every OTHER visible non-emissive object in the
+// scene (car bodies, see CAR_COLORS) uses much brighter/more saturated
+// base colors that survive the same tonemapping curve, which is why nothing
+// else in the city reads as "missing" the same way. Confirmed by swapping
+// the tree foliage material to an unlit MeshBasicMaterial with the SAME
+// color live in-browser -- it rendered as clearly visible green, proving
+// the color/geometry were never the problem, only the lit brightness.
+// Fix: brighter base colors (still a believable dark park palette, not
+// washed out) PLUS a touch of emissive so the park stays legible even if
+// scene lighting is ever tuned darker again in the future.
+const parkGroundMat = new THREE.MeshStandardMaterial({ color: 0x3f8f52, emissive: 0x0a1f0e, roughness: 0.95 });
+const treeTrunkMat = new THREE.MeshStandardMaterial({ color: 0x8a5c38, emissive: 0x140d06, roughness: 0.9 });
+const treeFoliageMat = new THREE.MeshStandardMaterial({ color: 0x5fd472, emissive: 0x0f2a15, roughness: 0.8 });
 function makePark(cx, cz) {
   const interior = BLOCK_SIZE - 2 * SIDEWALK_W;
   const patch = new THREE.Mesh(new THREE.BoxGeometry(interior, 0.1, interior), parkGroundMat);
