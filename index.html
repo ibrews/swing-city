@@ -262,7 +262,7 @@
        in-headset without needing devtools. If it EVER doesn't match what
        you expect after a hard reload, that's real signal of a caching
        problem, not a hunch. -->
-  <div id="versionLine">by ibrews &nbsp;·&nbsp; v0.2.0 built 2026-07-06 13:20 (round 21: fixed all-black park -- tonemapping was crushing its dark materials)</div><br>
+  <div id="versionLine">by ibrews &nbsp;·&nbsp; v0.2.1 built 2026-07-06 13:32 (round 22: wind boost subtler + speed-scaled + camera-relative, camera punch-in)</div><br>
   A living neon city at night. Sling a web, swing between skyscrapers, and see how much
   trouble you can cause before the night's over.<br><br>
   <span id="initialsRow">callsign (optional, 3 letters): <input id="initialsInput" maxlength="3"
@@ -690,7 +690,8 @@ scene.fog = new THREE.FogExp2(0x0a0f1e, 0.008);
 // override. Fog (FogExp2, density 0.008, ~98% opaque by ~250 units) still
 // does ALL the actual visual distance falloff; the far plane is just a
 // backstop that should never actually engage in normal play.
-const camera = new THREE.PerspectiveCamera(70, innerWidth / innerHeight, 0.1, 900);
+const BASE_FOV = 70;
+const camera = new THREE.PerspectiveCamera(BASE_FOV, innerWidth / innerHeight, 0.1, 900);
 // WebXR "dolly" pattern: the camera is a child of a movable rig, not moved
 // directly. Outside XR the rig just sits at identity (position/rotation
 // zeroed) so camera.position/camera.lookAt below behave EXACTLY as before
@@ -2428,24 +2429,70 @@ const windLines = new THREE.LineSegments(windGeo, windMat);
 windLines.frustumCulled = false;
 scene.add(windLines);
 const windDirTmp = new THREE.Vector3();
+// WIND BOOST VISUAL TUNING (Alex: "way more subtle (like 20% of those
+// particles)... based on speed and directionality... affect the entire
+// screen not just the area around the player, and be local"). Flying
+// mode's wind (unchanged below) is a deliberately BIG, constant, player-
+// local effect; the boost's wind is a much smaller, speed-reactive,
+// CAMERA-relative one -- same recycled-streak pool and travel-opposite-
+// velocity math, different placement/density/opacity strategy entirely.
+const WIND_BOOST_DENSITY_FRAC = 0.2;   // ~20% of the shared streak pool
+const WIND_BOOST_MAX_OPACITY = 0.22;   // well under flying's flat 0.5
+const WIND_BOOST_SPEED_REF = 30;       // speed (u/s) at which boost wind hits max intensity
+const windRightTmp = new THREE.Vector3(), windUpTmp = new THREE.Vector3(), windFwdTmp = new THREE.Vector3();
 function stepWind(pos, vel, flying, t, boosting) {
   // WIND BOOST reuses this exact same recycled-streak visual flight
   // already had (see WIND_BOOST_ACCEL/windBoostActive in stepPlayer) --
   // same streaks, same travel-along-velocity math, just a second trigger
-  // condition alongside `flying`.
-  const active = flying || boosting;
-  windMat.opacity = active ? 0.5 : 0;
-  if (!active) return;
+  // condition alongside `flying`, with its OWN placement/density/opacity
+  // (see the tuning constants above) since a full-strength flying-style
+  // wind was reported as way too much for a WASD air nudge.
+  if (!flying && !boosting) { windMat.opacity = 0; return; }
   const speed = vel.length();
+  // Streaks travel OPPOSITE the player's actual direction of travel (wind
+  // rushing past you as you move forward, not with you) -- unchanged math,
+  // just called out explicitly since it's now load-bearing for two
+  // different visual modes instead of one.
   if (speed > 0.5) windDirTmp.copy(vel).normalize(); else windDirTmp.set(0, 0, 1);
-  const rate = 6 + speed;
-  windStreaks.forEach((d, i) => {
-    const travel = (d.travel0 + t * rate) % WIND_RANGE;
-    const bx = pos.x + d.ox, by = pos.y + d.oy, bz = pos.z + d.oz;
-    const px = bx - windDirTmp.x * travel, py = by - windDirTmp.y * travel, pz = bz - windDirTmp.z * travel;
-    const tx = px - windDirTmp.x * d.len, ty = py - windDirTmp.y * d.len, tz = pz - windDirTmp.z * d.len;
-    windPos.set([px, py, pz, tx, ty, tz], i * 6);
-  });
+  if (flying) {
+    windMat.opacity = 0.5;
+    const rate = 6 + speed;
+    windStreaks.forEach((d, i) => {
+      const travel = (d.travel0 + t * rate) % WIND_RANGE;
+      const bx = pos.x + d.ox, by = pos.y + d.oy, bz = pos.z + d.oz;
+      const px = bx - windDirTmp.x * travel, py = by - windDirTmp.y * travel, pz = bz - windDirTmp.z * travel;
+      const tx = px - windDirTmp.x * d.len, ty = py - windDirTmp.y * d.len, tz = pz - windDirTmp.z * d.len;
+      windPos.set([px, py, pz, tx, ty, tz], i * 6);
+    });
+  } else {
+    // BOOST: opacity scales with actual speed (a light nudge barely
+    // shows anything; a strong directional push at real speed is clearly
+    // visible) instead of flying's flat constant. Positioned relative to
+    // the CAMERA's own basis (right/up/forward), not the player's world
+    // position, so the streaks spread across the visible VIEW/screen
+    // (still "local" -- close to the camera, not distant world-space
+    // decor) rather than clustering in a small radius around the
+    // player's body, which barely read as anything in third person.
+    const speedFrac = Math.min(1, speed / WIND_BOOST_SPEED_REF);
+    windMat.opacity = WIND_BOOST_MAX_OPACITY * speedFrac;
+    const liveCount = Math.floor(WIND_COUNT * WIND_BOOST_DENSITY_FRAC);
+    camera.getWorldDirection(windFwdTmp);
+    windUpTmp.set(0, 1, 0);
+    windRightTmp.crossVectors(windFwdTmp, windUpTmp).normalize();
+    windUpTmp.crossVectors(windRightTmp, windFwdTmp).normalize();
+    const rate = 10 + speed;
+    windStreaks.forEach((d, i) => {
+      if (i >= liveCount) { windPos.set([0, -999, 0, 0, -999, 0], i * 6); return; }   // unused slice of the shared pool -- park off-screen, same trick as rain's liveCount
+      const travel = (d.travel0 + t * rate) % WIND_RANGE;
+      const fwdDist = 4 + d.oz * 1.5;   // 0.7..7.3 units in front of the camera -- close/"local," not distant
+      const bx = camera.position.x + windRightTmp.x * d.ox * 2.2 + windUpTmp.x * d.oy * 1.8 + windFwdTmp.x * fwdDist;
+      const by = camera.position.y + windRightTmp.y * d.ox * 2.2 + windUpTmp.y * d.oy * 1.8 + windFwdTmp.y * fwdDist;
+      const bz = camera.position.z + windRightTmp.z * d.ox * 2.2 + windUpTmp.z * d.oy * 1.8 + windFwdTmp.z * fwdDist;
+      const px = bx - windDirTmp.x * travel, py = by - windDirTmp.y * travel, pz = bz - windDirTmp.z * travel;
+      const tx = px - windDirTmp.x * d.len, ty = py - windDirTmp.y * d.len, tz = pz - windDirTmp.z * d.len;
+      windPos.set([px, py, pz, tx, ty, tz], i * 6);
+    });
+  }
   windGeo.attributes.position.needsUpdate = true;
 }
 
@@ -5181,6 +5228,8 @@ const GRAV = 26, RUN = 11, AIR_CTRL = 11;
 // rather than building a second parallel particle system.
 const WIND_BOOST_ACCEL = 24;
 let windBoostActive = false;
+const CAMERA_PUNCH_MAX_FOV = 2.5;   // degrees pulled in from BASE_FOV at max boost speed
+let cameraPunchFov = 0;
 let reticleClock = 0;
 const wallClimbFwd = new THREE.Vector3(), wallClimbSide = new THREE.Vector3(), wallClimbMatrix = new THREE.Matrix4();
 const wallClimbRadial = new THREE.Vector3();
@@ -5387,6 +5436,21 @@ function stepPlayer(dt) {
     }
   }
   if (p.onGround || p.onWall || webHeld) windBoostActive = false;
+  // CAMERA PUNCH-IN (Alex: "maybe we also subtly punch the camera in when
+  // we do that"). A small FOV pull-in while wind-boosting, scaled by
+  // actual speed (same reference the wind opacity uses) so a light nudge
+  // is nearly imperceptible and a fast boost reads as a deliberate little
+  // kick, eased both in and out rather than snapping. Desktop/gamepad
+  // only -- changing FOV in VR would be a real comfort violation (see the
+  // "never rotate/zoom the camera except yaw" rule elsewhere in this
+  // file); WebXR overwrites the projection matrix from real device
+  // parameters every frame anyway, so this would be a no-op there at best.
+  if (!renderer.xr.isPresenting) {
+    const targetPunch = windBoostActive ? Math.min(1, p.vel.length() / WIND_BOOST_SPEED_REF) * CAMERA_PUNCH_MAX_FOV : 0;
+    cameraPunchFov += (targetPunch - cameraPunchFov) * Math.min(1, dt * 6);
+    const newFov = BASE_FOV - cameraPunchFov;
+    if (Math.abs(camera.fov - newFov) > 0.01) { camera.fov = newFov; camera.updateProjectionMatrix(); }
+  }
   p.pos.addScaledVector(p.vel, dt);
 
   // rope constraint => pendulum
@@ -6600,6 +6664,8 @@ window.__sw = { THREE, player, cars, parkedCars, pickups, colliders, EDGE, WORLD
                 get moveMag() { return moveMag; }, set moveMag(v) { moveMag = v; },
                 get gpMoveMag() { return gpMoveMag; }, get tMoveMag() { return tMoveMag; }, get xrMoveMag() { return xrMoveMag; },
                 get windBoostActive() { return windBoostActive; }, WIND_BOOST_ACCEL,
+                WIND_BOOST_DENSITY_FRAC, WIND_BOOST_MAX_OPACITY, WIND_BOOST_SPEED_REF, WIND_COUNT,
+                get cameraPunchFov() { return cameraPunchFov; }, CAMERA_PUNCH_MAX_FOV, BASE_FOV, windGeo, windLines,
                 keys, kbKeys, gpKeys, tKeys,
                 get kbMouseWebHeld() { return kbMouseWebHeld; },
                 get gamepadWebHeld() { return gamepadWebHeld; },
