@@ -8,6 +8,22 @@
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' fill='%23090014'/%3E%3Crect x='3' y='11' width='6' height='19' fill='%23ff2fa0'/%3E%3Crect x='13' y='4' width='7' height='26' fill='%2300e5ff'/%3E%3Crect x='23' y='15' width='6' height='15' fill='%23ff2fa0'/%3E%3Crect x='5' y='14' width='2' height='2' fill='%23fff'/%3E%3Crect x='15' y='8' width='2' height='2' fill='%23fff'/%3E%3Crect x='15' y='15' width='2' height='2' fill='%23fff'/%3E%3Crect x='18' y='11' width='2' height='2' fill='%23fff'/%3E%3Crect x='25' y='18' width='2' height='2' fill='%23fff'/%3E%3C/svg%3E">
 <style>
   html, body { margin: 0; height: 100%; overflow: hidden; background: #010208; }
+  /* GLOBAL TEXT-SELECTION LOCKDOWN (Alex, round 2: "on mobile there still
+     seem to be text I can select, including the entire screen"). Round 12
+     applied user-select:none piecemeal, element by element -- every place
+     it was actually checked worked, but that's exactly the problem: any
+     HUD element NOT explicitly covered (there were several) stayed
+     selectable, and "the entire screen" is what that gap reads as on a
+     real phone. Apply it once, globally, on every element by default;
+     the ONE legitimate exception (the callsign text input, which must
+     stay editable/selectable to type into) opts back IN explicitly below.
+     -webkit-touch-callout:none is the separate iOS Safari property that
+     suppresses the long-press copy/lookup callout specifically -- belongs
+     alongside user-select, not instead of it. */
+  *, *::before, *::after {
+    -webkit-user-select: none; user-select: none; -webkit-touch-callout: none;
+  }
+  #initialsInput { -webkit-user-select: text; user-select: text; -webkit-touch-callout: default; }
   #hud {
     position: fixed; left: 14px; bottom: 12px; color: #9fe8ff; z-index: 10;
     font: 13px/1.5 ui-monospace, Menlo, monospace; text-shadow: 0 0 6px #0af;
@@ -211,13 +227,18 @@
     background: rgba(255, 255, 255, 0.08); border: 1px solid rgba(255, 255, 255, 0.3);
     color: #cfd8ea; font: 11px ui-monospace, Menlo, monospace; text-align: center; line-height: 46px; }
   /* Mobile HUD toggle (Alex: "mobile still needs a way to toggle hiding the
-     leaderboard and all that -- too little screen real estate otherwise").
-     Every other platform already has one (keyboard H, gamepad Y/Triangle,
-     VR left stick click) -- touch was the one input method missing it
-     entirely. Stacked directly above touchrespawn, same size/style family. */
-  #touchhud { right: 28px; bottom: 186px; width: 46px; height: 46px; border-radius: 50%;
-    background: rgba(255, 255, 255, 0.08); border: 1px solid rgba(255, 255, 255, 0.3);
-    color: #cfd8ea; font: 10px ui-monospace, Menlo, monospace; text-align: center; line-height: 46px; }
+     leaderboard and all that"). Every other platform already has one
+     (keyboard H, gamepad Y/Triangle, VR left stick click) -- touch was the
+     one input method missing it entirely. Round 2 (Alex: "I still don't
+     see a toggle") -- the first pass used the SAME subdued white-on-white
+     styling as the small respawn button right next to it, easy to miss as
+     "just more chrome" rather than a distinct control. Given the bright
+     HUD-cyan accent color and a clearly bigger size so it reads as its own
+     thing, not a decoration. */
+  #touchhud { right: 24px; bottom: 190px; width: 54px; height: 54px; border-radius: 50%;
+    background: rgba(159, 232, 255, 0.16); border: 2px solid rgba(159, 232, 255, 0.75);
+    color: #9fe8ff; font: bold 13px ui-monospace, Menlo, monospace; text-align: center;
+    line-height: 54px; box-shadow: 0 0 10px rgba(159, 232, 255, 0.4); }
   /* UI toggle (item 19): hide persistent HUD chrome, leave transient
      warnings/banners (boundary warning, combo/power-up popups) working. */
   body.hudHidden #hud, body.hudHidden #score, body.hudHidden #playercount,
@@ -237,7 +258,7 @@
        in-headset without needing devtools. If it EVER doesn't match what
        you expect after a hard reload, that's real signal of a caching
        problem, not a hunch. -->
-  <div id="versionLine">by ibrews &nbsp;·&nbsp; v0.1.1 built 2026-07-04 (round 12: mobile/touch polish)</div><br>
+  <div id="versionLine">by ibrews &nbsp;·&nbsp; v0.1.2 built 2026-07-04 (round 13: selection lockdown + swing steer)</div><br>
   A living neon city at night. Sling a web, swing between skyscrapers, and see how much
   trouble you can cause before the night's over.<br><br>
   <span id="initialsRow">callsign (optional, 3 letters): <input id="initialsInput" maxlength="3"
@@ -3982,12 +4003,31 @@ function tryAttach() {
   player.ropeLen = Math.max(3, dist);
   // entry boost: a swing needs tangential speed — from near-standstill,
   // inject some along the camera's horizontal forward so the first web
-  // always MOVES you instead of leaving you dangling
+  // always MOVES you instead of leaving you dangling.
+  //
+  // DIRECTIONALITY (Alex: "directionality only works on the ground, not
+  // swinging -- holding left and hitting the swing button should ensure
+  // my next web pulls me left"). From real ground speed this already
+  // worked (existing velocity, which DOES respect held strafe on the
+  // ground, simply carries into the swing since this branch only fires
+  // below 7 u/s) -- the gap was specifically the near-standstill case,
+  // where the boost used to inject purely along camera-forward,
+  // completely ignoring any held A/D/S and drowning out the one piece of
+  // directional intent you had. Blend held strafe/back input into the
+  // boost direction the same way ground movement's own `inDir` does, so
+  // firing a web from standstill while holding left actually launches you
+  // left instead of wherever the camera happens to be pointed.
   const hSpeed = Math.hypot(player.vel.x, player.vel.z);
   if (hSpeed < 7) {
     const f = aimDir();
     f.y = 0; f.normalize();
-    player.vel.addScaledVector(f, 7 - hSpeed);
+    const r = new THREE.Vector3(-f.z, 0, f.x);
+    const boostDir = f.clone();
+    if (keys.KeyD) boostDir.add(r);
+    if (keys.KeyA) boostDir.sub(r);
+    if (keys.KeyS) boostDir.addScaledVector(f, -0.6);   // lean back, not a full reverse -- a swing shouldn't launch backward as hard as forward
+    if (boostDir.lengthSq() > 0.0001) boostDir.normalize(); else boostDir.copy(f);
+    player.vel.addScaledVector(boostDir, 7 - hSpeed);
   }
   return true;
 }
@@ -4386,13 +4426,22 @@ function stepGamepad(dt) {
 // signal -- plenty of actual desktop/laptop hardware (touchscreen Windows
 // laptops, Chrome's touch-emulation devtools flag, hybrid 2-in-1s used
 // with a mouse) reports touch support even though touch isn't how the
-// person is actually playing. `(pointer: coarse)` is the standards way to
-// ask "is the PRIMARY pointing device touch-like" (a mouse/trackpad
-// reports 'fine' even on a touchscreen machine) -- requiring BOTH signals
-// is what actually distinguishes "phone/tablet, touch is primary" from
-// "desktop with an incidental touchscreen."
+// person is actually playing. `(pointer: *)` is the standards way to ask
+// "is the PRIMARY pointing device touch-like" (a mouse/trackpad reports
+// 'fine' even on a touchscreen machine).
+//
+// Phrased as EXCLUDING fine (not REQUIRING coarse), deliberately: on a
+// browser/WebView old or unusual enough that the `pointer` media feature
+// isn't recognized at all, `matches` is false for EVERY such query --
+// requiring a positive 'coarse' match would silently disable touch
+// controls entirely on a real touch device just because that one query
+// came back unsupported (exactly the kind of false negative that would
+// have hidden ALL touch controls, not just refined when they show, if
+// this had shipped the other way around). Excluding on a positive 'fine'
+// match instead means an unsupported feature falls back to the original,
+// safer touch-capability-only check rather than failing closed.
 const touchCapable = ('ontouchstart' in window || navigator.maxTouchPoints > 0) &&
-  matchMedia('(pointer: coarse)').matches;
+  !matchMedia('(pointer: fine)').matches;
 if (touchCapable) document.body.classList.add('touch-active');
 const touchJoyThumb = document.getElementById('touchjoyThumb');
 const touchSprintEl = document.getElementById('touchsprint');
@@ -4420,7 +4469,7 @@ function rasterizeButtonLabel(el, text, color, fontSize) {
 }
 rasterizeButtonLabel(touchSprintEl, 'SPRINT', '#ffe27a', 26);
 rasterizeButtonLabel(document.getElementById('touchrespawn'), 'R', '#cfd8ea', 32);
-rasterizeButtonLabel(document.getElementById('touchhud'), 'HUD', '#cfd8ea', 22);
+rasterizeButtonLabel(document.getElementById('touchhud'), 'HUD', '#9fe8ff', 24);
 rasterizeButtonLabel(document.getElementById('menubtn'), 'MENU (M)', '#cfe8ff', 22);
 let touchJoyId = null, touchJoyOrigin = { x: 0, y: 0 }, touchJoyVec = { x: 0, y: 0 };
 let touchLookId = null, touchLookPrev = { x: 0, y: 0 };
