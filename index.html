@@ -262,7 +262,7 @@
        in-headset without needing devtools. If it EVER doesn't match what
        you expect after a hard reload, that's real signal of a caching
        problem, not a hunch. -->
-  <div id="versionLine">by ibrews &nbsp;·&nbsp; v0.1.5 built 2026-07-06 (round 16: VR movement + body facing now head-relative)</div><br>
+  <div id="versionLine">by ibrews &nbsp;·&nbsp; v0.1.6 built 2026-07-06 (round 17: fixed infinite mid-air relaunch exploit)</div><br>
   A living neon city at night. Sling a web, swing between skyscrapers, and see how much
   trouble you can cause before the night's over.<br><br>
   <span id="initialsRow">callsign (optional, 3 letters): <input id="initialsInput" maxlength="3"
@@ -4297,6 +4297,21 @@ let cameraMode = 'third';
 // one continuous gesture from a single hold (Alex: "it's a jump, and then
 // if you're still holding spacebar, a web thwip").
 let pendingAirWeb = false;
+// INFINITE-JUMP EXPLOIT FIX (Alex: "seems like I can do infinite double
+// jumps and just get higher and higher even when there's nothing to web
+// onto... once we're in the air we mostly want to rely on swinging"). The
+// airborne branch below (`else if (!touchingWallNow()) fireWeb(true)`) was
+// unconditionally passing `boosted=true` on EVERY fresh press while
+// airborne, and fireWeb's miss fallback grants a near-full JUMP_VEL
+// vertical relaunch on a miss regardless of context -- with no gate, this
+// let a player spam the button in open sky (no anchor ever found) for a
+// full JUMP_VEL_NORMAL boost every single press, unlimited altitude. This
+// flag limits that "no jump just gave you lift, so the miss still needs
+// its own liftoff" assist to ONCE per airborne excursion; it resets the
+// moment the player actually lands (see the ground-collision block below)
+// so a genuinely fresh fall (e.g. walking off a ledge without jumping)
+// still gets its one assisted liftoff on a miss, same as before.
+let usedAirLiftoff = false;
 // GROUND-TO-SWING ASSIST tuning: a short window (SWING_ASSIST_DELAY) after
 // the initial jump+fireWeb attempt whiffs -- if still held past it, one
 // extra upward pull (SWING_ASSIST_BOOST) and a second attach attempt.
@@ -5173,7 +5188,11 @@ function stepPlayer(dt) {
       p.onGround = false;
       pendingAirWeb = true;
     } else if (!touchingWallNow()) {
-      fireWeb(true);
+      // Only the FIRST miss per airborne excursion gets the assisted
+      // liftoff (see usedAirLiftoff above) -- every press after that is a
+      // real web-attach attempt only, no free altitude on a miss.
+      fireWeb(!usedAirLiftoff);
+      usedAirLiftoff = true;
     }
   }
   prevWebHeld = webHeld;
@@ -5298,7 +5317,7 @@ function stepPlayer(dt) {
   // ground + building AABB collisions
   p.onGround = false;
   p.onWall = false;
-  if (p.pos.y < 0.9) { p.pos.y = 0.9; if (p.vel.y < 0) p.vel.y = 0; p.onGround = true; }
+  if (p.pos.y < 0.9) { p.pos.y = 0.9; if (p.vel.y < 0) p.vel.y = 0; p.onGround = true; usedAirLiftoff = false; }
   // GIANT/TINY/SHRUNK scale the collision radius along with the visuals
   // below (giant x tiny x shrunk multiply if somehow stacked -- unspecified
   // by the manifest, but multiplying is the least-surprising combination).
@@ -5348,7 +5367,7 @@ function stepPlayer(dt) {
     if (axis === 0) { p.pos.x = c.min[0] - R; if (p.vel.x > 0) p.vel.x = 0; }
     if (axis === 1) { p.pos.x = c.max[0] + R; if (p.vel.x < 0) p.vel.x = 0; }
     if (axis === 2) { p.pos.y = c.min[1] - R; if (p.vel.y > 0) p.vel.y = 0; }
-    if (axis === 3) { p.pos.y = c.max[1] + 0.9; if (p.vel.y < 0) p.vel.y = 0; p.onGround = true; }
+    if (axis === 3) { p.pos.y = c.max[1] + 0.9; if (p.vel.y < 0) p.vel.y = 0; p.onGround = true; usedAirLiftoff = false; }
     if (axis === 4) { p.pos.z = c.min[2] - R; if (p.vel.z > 0) p.vel.z = 0; }
     if (axis === 5) { p.pos.z = c.max[2] + R; if (p.vel.z < 0) p.vel.z = 0; }
     if (axis === 0 || axis === 1 || axis === 4 || axis === 5) {
@@ -6390,6 +6409,7 @@ window.__sw = { THREE, player, cars, parkedCars, pickups, colliders, EDGE, WORLD
                 get carBumpCooldown() { return carBumpCooldown; },
                 set carBumpCooldown(v) { carBumpCooldown = v; },
                 get pendingAirWeb() { return pendingAirWeb; },
+                get usedAirLiftoff() { return usedAirLiftoff; }, set usedAirLiftoff(v) { usedAirLiftoff = v; },
                 fireWeb, tryAttach,
                 get pendingSwingAssist() { return pendingSwingAssist; },
                 get swingAssistHoldTime() { return swingAssistHoldTime; },
