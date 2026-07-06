@@ -262,7 +262,7 @@
        in-headset without needing devtools. If it EVER doesn't match what
        you expect after a hard reload, that's real signal of a caching
        problem, not a hunch. -->
-  <div id="versionLine">by ibrews &nbsp;·&nbsp; v0.1.7 built 2026-07-06 (round 18: climb momentum, mid-air spin fixed for real, magnet no longer pulls you)</div><br>
+  <div id="versionLine">by ibrews &nbsp;·&nbsp; v0.1.8 built 2026-07-06 (round 19: mid-air facing now identical to grounded, WASD-driven)</div><br>
   A living neon city at night. Sling a web, swing between skyscrapers, and see how much
   trouble you can cause before the night's over.<br><br>
   <span id="initialsRow">callsign (optional, 3 letters): <input id="initialsInput" maxlength="3"
@@ -5512,19 +5512,6 @@ function stepPlayer(dt) {
   spidey.position.copy(p.pos);
   spidey.scale.setScalar(playerScale);
   const sp = Math.hypot(p.vel.x, p.vel.z);
-  // MID-AIR FACING CONTROL (Alex: "I want to be able to adjust my mesh's
-  // orientation in mid-air, and the camera should drift to align with
-  // whatever my current forward orientation is"). Ground-normal facing
-  // (`atan2(vel.x, vel.z)` below) has no way to face somewhere your
-  // velocity isn't already pointing. New QE binding, airborne-only:
-  // desktop had no obvious free key otherwise, and VR's right stick is
-  // fully locked/assigned already (see the ROUND 10 LOCK comment in
-  // stepXR) -- reusing or extending it wasn't safe to do here, so this
-  // stays desktop/gamepad-only rather than touching that. `manualAirFacing`
-  // is read further down (see the camera-yaw-drift block) to ease the
-  // third-person orbit toward the new facing instead of leaving it to the
-  // velocity-facing snap.
-  let manualAirFacing = false;
   if (flying) {
     // FLIGHT POSE (Alex: "the avatar should become horizontal and
     // basically be perpendicular from the camera"). Superman-style: a full
@@ -5577,7 +5564,6 @@ function stepPlayer(dt) {
     // rotation.z explicitly every frame here -- it should never be
     // anything but 0 outside the wall-climb pose.
     spidey.rotation.z = 0;
-    const airborne = !p.onGround && !p.onWall;
     if (renderer.xr.isPresenting) {
       // VR HEAD-LOCKED BODY FACING (Alex: "everything should be relative
       // to the direction I'm looking" + "to everyone in multiplayer
@@ -5595,31 +5581,32 @@ function stepPlayer(dt) {
       // your direction of travel.
       const gaze = aimDir(); gaze.y = 0;
       if (gaze.lengthSq() > 0.0001) spidey.rotation.y = Math.atan2(gaze.x, gaze.z);
-    } else if (airborne && (keys.KeyQ || keys.KeyE)) {
-      const AIR_YAW_RATE = 2.4;
-      if (keys.KeyQ) spidey.rotation.y += AIR_YAW_RATE * dt;
-      if (keys.KeyE) spidey.rotation.y -= AIR_YAW_RATE * dt;
-      manualAirFacing = true;
+    } else if (inDir.lengthSq() > 0.0001) {
+      // AIR FACING SHOULD MATCH GROUND FACING EXACTLY (Alex: "mid-air spin
+      // still not working -- it should behave exactly the same as though
+      // I am on the ground. If I hold S I should now face backward -- it
+      // should all happen at the same speed as though I was on the
+      // ground"). A dedicated QE mid-air-spin control (round 15/18) was
+      // the wrong shape entirely -- not a request for a NEW binding, but
+      // for the EXISTING WASD facing behavior to keep working, unchanged,
+      // while airborne. Facing now comes from held movement input
+      // (`inDir`, the same camera-relative direction ground movement's
+      // own target velocity is built from -- see the top of this
+      // function) rather than from actual velocity, and applies
+      // identically whether grounded, falling, or swinging: same
+      // expression, same instant snap, no ground/air branch at all. This
+      // deliberately does NOT touch actual air movement physics
+      // (AIR_CTRL stays weak, movement still mostly relies on swinging
+      // per the round-17 conversation) -- only which way the AVATAR
+      // faces while you hold a direction.
+      spidey.rotation.y = Math.atan2(inDir.x, inDir.z);
     } else if (sp > 0.5) {
+      // No input held -- fall back to facing the way you're actually
+      // moving (e.g. drifting through the air on residual momentum, or
+      // swinging with no reel input), same as before.
       spidey.rotation.y = Math.atan2(p.vel.x, p.vel.z);
     }
     spidey.rotation.x = THREE.MathUtils.clamp(sp * 0.02 * (p.anchor ? 1.6 : 0.4), 0, 0.9);
-  }
-  // CAMERA DRIFT TOWARD MANUAL MID-AIR FACING (continuation of the QE
-  // control above): third-person's orbit position is driven by `yaw` (see
-  // lookDir/camOff below), independently of spidey's own mesh facing --
-  // easing `yaw` toward the new facing (rather than snapping it) is what
-  // makes a mid-air spin read as the camera smoothly catching up, not a
-  // disorienting cut. Converts mesh-facing convention (Object3D rotation.y=0
-  // faces +Z) to camera-yaw convention (yaw=0 looks -Z) via the same "+ PI"
-  // relationship already established for the XR rig-facing fix below in
-  // this function -- shortest-path angle diff so it never spins the long
-  // way around.
-  if (manualAirFacing && cameraMode === 'third') {
-    const targetYaw = spidey.rotation.y - Math.PI;
-    const twoPi = Math.PI * 2;
-    const dYaw = ((targetYaw - yaw) % twoPi + twoPi + Math.PI) % twoPi - Math.PI;
-    yaw += dYaw * Math.min(1, dt * 3);
   }
   stepCoat(p, playerScale);
   stepPowerupFX(dt, p, playerScale);
@@ -6369,17 +6356,7 @@ function loop(now) {
   // mousedown/up compatibility events, so no separate touch term is needed
   // here.
   webHeld = kbMouseWebHeld || gamepadWebHeld || xrWebHeld;
-  // KeyQ/KeyE (mid-air facing control, see the airborne rotation block in
-  // stepPlayer) were ADDED to that block in round 15 but never added HERE
-  // -- this whitelist is the only thing that copies raw kbKeys into the
-  // `keys` object stepPlayer actually reads, so `keys.KeyQ`/`keys.KeyE`
-  // silently stayed permanently undefined in real play regardless of what
-  // was actually held. Every synthetic test at the time set `keys.KeyQ`
-  // directly (bypassing this merge entirely), which is exactly why it
-  // looked verified but never worked for a real keypress (Alex: "I still
-  // can't seem to change my avatar's direction in midair... changing
-  // direction still only works when I'm on a surface").
-  for (const k of ['KeyW', 'KeyA', 'KeyS', 'KeyD', 'ShiftLeft', 'KeyQ', 'KeyE']) {
+  for (const k of ['KeyW', 'KeyA', 'KeyS', 'KeyD', 'ShiftLeft']) {
     keys[k] = !!(kbKeyDown(k) || gpKeys[k] || tKeys[k] || xrKeys[k]);
   }
   stepPlayer(playerDt);
