@@ -262,7 +262,7 @@
        in-headset without needing devtools. If it EVER doesn't match what
        you expect after a hard reload, that's real signal of a caching
        problem, not a hunch. -->
-  <div id="versionLine">by ibrews &nbsp;·&nbsp; v0.1.3 built 2026-07-06 (round 14: audio tuning + physics fixes)</div><br>
+  <div id="versionLine">by ibrews &nbsp;·&nbsp; v0.1.4 built 2026-07-06 (round 15: mid-air web aim, swing pumping, wall-attach, mid-air spin)</div><br>
   A living neon city at night. Sling a web, swing between skyscrapers, and see how much
   trouble you can cause before the night's over.<br><br>
   <span id="initialsRow">callsign (optional, 3 letters): <input id="initialsInput" maxlength="3"
@@ -446,6 +446,20 @@ const CLIMB_SPEED = 7.0;   // wall-crawl vertical speed while holding the web bu
 // nudge along the look direction so a swing keeps making progress even
 // with nothing held; W/S additionally reel the rope itself in/out.
 const REEL_SPEED = 12, REEL_MIN_ROPE = 2, SWING_FORWARD_PULL = 6;
+// SWING PUMPING (Alex: "if I'm just hanging onto a web, I should be able
+// to swing back and forth... getting higher and higher if I like, entirely
+// by timing my left joystick movements well. Physics!"). Reeling the rope
+// (see REEL_SPEED above) while the constraint is taut now conserves angular
+// momentum like a real pendulum -- shortening the rope while swinging fast
+// (bottom of the arc) yields a big tangential-speed gain, shortening it
+// near-stationary (top of the arc) yields almost none, and reeling OUT
+// does the reverse (costs speed) -- so good timing (in at the bottom, out
+// at the top) genuinely builds amplitude over cycles, and bad timing barely
+// helps, same as pumping a real playground swing. Gain amplifies the raw
+// per-frame L=m*v*r conservation factor for game feel (1.0 would be exact
+// real-world physics, which is barely perceptible over one rope's reel
+// range in a single frame).
+const SWING_PUMP_GAIN = 3;
 // Perpendicular pawn-facing yaw per wall-contact axis (0/1/4/5 from the
 // collider push-out logic), and how close to the roofline the climb starts
 // easing the player onto the roof -- see wall-crawl handling in stepPlayer.
@@ -1523,6 +1537,9 @@ const wallMat = new THREE.ShaderMaterial({
     }
   `,
 });
+// Kept separate from buildingChunkMeshes (own array, own raycast target) --
+// see anchorRayTargets right below, and findAnchor()'s wall-attach comment.
+const wallMeshes = [];
 {
   const wallH = 340, wallSpan = WORLD_BOUND * 2.1;
   const mkWall = (x, z, rotY, w) => {
@@ -1530,12 +1547,18 @@ const wallMat = new THREE.ShaderMaterial({
     m.position.set(x, wallH / 2 - 20, z);
     m.rotation.y = rotY;
     scene.add(m);
+    wallMeshes.push(m);
   };
   mkWall(WORLD_BOUND, 0, Math.PI / 2, wallSpan);
   mkWall(-WORLD_BOUND, 0, Math.PI / 2, wallSpan);
   mkWall(0, WORLD_BOUND, 0, wallSpan);
   mkWall(0, -WORLD_BOUND, 0, wallSpan);
 }
+// WEB CAN ATTACH TO BOUNDARY WALLS TOO (Alex: "it's ok to attach to the side
+// walls surrounding the city") -- the walls were visual-only before (not in
+// buildingChunkMeshes), so findAnchor() could never raycast-hit them.
+// Plane geometry + DoubleSide material raycasts fine from either side.
+const anchorRayTargets = buildingChunkMeshes.concat(wallMeshes);
 
 // SUN/MOON (Alex: "a celestial body up in the sky that moves across it
 // over time and cycles the same color scheme as the boundary wall").
@@ -4114,13 +4137,36 @@ function findAnchor() {
   const fwd = aimDir();
   const up = new THREE.Vector3(0, 1, 0);
   const right = fwd.clone().cross(up).normalize();
+  // MID-AIR STICK-BIASED AIMING (Alex: "the direction I'm pointing my left
+  // controller should be a guide to the direction we want to be shooting our
+  // web -- even if I'm going forward, if in mid-air I pull my left joystick
+  // to the right, I should now... be shooting a web up and to the right").
+  // Previously this search cone was pure camera-look-direction with zero
+  // stick influence. Reuses the SAME held-strafe blend tryAttach()'s entry
+  // boost already applies to post-attach velocity (keys.KeyA/D/S, unified
+  // across keyboard/gamepad/VR via the `keys` OR-merge in the main loop) --
+  // but here it biases the SEARCH direction itself, so holding a strafe
+  // direction while airborne actually searches toward that side instead of
+  // pure camera-forward. Grounded aiming is unaffected in practice: on the
+  // ground the reported gap was specifically the airborne case, and a
+  // grounded player rarely holds strafe while firing a web at a target
+  // above them, but the blend applies uniformly rather than gating on
+  // airborne state, matching how tryAttach's own existing blend works.
+  const aimBiased = fwd.clone();
+  if (keys.KeyD) aimBiased.addScaledVector(right, 0.55);
+  if (keys.KeyA) aimBiased.addScaledVector(right, -0.55);
+  if (keys.KeyS) aimBiased.addScaledVector(fwd, -0.35);
+  if (aimBiased.lengthSq() > 0.0001) aimBiased.normalize(); else aimBiased.copy(fwd);
   let best = null;
   for (const [u, r] of [[0.9, 0], [1.4, 0], [0.6, 0], [0.9, 0.35], [0.9, -0.35],
                         [1.4, 0.5], [1.4, -0.5], [2.2, 0], [0.9, 0.7], [0.9, -0.7]]) {
-    const dir = fwd.clone().addScaledVector(up, u).addScaledVector(right, r).normalize();
+    const dir = aimBiased.clone().addScaledVector(up, u).addScaledVector(right, r).normalize();
     raycaster.set(player.pos, dir);
     raycaster.far = 80;
-    const hit = raycaster.intersectObjects(buildingChunkMeshes, false)[0];   // chunked -- see buildingChunkMeshes
+    // Now also checks the boundary walls (Alex: "it's ok to attach to the
+    // side walls surrounding the city") -- see anchorRayTargets, built
+    // right after wallMeshes below the boundary-wall block.
+    const hit = raycaster.intersectObjects(anchorRayTargets, false)[0];   // chunked -- see buildingChunkMeshes
     if (hit && hit.point.y > player.pos.y + 1.5 && (!best || hit.point.y > best.y)) {
       best = hit.point.clone();
     }
@@ -5187,6 +5233,7 @@ function stepPlayer(dt) {
     // both keep reading the unswapped keys.KeyW/KeyS exactly as before.
     const reelInKey = renderer.xr.isPresenting ? keys.KeyS : keys.KeyW;
     const reelOutKey = renderer.xr.isPresenting ? keys.KeyW : keys.KeyS;
+    const ropeLenBeforeReel = p.ropeLen;   // see SWING PUMPING below
     if (reelInKey) p.ropeLen = Math.max(REEL_MIN_ROPE, p.ropeLen - REEL_SPEED * dt);
     else if (reelOutKey) p.ropeLen += REEL_SPEED * dt;
     else p.vel.addScaledVector(aimDir(), SWING_FORWARD_PULL * dt);
@@ -5198,7 +5245,30 @@ function stepPlayer(dt) {
       const n = d.normalize();
       const radial = n.multiplyScalar(p.vel.dot(n));
       p.vel.sub(radial);                       // keep only tangential motion
-      p.vel.multiplyScalar(1.004);             // tiny pump so swings build
+      // SWING PUMPING (see SWING_PUMP_GAIN comment above): shortening the
+      // rope this frame conserves angular momentum (L = m*v*r), so
+      // tangential speed scales by ropeLenBeforeReel/p.ropeLen. Since that
+      // ratio's effect on speed is multiplicative, reeling in while already
+      // moving fast (bottom of the arc) gains far more absolute speed than
+      // reeling in from near-stationary (top of the arc) -- the timing
+      // dependence Alex asked for falls out of the physics itself, no
+      // explicit phase/angle detection needed.
+      // SHORTENING ONLY (verified via the debug hook): reel-OUT while taut
+      // makes the rope immediately slack for one or more frames (ropeLen
+      // now exceeds the actual distance), so the player free-falls
+      // unconstrained until the rope catches up and this block fires again
+      // -- at that point `radial` reflects the sudden RECONNECT, not a
+      // clean pendulum state, and scaling THAT by a conserve factor
+      // produced wild, unphysical speed spikes (measured 90+ u/s from a
+      // single mistimed reel-out in testing). Reeling out itself already
+      // naturally costs height/energy via that slack+refall, with no need
+      // to additionally scale velocity here -- only amplify the
+      // conservation gain on genuine shortening, which never goes slack.
+      if (ropeLenBeforeReel > p.ropeLen) {
+        const conserve = ropeLenBeforeReel / p.ropeLen;
+        p.vel.multiplyScalar(1 + (conserve - 1) * SWING_PUMP_GAIN);
+      }
+      p.vel.multiplyScalar(1.004);   // tiny passive pump so swings still build with no timed input at all
     }
     webLine.visible = true;
     webLineGeo.setPositions([p.pos.x, p.pos.y, p.pos.z, p.anchor.x, p.anchor.y, p.anchor.z]);
@@ -5375,6 +5445,19 @@ function stepPlayer(dt) {
   spidey.position.copy(p.pos);
   spidey.scale.setScalar(playerScale);
   const sp = Math.hypot(p.vel.x, p.vel.z);
+  // MID-AIR FACING CONTROL (Alex: "I want to be able to adjust my mesh's
+  // orientation in mid-air, and the camera should drift to align with
+  // whatever my current forward orientation is"). Ground-normal facing
+  // (`atan2(vel.x, vel.z)` below) has no way to face somewhere your
+  // velocity isn't already pointing. New QE binding, airborne-only:
+  // desktop had no obvious free key otherwise, and VR's right stick is
+  // fully locked/assigned already (see the ROUND 10 LOCK comment in
+  // stepXR) -- reusing or extending it wasn't safe to do here, so this
+  // stays desktop/gamepad-only rather than touching that. `manualAirFacing`
+  // is read further down (see the camera-yaw-drift block) to ease the
+  // third-person orbit toward the new facing instead of leaving it to the
+  // velocity-facing snap.
+  let manualAirFacing = false;
   if (flying) {
     // FLIGHT POSE (Alex: "the avatar should become horizontal and
     // basically be perpendicular from the camera"). Superman-style: a full
@@ -5427,8 +5510,32 @@ function stepPlayer(dt) {
     // rotation.z explicitly every frame here -- it should never be
     // anything but 0 outside the wall-climb pose.
     spidey.rotation.z = 0;
-    if (sp > 0.5) spidey.rotation.y = Math.atan2(p.vel.x, p.vel.z);
+    const airborne = !p.onGround && !p.onWall;
+    if (airborne && (keys.KeyQ || keys.KeyE)) {
+      const AIR_YAW_RATE = 2.4;
+      if (keys.KeyQ) spidey.rotation.y += AIR_YAW_RATE * dt;
+      if (keys.KeyE) spidey.rotation.y -= AIR_YAW_RATE * dt;
+      manualAirFacing = true;
+    } else if (sp > 0.5) {
+      spidey.rotation.y = Math.atan2(p.vel.x, p.vel.z);
+    }
     spidey.rotation.x = THREE.MathUtils.clamp(sp * 0.02 * (p.anchor ? 1.6 : 0.4), 0, 0.9);
+  }
+  // CAMERA DRIFT TOWARD MANUAL MID-AIR FACING (continuation of the QE
+  // control above): third-person's orbit position is driven by `yaw` (see
+  // lookDir/camOff below), independently of spidey's own mesh facing --
+  // easing `yaw` toward the new facing (rather than snapping it) is what
+  // makes a mid-air spin read as the camera smoothly catching up, not a
+  // disorienting cut. Converts mesh-facing convention (Object3D rotation.y=0
+  // faces +Z) to camera-yaw convention (yaw=0 looks -Z) via the same "+ PI"
+  // relationship already established for the XR rig-facing fix below in
+  // this function -- shortest-path angle diff so it never spins the long
+  // way around.
+  if (manualAirFacing && cameraMode === 'third') {
+    const targetYaw = spidey.rotation.y - Math.PI;
+    const twoPi = Math.PI * 2;
+    const dYaw = ((targetYaw - yaw) % twoPi + twoPi + Math.PI) % twoPi - Math.PI;
+    yaw += dYaw * Math.min(1, dt * 3);
   }
   stepCoat(p, playerScale);
   stepPowerupFX(dt, p, playerScale);
@@ -6218,7 +6325,7 @@ renderer.setAnimationLoop(loop);
 // needing a build step (e.g. `__sw.player.pos.set(x,y,z)` to teleport).
 window.__sw = { THREE, player, cars, parkedCars, pickups, colliders, EDGE, WORLD_BOUND, touchingWallNow,
                 GRID_N, VEHICLE_TYPES, buildingLabels, buildingLabelSprites, segs, cylSegs,
-                buildingChunkMeshes, celestialBody, stepCelestial, celestialMat,
+                buildingChunkMeshes, celestialBody, stepCelestial, celestialMat, wallMeshes, anchorRayTargets,
                 get powerupMusicFamily() { return powerupMusicFamily; },
                 genBuildingName, isBlocked, PROFANITY_EN, PROFANITY_KATAKANA,
                 rooftopCoins, stepRooftopCoins, spotlights, stepSpotlights, PARK_BLOCK_I, PARK_BLOCK_J,
