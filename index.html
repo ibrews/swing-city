@@ -262,7 +262,7 @@
        in-headset without needing devtools. If it EVER doesn't match what
        you expect after a hard reload, that's real signal of a caching
        problem, not a hunch. -->
-  <div id="versionLine">by ibrews &nbsp;·&nbsp; v0.1.4 built 2026-07-06 (round 15: mid-air web aim, swing pumping, wall-attach, mid-air spin)</div><br>
+  <div id="versionLine">by ibrews &nbsp;·&nbsp; v0.1.5 built 2026-07-06 (round 16: VR movement + body facing now head-relative)</div><br>
   A living neon city at night. Sling a web, swing between skyscrapers, and see how much
   trouble you can cause before the night's over.<br><br>
   <span id="initialsRow">callsign (optional, 3 letters): <input id="initialsInput" maxlength="3"
@@ -5059,8 +5059,29 @@ function stepPlayer(dt) {
   // without this guard, gravity was already integrating the fall behind
   // the overlay, so the drop was partway done the instant you clicked in.
   if (!entered) return;
-  // camera-relative input direction on the ground plane
-  const f = new THREE.Vector3(-Math.sin(yaw), 0, -Math.cos(yaw));
+  // camera-relative input direction on the ground plane.
+  // VR MOVEMENT WAS LOCKED TO THE RIG'S `yaw`, NOT REAL HEAD ORIENTATION
+  // (Alex: "if I physically rotate my body, the left joystick is still
+  // mapped to my original rotation... everything should be relative to
+  // the direction I'm looking, just like any VR game -- if I'm holding
+  // forward and I physically turn 90deg clockwise, my character should
+  // turn right"). `yaw` only changes from stick/snap-turn input (see
+  // stepXR) -- physically rotating your real head/body while presenting
+  // never touches it at all, so movement kept firing along a stale
+  // direction no matter which way you'd actually turned to face. Desktop
+  // is unaffected (no physical head to rotate; `yaw` there IS the whole
+  // story of where the player is looking, driven by mouse/gamepad).
+  // aimDir() already exists specifically because it returns the REAL
+  // headset gaze (camera.getWorldDirection(), including physical head
+  // rotation) rather than the rig-only `yaw` -- reusing it here instead of
+  // introducing a second "real facing" source.
+  let f;
+  if (renderer.xr.isPresenting) {
+    f = aimDir(); f.y = 0;
+    if (f.lengthSq() < 0.0001) f.set(0, 0, -1); else f.normalize();
+  } else {
+    f = new THREE.Vector3(-Math.sin(yaw), 0, -Math.cos(yaw));
+  }
   const r = new THREE.Vector3(-f.z, 0, f.x);
   const inDir = new THREE.Vector3();
   // While attached to a swing, forward/back are repurposed to REEL the
@@ -5511,7 +5532,24 @@ function stepPlayer(dt) {
     // anything but 0 outside the wall-climb pose.
     spidey.rotation.z = 0;
     const airborne = !p.onGround && !p.onWall;
-    if (airborne && (keys.KeyQ || keys.KeyE)) {
+    if (renderer.xr.isPresenting) {
+      // VR HEAD-LOCKED BODY FACING (Alex: "everything should be relative
+      // to the direction I'm looking" + "to everyone in multiplayer
+      // watching a VR player, they should see the head and body and sword
+      // moving around"). Velocity-driven facing (the desktop branch below)
+      // has no way to reflect a real head turn while standing still or
+      // moving straight ahead -- a VR player has no tracked torso, so (as
+      // in effectively every other VR game) the avatar's yaw simply IS the
+      // headset's yaw. Driving spidey.rotation.y directly from aimDir()
+      // (real gaze, same source the corrected movement basis above now
+      // uses) every frame means it also just works for multiplayer for
+      // free: this is the exact value already sent to remote players as
+      // `yaw` in the state payload below, so other players see your
+      // avatar's head/body/sword turn with your actual head, not just
+      // your direction of travel.
+      const gaze = aimDir(); gaze.y = 0;
+      if (gaze.lengthSq() > 0.0001) spidey.rotation.y = Math.atan2(gaze.x, gaze.z);
+    } else if (airborne && (keys.KeyQ || keys.KeyE)) {
       const AIR_YAW_RATE = 2.4;
       if (keys.KeyQ) spidey.rotation.y += AIR_YAW_RATE * dt;
       if (keys.KeyE) spidey.rotation.y -= AIR_YAW_RATE * dt;
