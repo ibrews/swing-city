@@ -262,7 +262,7 @@
        in-headset without needing devtools. If it EVER doesn't match what
        you expect after a hard reload, that's real signal of a caching
        problem, not a hunch. -->
-  <div id="versionLine">by ibrews &nbsp;·&nbsp; v0.2.1 built 2026-07-06 13:32 (round 22: wind boost subtler + speed-scaled + camera-relative, camera punch-in)</div><br>
+  <div id="versionLine">by ibrews &nbsp;·&nbsp; v0.2.2 built 2026-07-06 14:22 (round 23: wind visible again, magnet range fixed, zombies now knockable)</div><br>
   A living neon city at night. Sling a web, swing between skyscrapers, and see how much
   trouble you can cause before the night's over.<br><br>
   <span id="initialsRow">callsign (optional, 3 letters): <input id="initialsInput" maxlength="3"
@@ -504,6 +504,14 @@ const MANTLE_ZONE = 2.0, MANTLE_SPEED = 5.0;
 const NOIR_DURATION = 10;
 const SLOWTIME_DURATION = 6, SLOWTIME_WORLD_SCALE = 0.32, SLOWTIME_PLAYER_SCALE = 0.8;
 const ZOMBIE_SPEED = 3.0, ZOMBIE_COUNT = 12, ZOMBIE_KILL_TIME = 0.5;
+// ZOMBIE KNOCKBACK (Alex: "do the zombies get knocked over by me and my
+// sword? seemed like maybe no?" -- correct, there was no such mechanic at
+// all; touching a zombie only ever hurt the PLAYER, poking one did
+// nothing). ZOMBIE_KNOCK_TIME is how long a poked zombie stays knocked
+// down (paused, tipped over) before getting back up and resuming the
+// chase -- a stagger, not a kill, matching "knocked over" rather than
+// "destroyed."
+const ZOMBIE_KNOCK_TIME = 1.1;
 const FALL_SPAWN_Y = 240;   // "battle bus" drop height, above city center
 
 // ORB POWER-UP SYSTEM (Alex, 2026-07-03 "Delegation Manifest" item 14 --
@@ -513,9 +521,20 @@ const FALL_SPAWN_Y = 240;   // "battle bus" drop height, above city center
 const EFFECT_DURATION = 30, EFFECT_EXTEND = 30;
 const GIANT_SCALE = 8, TINY_SCALE = 0.22, SHRINKTAG_SCALE = 0.22;   // 10 -> 8, Alex: "in giant mode let's make it 80% of the current size"
 const SPEED_MULT = 2, LOWG_GRAV_MULT = 0.28, SUPERJUMP_MULT = 5;
-// Strengthened per Alex feedback (radius 16->26, pull 14->24) -- magnet felt
-// too weak/small to reliably matter during a run.
-const MAGNET_RADIUS = 26, MAGNET_PULL = 24;
+// RADIUS SHRUNK BACK DOWN (Alex: "I suddenly had like 50 power-ups --
+// maybe the magnet powerup is too strong? It shouldn't pull anything
+// toward you unless you're within, say, 30 feet of it"). The PREVIOUS
+// strengthening pass (16->26) was a much bigger jump than it reads as --
+// this game's own scale is roughly 1 unit = 1 meter (player eye height,
+// jump height, city block sizes all check out against that), so radius 26
+// was actually ~85 feet, not a "slightly bigger" magnet. Combined with
+// EFFECT_DURATION's full 30s and a swinging player covering real ground
+// during that window, an 85-foot magnet sweeping continuously easily
+// racks up dozens of orbs in one activation. ~30 feet ≈ 9m -- rounded to
+// 9 game units. Pull strength (MAGNET_PULL) is unrelated to range and
+// left alone -- it only controls how FAST something already in range gets
+// yanked in, not how far away "in range" reaches.
+const MAGNET_RADIUS = 9, MAGNET_PULL = 24;
 const ENERGY_BEAM_SPEED = 90, ENERGY_BEAM_RANGE = 70, ENERGY_BEAM_RADIUS = 0.5;
 const PONG_BALL_SPEED = 16, PONG_BALL_RADIUS = 0.85, PONG_BALL_LIFE = 12;
 const BOMBER_INTERVAL = 0.45, BOMBER_FALL_SPEED = 15, BOMBER_RADIUS = 1.0, BOMBER_BLAST_RADIUS = 3.2;
@@ -2424,7 +2443,17 @@ for (let i = 0; i < WIND_COUNT; i++) {
   windStreaks.push({ ox: uniform(-2.2, 2.2), oy: uniform(-1.6, 1.6), oz: uniform(-2.2, 2.2),
                      travel0: uniform(0, WIND_RANGE), len: uniform(0.5, 1.3) });
 }
-const windMat = new THREE.LineBasicMaterial({ color: 0xd8f0ff, transparent: true, opacity: 0 });
+// ADDITIVE BLENDING (Alex: "I don't see any streaks now"). Verified the
+// underlying mechanic itself was working correctly (moveMag=1 for a real
+// keyboard press, opacity ramping with speed as designed) -- the actual
+// problem was pure visibility: a THIN 1px LineBasicMaterial line (three.js
+// caps line width at 1px in WebGL regardless of `linewidth`) at a max
+// opacity of 0.22 with normal alpha blending is nearly imperceptible
+// against a busy, brightly-lit neon city backdrop. AdditiveBlending (used
+// elsewhere in this file for exactly this reason -- see wallMat/
+// celestialGlowMat) makes the line brighten whatever's behind it instead
+// of just faintly tinting it, which reads clearly even at low opacity.
+const windMat = new THREE.LineBasicMaterial({ color: 0xd8f0ff, transparent: true, opacity: 0, blending: THREE.AdditiveBlending, depthWrite: false });
 const windLines = new THREE.LineSegments(windGeo, windMat);
 windLines.frustumCulled = false;
 scene.add(windLines);
@@ -2436,8 +2465,12 @@ const windDirTmp = new THREE.Vector3();
 // local effect; the boost's wind is a much smaller, speed-reactive,
 // CAMERA-relative one -- same recycled-streak pool and travel-opposite-
 // velocity math, different placement/density/opacity strategy entirely.
-const WIND_BOOST_DENSITY_FRAC = 0.2;   // ~20% of the shared streak pool
-const WIND_BOOST_MAX_OPACITY = 0.22;   // well under flying's flat 0.5
+const WIND_BOOST_DENSITY_FRAC = 0.2;   // ~20% of the shared streak pool, per Alex's original ask
+// Bumped 0.22 -> 0.45 (Alex: "I don't see any streaks now") -- with
+// AdditiveBlending now on windMat (see its declaration), this reads as a
+// clear-but-still-clearly-more-subtle-than-flying effect; flying's flat
+// 0.5 opacity is effectively the ceiling this stays under.
+const WIND_BOOST_MAX_OPACITY = 0.45;
 const WIND_BOOST_SPEED_REF = 30;       // speed (u/s) at which boost wind hits max intensity
 const windRightTmp = new THREE.Vector3(), windUpTmp = new THREE.Vector3(), windFwdTmp = new THREE.Vector3();
 function stepWind(pos, vel, flying, t, boosting) {
@@ -3475,7 +3508,41 @@ function spawnZombieWave(origin, isWorld) {
     }
     const obj = makeZombie();
     obj.position.set(gx, baseY - 1.4, gz);
-    zombies.push({ obj, baseY, riseT: 0, state: 'rising', wobble: uniform(0, 6.28), solo: !isWorld });
+    zombies.push({ obj, baseY, riseT: 0, state: 'rising', wobble: uniform(0, 6.28), solo: !isWorld,
+                   knockVel: new THREE.Vector3(), knockTimer: 0 });
+  }
+}
+// Knocks a chasing zombie down and away from the player -- pauses the
+// chase, tips the model over (rotated flat, matching "knocked over"), and
+// slides it along `dir` before it gets back up. Reuses the same knock
+// SPEED floor (KNOCK_SPEED) the car-knock path already establishes so a
+// poke or a fast body-collision both feel like a comparable hit.
+function knockZombie(z, dir, speed) {
+  if (z.state !== 'chasing') return;   // already down, rising, or sinking -- don't restack
+  z.state = 'knocked';
+  z.knockVel.copy(dir).multiplyScalar(Math.max(speed, KNOCK_SPEED));
+  z.knockTimer = ZOMBIE_KNOCK_TIME;
+  z.knockYaw = z.obj.rotation.y;   // preserve facing so getting back up doesn't snap-turn
+}
+// STICK POKE vs ZOMBIES (mirrors checkStickPokeCars -- same reach/radius/
+// min-speed tuning, same "aimed and precise" feel) -- previously the poke
+// mechanic only ever checked cars and remote players; zombies had no
+// player-initiated interaction at all, only their own touch-you-to-hurt-
+// you side.
+function checkStickPokeZombies(p) {
+  const spHoriz = Math.hypot(p.vel.x, p.vel.z);
+  if (spHoriz <= STICK_POKE_MIN_SPEED) return;
+  const fwdX = Math.sin(spidey.rotation.y), fwdZ = Math.cos(spidey.rotation.y);
+  const reach = STICK_POKE_REACH * (myEffectActive('longlance') ? 5 : 1);
+  const tipX = p.pos.x + fwdX * reach, tipZ = p.pos.z + fwdZ * reach;
+  for (const z of zombies) {
+    if (z.state !== 'chasing') continue;
+    if (Math.abs(p.pos.y - z.obj.position.y) > STICK_POKE_HEIGHT_GATE + 1) continue;
+    const tipDist = Math.hypot(tipX - z.obj.position.x, tipZ - z.obj.position.z);
+    if (tipDist < STICK_POKE_RADIUS) {
+      const dir = new THREE.Vector3(z.obj.position.x - p.pos.x, 0, z.obj.position.z - p.pos.z).normalize();
+      knockZombie(z, dir, spHoriz);
+    }
   }
 }
 function stepZombies(dt, p) {
@@ -3507,6 +3574,28 @@ function stepZombies(dt, p) {
       }
       z.obj.position.y = z.baseY + Math.sin(performance.now() * 0.005 + z.wobble) * 0.05;
       if (dist < 1.1 && Math.abs(p.pos.y - z.obj.position.y) < 1.8) touching++;
+    } else if (z.state === 'knocked') {
+      // Slides along the knock direction (damped, so it doesn't glide
+      // forever) while tipped flat on its back -- rotation.x tips the
+      // whole group onto its side, same "treat the group as a rigid
+      // body" approach the wall-climb pose uses elsewhere in this file.
+      // No touch-damage while down (can't hurt you while it's on the
+      // ground), and it doesn't chase during this window either.
+      z.obj.position.addScaledVector(z.knockVel, dt);
+      z.knockVel.multiplyScalar(Math.max(0, 1 - dt * 4));   // damp the slide
+      z.knockTimer -= dt;
+      // Quick tip over the first 0.2s, hold flat, ease back upright over
+      // the final 0.2s before resuming the chase -- not an instant snap
+      // either direction.
+      const elapsed = ZOMBIE_KNOCK_TIME - z.knockTimer;
+      const tipT = Math.min(1, elapsed / 0.2);
+      const standT = Math.min(1, Math.max(0, (0.2 - z.knockTimer) / 0.2));
+      z.obj.rotation.x = (Math.PI / 2) * tipT * (1 - standT);
+      z.obj.rotation.y = z.knockYaw;
+      if (z.knockTimer <= 0) {
+        z.obj.rotation.x = 0;
+        z.state = 'chasing';
+      }
     } else if (z.state === 'sinking') {
       z.obj.position.y -= dt * 3;
       if (z.obj.position.y < z.baseY - 2.5) { scene.remove(z.obj); zombies.splice(i, 1); }
@@ -5723,6 +5812,7 @@ function stepPlayer(dt) {
 
   checkKnocks(p, p.vel.length());
   checkStickPokeCars(p);
+  checkStickPokeZombies(p);
   if (comboTimer > 0) { comboTimer -= dt; if (comboTimer <= 0) comboCount = 0; }
 
   // visuals: lean the body into the velocity (scaled by giant/tiny/shrunk),
@@ -6697,7 +6787,8 @@ window.__sw = { THREE, player, cars, parkedCars, pickups, colliders, EDGE, WORLD
                 kbKeyDown, aimDir, fpStick,
                 stepXR, xrKeys, get xrWebHeld() { return xrWebHeld; }, set xrWebHeld(v) { xrWebHeld = v; },
                 cameraRig, renderer, enterGame, recenterVR, stepReelSound, stepArmSwingPhysics, updateLanceLength,
-                get GIANT_SCALE() { return GIANT_SCALE; }, checkStickPokeCars, updateVRModeIndicator, vrModePanel,
+                get GIANT_SCALE() { return GIANT_SCALE; }, checkStickPokeCars, checkStickPokeZombies, knockZombie,
+                ZOMBIE_KNOCK_TIME, updateVRModeIndicator, vrModePanel,
                 remotePlayers, stepMultiplayer, makeRemotePlayerMesh, connectMultiplayer,
                 get mpSocket() { return mpSocket; }, set mpSocket(v) { mpSocket = v; },
                 get myId() { return myId; }, set myId(v) { myId = v; },
