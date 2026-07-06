@@ -262,7 +262,7 @@
        in-headset without needing devtools. If it EVER doesn't match what
        you expect after a hard reload, that's real signal of a caching
        problem, not a hunch. -->
-  <div id="versionLine">by ibrews &nbsp;·&nbsp; v0.1.6 built 2026-07-06 (round 17: fixed infinite mid-air relaunch exploit)</div><br>
+  <div id="versionLine">by ibrews &nbsp;·&nbsp; v0.1.7 built 2026-07-06 (round 18: climb momentum, mid-air spin fixed for real, magnet no longer pulls you)</div><br>
   A living neon city at night. Sling a web, swing between skyscrapers, and see how much
   trouble you can cause before the night's over.<br><br>
   <span id="initialsRow">callsign (optional, 3 letters): <input id="initialsInput" maxlength="3"
@@ -437,6 +437,9 @@ const COMBO_WINDOW = 1.6;   // seconds since the last knock that still counts as
 // rather than duplicating a new tunable in three spots.
 const JUMP_VEL_NORMAL = 15, JUMP_VEL_BOOSTED = 20, JUMP_BOOST_DURATION = 9;
 const CLIMB_SPEED = 7.0;   // wall-crawl vertical speed while holding the web button against a building
+// Set once per wall-crawl excursion (see the momentum-preservation comment
+// at the wall-climb pose code) -- CLIMB_SPEED is just its starting value.
+let currentClimbSpeed = CLIMB_SPEED;
 // SWING REEL (Alex: "forward... basically retract the web so you're pulled
 // directly to that spot" + "backward... let out more web and rappel down"
 // + "web by default with no other input should default toward pulling me
@@ -1942,15 +1945,11 @@ function triggerSoloEffect(name) {
 // client, this one included, applies worldEffects[name] and shows the
 // banner from the SAME code path once the broadcast lands.
 function triggerWorldEffect(name) {
-  // Magnet needs a spatial trigger point ("pulls everyone toward the
-  // trigger point") -- every other world effect just needs the name.
-  const pos = name === 'magnet' ? [player.pos.x, player.pos.y, player.pos.z] : null;
   if (mpSocket && mpSocket.readyState === WebSocket.OPEN) {
-    mpSocket.send(JSON.stringify({ type: 'effect', name, world: true, pos, initials: myInitials || '' }));
+    mpSocket.send(JSON.stringify({ type: 'effect', name, world: true, initials: myInitials || '' }));
   } else {
     // single-player: no relay round-trip to wait for, apply directly
     worldEffects[name] = EFFECT_DURATION;
-    if (name === 'magnet') worldMagnetOrigin = player.pos.clone();
     announceEffect(name, true);
     onEffectTriggered(name, true);
   }
@@ -3576,29 +3575,33 @@ function stepBomber(dt, p) {
   }
 }
 
-// MAGNET: solo pulls nearby uncollected pickups toward you (their existing
-// float animation in stepPickups only ever touches .y each frame, so
-// nudging x/z here is safe and doesn't fight it); everyone pulls every
-// OTHER player toward the trigger point (chaotic dogpile) -- each client
-// pulls only ITSELF toward the shared worldMagnetOrigin, per the
-// "each client applies to itself" rule.
-let worldMagnetOrigin = null;
+// MAGNET: pulls nearby uncollected pickups toward whoever has the effect
+// (their existing float animation in stepPickups only ever touches .y each
+// frame, so nudging x/z here is safe and doesn't fight it). Applies
+// identically whether the effect came from the solo orb or the "everyone"
+// halo-ring variant -- the ONLY thing "everyone" changes is that everyone
+// gets their OWN pull-pickups-to-me effect via the broadcast, never that
+// players get dragged toward each other or a shared point.
+// REMOVED (Alex: "magnet mode seems to pull me -- I don't want to be
+// affected -- I want it to pull orbs and pickupables to me"). This used to
+// have a SECOND behavior for the "everyone" variant: pulling the PLAYER
+// toward a shared world-effect trigger point (a "chaotic dogpile" -- see
+// the old worldMagnetOrigin plumbing, now gone entirely: the
+// triggerWorldEffect() pos payload, the multiplayer receive handler, and
+// the reset in respawn() all only ever existed to support that removed
+// pull-the-player behavior). Directly contradicts the ask -- magnet should
+// never move the player themselves, solo or world.
 function stepMagnet(dt, p) {
-  if (myEffectActive('magnet') && !worldEffects.magnet) {
-    for (const pk of pickups) {
-      if (pk.got) continue;
-      const d = p.pos.distanceTo(pk.mesh.position);
-      if (d < MAGNET_RADIUS && d > 0.5) {
-        const pull = Math.min(1, MAGNET_PULL * dt / d);
-        pk.mesh.position.x += (p.pos.x - pk.mesh.position.x) * pull;
-        pk.mesh.position.z += (p.pos.z - pk.mesh.position.z) * pull;
-        pk.baseY += (p.pos.y - pk.baseY) * pull * 0.3;
-      }
+  if (!myEffectActive('magnet')) return;
+  for (const pk of pickups) {
+    if (pk.got) continue;
+    const d = p.pos.distanceTo(pk.mesh.position);
+    if (d < MAGNET_RADIUS && d > 0.5) {
+      const pull = Math.min(1, MAGNET_PULL * dt / d);
+      pk.mesh.position.x += (p.pos.x - pk.mesh.position.x) * pull;
+      pk.mesh.position.z += (p.pos.z - pk.mesh.position.z) * pull;
+      pk.baseY += (p.pos.y - pk.baseY) * pull * 0.3;
     }
-  }
-  if (worldEffects.magnet > 0 && worldMagnetOrigin) {
-    const d = p.pos.distanceTo(worldMagnetOrigin);
-    if (d > 1.5) p.vel.addScaledVector(worldMagnetOrigin.clone().sub(p.pos).normalize(), MAGNET_PULL * dt * 3);
   }
 }
 
@@ -3812,7 +3815,6 @@ function resetGame() {
   // scale, a floating pong ball, or a disco-tinted screen.
   for (const k of Object.keys(activeEffects)) delete activeEffects[k];
   for (const k of Object.keys(worldEffects)) delete worldEffects[k];
-  worldMagnetOrigin = null;
   for (const b of pongBalls) scene.remove(b.mesh); pongBalls.length = 0;
   for (const b of bombs) scene.remove(b.mesh); bombs.length = 0;
   for (const part of confettiParts) part.mesh.visible = false;
@@ -5315,6 +5317,7 @@ function stepPlayer(dt) {
   } else { webLine.visible = false; stepReelSound(false, false); }
 
   // ground + building AABB collisions
+  const wasOnWallLastFrame = p.onWall;   // see the wall-climb momentum-preservation comment below
   p.onGround = false;
   p.onWall = false;
   if (p.pos.y < 0.9) { p.pos.y = 0.9; if (p.vel.y < 0) p.vel.y = 0; p.onGround = true; usedAirLiftoff = false; }
@@ -5357,6 +5360,11 @@ function stepPlayer(dt) {
     if (p.pos.x < c.min[0] - R || p.pos.x > c.max[0] + R ||
         p.pos.z < c.min[2] - R || p.pos.z > c.max[2] + R ||
         p.pos.y < c.min[1] - R || p.pos.y > c.max[1] + 1.0) continue;
+    // Captured BEFORE the push-out below can zero any component -- the
+    // wall-climb momentum-preservation code needs the speed the player
+    // actually ARRIVED at the wall with, not what's left of it after the
+    // into-wall component gets collision-canceled a few lines down.
+    const enteringSpeedThisHit = p.vel.length();
     // minimum-penetration push-out
     const pens = [
       [p.pos.x - (c.min[0] - R), 0], [(c.max[0] + R) - p.pos.x, 1],
@@ -5392,7 +5400,26 @@ function stepPlayer(dt) {
     if ((axis === 0 || axis === 1 || axis === 4 || axis === 5) && wallCrawling &&
         p.pos.y < c.max[1] + 0.9) {   // don't climb past the roofline -- just walk onto it instead
       p.onWall = true;
-      p.vel.y = CLIMB_SPEED;
+      // PRESERVE SWING MOMENTUM INTO THE CLIMB (Alex: "my speed climbing
+      // up a building is fine when starting from stillness, but if I'm
+      // swinging very fast and move into climbing a building, that
+      // velocity and speed should continue"). Previously this ALWAYS
+      // reset to the flat CLIMB_SPEED constant, every single frame,
+      // discarding a fast swing's momentum the instant you touched the
+      // wall. Only re-derive the climb speed on the FIRST frame of a
+      // fresh wall-crawl (`!wasOnWallLastFrame`) from however fast you
+      // were actually moving at the instant of contact
+      // (`enteringSpeedThisHit`, captured above BEFORE the push-out a few
+      // lines up zeroes the into-wall velocity component -- reading
+      // `p.vel.length()` down here would already be missing most of a
+      // straight-on hit's speed) -- CLIMB_SPEED remains the
+      // FLOOR (a standstill/walk-up climb feels exactly as before), but
+      // a faster entry speed now carries straight up the wall instead of
+      // being discarded. Held constant for the REST of the climb (not
+      // re-measured every frame) so it doesn't self-reinforce off its
+      // own previous value.
+      if (!wasOnWallLastFrame) currentClimbSpeed = Math.max(CLIMB_SPEED, enteringSpeedThisHit);
+      p.vel.y = currentClimbSpeed;
       wallFaceAxis = axis;
       wallCollider = c;
       // Ease onto the roof as the climb nears the top, so cresting a
@@ -6061,7 +6088,6 @@ function connectMultiplayer() {
       // (origin included) applies worldEffects from the SAME broadcast.
       if (msg.world) {
         worldEffects[msg.name] = EFFECT_DURATION;
-        if (msg.name === 'magnet' && msg.pos) worldMagnetOrigin = new THREE.Vector3(msg.pos[0], msg.pos[1], msg.pos[2]);
         onEffectTriggered(msg.name, true);
       } else if (msg.byId !== myId) {
         // Solo effect on ANOTHER player: start a local countdown on their
@@ -6343,7 +6369,17 @@ function loop(now) {
   // mousedown/up compatibility events, so no separate touch term is needed
   // here.
   webHeld = kbMouseWebHeld || gamepadWebHeld || xrWebHeld;
-  for (const k of ['KeyW', 'KeyA', 'KeyS', 'KeyD', 'ShiftLeft']) {
+  // KeyQ/KeyE (mid-air facing control, see the airborne rotation block in
+  // stepPlayer) were ADDED to that block in round 15 but never added HERE
+  // -- this whitelist is the only thing that copies raw kbKeys into the
+  // `keys` object stepPlayer actually reads, so `keys.KeyQ`/`keys.KeyE`
+  // silently stayed permanently undefined in real play regardless of what
+  // was actually held. Every synthetic test at the time set `keys.KeyQ`
+  // directly (bypassing this merge entirely), which is exactly why it
+  // looked verified but never worked for a real keypress (Alex: "I still
+  // can't seem to change my avatar's direction in midair... changing
+  // direction still only works when I'm on a surface").
+  for (const k of ['KeyW', 'KeyA', 'KeyS', 'KeyD', 'ShiftLeft', 'KeyQ', 'KeyE']) {
     keys[k] = !!(kbKeyDown(k) || gpKeys[k] || tKeys[k] || xrKeys[k]);
   }
   stepPlayer(playerDt);
@@ -6387,7 +6423,7 @@ window.__sw = { THREE, player, cars, parkedCars, pickups, colliders, EDGE, WORLD
                 genBuildingName, isBlocked, PROFANITY_EN, PROFANITY_KATAKANA,
                 rooftopCoins, stepRooftopCoins, spotlights, stepSpotlights, PARK_BLOCK_I, PARK_BLOCK_J,
                 triggerGameOver, resetGame, checkKnocks, knockCar, respawn,
-                stepPickups, stepPlayer, stepTraffic, stepKnocked, stepExplosion,
+                stepPickups, stepPlayer, stepTraffic, stepKnocked, stepExplosion, stepMagnet, MAGNET_RADIUS, MAGNET_PULL,
                 scoreForOrbHeight, spawnScorePopup, stepScorePopups, scorePopups, get score() { return score; },
                 zombies, spawnZombieWave, stepZombies, scene, spidey, coatSegs, camera,
                 resolveCarCollisions, stepWeather, triggerLightning, updateBloom, stepRain, rain, findAnchor,
@@ -6419,7 +6455,7 @@ window.__sw = { THREE, player, cars, parkedCars, pickups, colliders, EDGE, WORLD
                 get comboTimer() { return comboTimer; },
                 rainBus, audioCtx, findQueuedCar, stepHonks, sfxWhoosh, playerWhooshCooldowns,
                 WHOOSH_RADIUS, WHOOSH_MIN_SPEED,
-                get CLIMB_SPEED() { return CLIMB_SPEED; }, KNOCK_SPEED,
+                get CLIMB_SPEED() { return CLIMB_SPEED; }, get currentClimbSpeed() { return currentClimbSpeed; }, KNOCK_SPEED,
                 keys, kbKeys, gpKeys, tKeys,
                 get kbMouseWebHeld() { return kbMouseWebHeld; },
                 get gamepadWebHeld() { return gamepadWebHeld; },
@@ -6470,7 +6506,6 @@ window.__sw = { THREE, player, cars, parkedCars, pickups, colliders, EDGE, WORLD
                 activeEffects, worldEffects, EFFECT_NAMES, ORB_EFFECTS, DUAL_KEYS,
                 triggerSoloEffect, triggerWorldEffect, extendActiveEffects, myEffectActive,
                 pongBalls, bombs, confettiParts,
-                get worldMagnetOrigin() { return worldMagnetOrigin; },
                 get discoT() { return discoT; }, stepDisco, stepDiscoBeat, discoBus };
 </script>
 </body>
