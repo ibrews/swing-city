@@ -129,6 +129,11 @@
      categories") -- smaller/dimmer than the main score line so it reads as
      a detail, not competing with it. */
   #orbbreakdown { font-size: 10px; color: #c9a45a; }
+  /* Roof bonus (Alex: "why does it say 1435 orbs? I thought we decided to
+     keep 512" -- rooftop coins got a SEPARATE line instead of being
+     folded into the 512 orb total, see the JS comment at orbstotal's
+     assignment). Same dim/detail styling as #orbbreakdown. */
+  #roofbonus, #roofbonustotal { color: #8fd6a8; }
   /* Return-to-menu button (Alex: "a button to return to the main menu
      without losing your progress -- change your name or look at the
      instructions again"). Top-center, out of the way of the left/right HUD
@@ -147,13 +152,12 @@
     background: #0a1424b0; border: 1px solid #2a4868; border-radius: 4px; padding: 4px 10px;
     cursor: pointer; user-select: none; -webkit-touch-callout: none; }
   #menubtn:hover { background: #12203aca; }
-  /* Bumped 124->150px -- #orbbreakdown (the category sub-line) was added
-     to #score AFTER the 124px value was tuned against a 3-line box
-     (score/cars knocked/orbs), making it a 4th line and pushing #score's
-     real bottom edge below 124 again (Alex, round 2: HUD text in the
-     upper-right overlapping, same recurring class of bug). Recompute this
-     if #score ever grows another line. */
-  #powerups { position: fixed; right: 14px; top: 150px; z-index: 10; text-align: right;
+  /* Bumped 124->150->170px -- same recurring class of bug each time
+     #score grows another line (see the two comments this replaced in
+     git history): #orbbreakdown made it a 4th line, and now the roof
+     bonus line makes it a 5th. RECOMPUTE THIS if #score ever grows
+     another line -- verify with getBoundingClientRect, not just eyeballing. */
+  #powerups { position: fixed; right: 14px; top: 170px; z-index: 10; text-align: right;
     font: 12px/1.6 ui-monospace, Menlo, monospace; user-select: none; pointer-events: none; }
   #powerups div { text-shadow: 0 0 6px currentColor; }
   #zombiewarn { position: fixed; left: 50%; top: 14%; transform: translateX(-50%);
@@ -258,7 +262,7 @@
        in-headset without needing devtools. If it EVER doesn't match what
        you expect after a hard reload, that's real signal of a caching
        problem, not a hunch. -->
-  <div id="versionLine">by ibrews &nbsp;·&nbsp; v0.1.2 built 2026-07-04 (round 13: selection lockdown + swing steer)</div><br>
+  <div id="versionLine">by ibrews &nbsp;·&nbsp; v0.1.3 built 2026-07-06 (round 14: audio tuning + physics fixes)</div><br>
   A living neon city at night. Sling a web, swing between skyscrapers, and see how much
   trouble you can cause before the night's over.<br><br>
   <span id="initialsRow">callsign (optional, 3 letters): <input id="initialsInput" maxlength="3"
@@ -313,7 +317,7 @@
 <div id="warntext">LEAVING THE CITY &mdash; GET BACK</div>
 <div id="hud">swing: <b id="webstate">ready</b> · speed: <b id="speed">0</b></div>
 <div id="playercount">PLAYERS: <b id="playercounttotal">1</b><br>PLAYERS TODAY: <b id="playerstoday">1</b></div>
-<div id="score">score: <b id="scoretotal">0</b><br>cars knocked: <b id="knocked">0</b><br>orbs: <b id="orbs">0</b>/<b id="orbstotal">0</b><br><span id="orbbreakdown"></span></div>
+<div id="score">score: <b id="scoretotal">0</b><br>cars knocked: <b id="knocked">0</b><br>orbs: <b id="orbs">0</b>/<b id="orbstotal">0</b><br><span id="orbbreakdown"></span><br>roof bonus: <b id="roofbonus">0</b>/<b id="roofbonustotal">0</b></div>
 <div id="powerups"></div>
 <div id="zombiewarn">ZOMBIES INBOUND</div>
 <div id="combotext"></div>
@@ -1262,11 +1266,12 @@ function stepRooftopCoins(t, p) {
       broadcastPickup(mesh.position, amount);
       analyticsOrbsSinceReport++;
       // Counter fix (Alex: "orbs on top of buildings don't register in our
-      // counter, even though I do get points") -- this branch always
-      // awarded score but never touched the "orbs: X/Y" HUD counter, since
-      // rooftop coins are a separate pool from `pickups` (see orbstotal's
-      // assignment above, now sized to include rooftopCoins.length too).
-      orbsEl.textContent = (parseInt(orbsEl.textContent) || 0) + 1;
+      // counter, even though I do get points") -- awarded score but never
+      // touched any HUD counter. Its own separate "roof bonus: X/Y" line
+      // now, NOT the "orbs: X/512" counter (a prior round folded it into
+      // that total, which Alex correctly caught as breaking the 512
+      // promise and the pts+pwr+fx breakdown math -- see orbstotal above).
+      roofBonusEl.textContent = (parseInt(roofBonusEl.textContent) || 0) + 1;
     }
   });
 }
@@ -1830,6 +1835,40 @@ function showVRNotification(text, holdMs = 2600) {
   vrNotifyPanel._hideT = setTimeout(() => { vrNotifyPanel.mesh.visible = false; }, holdMs);
 }
 
+// PERSISTENT VR MODE INDICATOR (Alex: "can I see what mode I'm in in
+// VR?"). vrNotifyPanel above is TRANSIENT -- it flashes a banner on
+// activation and hides itself a couple seconds later, same as the
+// desktop `#powerbanner`. But desktop ALSO has a persistent HUD line
+// (`#powerups`, via updatePowerupHud()) that stays up the whole time an
+// effect is active -- VR had no equivalent at all once the initial
+// banner faded, so there was no way to just glance and confirm what's
+// still running. Small panel, low in view (out of the way of the
+// reticle/aim), visible only while at least one effect is active.
+const vrModePanel = makeCanvasPanel(384, 96, 0.42, 0.105);
+vrModePanel.mesh.position.set(0, -0.32, -1.0);
+vrModePanel.mesh.visible = false;
+camera.add(vrModePanel.mesh);
+let vrModePanelLastText = '';
+function drawVRMode(text) {
+  return (ctx, w, h) => {
+    ctx.fillStyle = '#04101cb0';
+    ctx.fillRect(0, 0, w, h);
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.font = 'bold 22px ui-monospace, Menlo, monospace';
+    ctx.shadowColor = '#4dff88'; ctx.shadowBlur = 8;
+    ctx.fillStyle = '#8fffb0';
+    ctx.fillText(text, w / 2, h / 2);
+  };
+}
+function updateVRModeIndicator() {
+  if (!renderer.xr.isPresenting) return;
+  const names = Object.entries(activeEffects).filter(([, t]) => t > 0).map(([n]) => EFFECT_NAMES[n] || n.toUpperCase());
+  if (!names.length) { vrModePanel.mesh.visible = false; vrModePanelLastText = ''; return; }
+  const text = names.join(' + ');
+  if (text !== vrModePanelLastText) { vrModePanel.redraw(drawVRMode(text)); vrModePanelLastText = text; }
+  vrModePanel.mesh.visible = true;
+}
+
 const powerBannerEl = document.getElementById('powerbanner');
 function showPowerBanner(text) {
   showVRNotification(text);
@@ -2084,14 +2123,19 @@ for (let i = 0; i < GRID_N; i++) for (let j = 0; j < GRID_N; j++) {
     pickups.push({ mesh, ring, baseY, phase: uniform(0, 6.28), got: false, type: type.key, color: type.color, world: !!type.world });
   }
 }
-// Includes rooftopCoins (Alex: "orbs on top of buildings don't register
-// in our counter, even though I do get points") -- stepRooftopCoins() DID
-// award score for a roof coin, it just never touched orbsEl/orbstotal at
-// all, so the "orbs: X/Y" HUD counter silently excluded an entire
-// collectible category. Folding rooftop coins into this SAME total (not
-// a separate counter) keeps the displayed fraction honest -- see the
-// matching orbsEl.textContent bump added in stepRooftopCoins below.
-document.getElementById('orbstotal').textContent = pickups.length + rooftopCoins.length;
+// CORRECTED (Alex: "why does it say there are 1435 orbs? I thought we
+// decided to keep a total of 512 -- and shouldn't pts/pwr/fx all add up
+// to the total?"). The previous round folded rooftopCoins.length into
+// this SAME total to fix "rooftop coins don't register in our counter" --
+// but that broke the pts+pwr+fx breakdown (orbCategoryTotals, right
+// below, is summed ONLY from `pickups`, so it only ever adds up to 512),
+// creating exactly the inconsistency Alex just caught: a 1435 total that
+// doesn't match its own breakdown. `orbstotal` is back to the true
+// 512-item pickup count; rooftop coins get their OWN separate, clearly
+// labeled counter instead (see roofBonusEl below) rather than being
+// folded into a total they were never part of.
+document.getElementById('orbstotal').textContent = pickups.length;
+document.getElementById('roofbonustotal').textContent = rooftopCoins.length;
 // ORB CATEGORY BREAKDOWN (Alex: "512 orbs -- have a sub breakdown of them
 // into categories"). Three buckets: plain 'orb' pickups are pure points;
 // the ORB_EFFECTS-derived keys (giant/tiny/fly/... plus their 'All' world
@@ -2377,25 +2421,34 @@ rainBus.connect(audioCtx.destination);
 // literally: reeling IN glides pitch UP (tightening), reeling OUT glides
 // pitch DOWN (loosening) -- opposite directions from a shared middle,
 // not just two arbitrary blips.
+// TONED DOWN (Alex, round 2: "the reel noises are too high pitched and
+// loud -- they sound like an alarm. Tone them down to be much bassier and
+// subtle"). Sawtooth is an inherently buzzy/harsh waveform (rich in odd
+// harmonics), and 220-520Hz sits right in the range human ears read as
+// "alert/siren" -- both choices, plus a fast 0.05s attack, added up to a
+// genuine klaxon. Switched to sine (pure tone, no harsh harmonics), moved
+// the whole range down an octave-plus into bass territory (48-95Hz), cut
+// the bus gain by more than half, and slowed the attack so it fades in
+// rather than snapping on.
 const reelBus = audioCtx.createGain();
-reelBus.gain.value = 0.32;
+reelBus.gain.value = 0.14;
 reelBus.connect(audioCtx.destination);
 const reelInGain = audioCtx.createGain(), reelOutGain = audioCtx.createGain();
 reelInGain.gain.value = 0; reelOutGain.gain.value = 0;
 reelInGain.connect(reelBus); reelOutGain.connect(reelBus);
-const reelInOsc = audioCtx.createOscillator(); reelInOsc.type = 'sawtooth'; reelInOsc.frequency.value = 220;
-const reelOutOsc = audioCtx.createOscillator(); reelOutOsc.type = 'sawtooth'; reelOutOsc.frequency.value = 480;
-const reelInFilt = audioCtx.createBiquadFilter(); reelInFilt.type = 'lowpass'; reelInFilt.frequency.value = 1400;
-const reelOutFilt = audioCtx.createBiquadFilter(); reelOutFilt.type = 'lowpass'; reelOutFilt.frequency.value = 1400;
+const reelInOsc = audioCtx.createOscillator(); reelInOsc.type = 'sine'; reelInOsc.frequency.value = 55;
+const reelOutOsc = audioCtx.createOscillator(); reelOutOsc.type = 'sine'; reelOutOsc.frequency.value = 95;
+const reelInFilt = audioCtx.createBiquadFilter(); reelInFilt.type = 'lowpass'; reelInFilt.frequency.value = 300;
+const reelOutFilt = audioCtx.createBiquadFilter(); reelOutFilt.type = 'lowpass'; reelOutFilt.frequency.value = 300;
 reelInOsc.connect(reelInFilt); reelInFilt.connect(reelInGain);
 reelOutOsc.connect(reelOutFilt); reelOutFilt.connect(reelOutGain);
 reelInOsc.start(0); reelOutOsc.start(0);
 function stepReelSound(reelingIn, reelingOut) {
   const now = audioCtx.currentTime;
-  reelInGain.gain.setTargetAtTime(reelingIn ? 0.55 : 0, now, 0.05);
-  reelOutGain.gain.setTargetAtTime(reelingOut ? 0.55 : 0, now, 0.05);
-  reelInOsc.frequency.setTargetAtTime(reelingIn ? 520 : 220, now, reelingIn ? 0.15 : 0.3);
-  reelOutOsc.frequency.setTargetAtTime(reelingOut ? 180 : 480, now, reelingOut ? 0.15 : 0.3);
+  reelInGain.gain.setTargetAtTime(reelingIn ? 0.4 : 0, now, 0.12);
+  reelOutGain.gain.setTargetAtTime(reelingOut ? 0.4 : 0, now, 0.12);
+  reelInOsc.frequency.setTargetAtTime(reelingIn ? 95 : 55, now, reelingIn ? 0.2 : 0.35);
+  reelOutOsc.frequency.setTargetAtTime(reelingOut ? 48 : 95, now, reelingOut ? 0.2 : 0.35);
 }
 
 function playSpatialAt(pos, build) {
@@ -2426,6 +2479,31 @@ function sfxThwip(pos) {
     osc.connect(g);
     osc.start(now); osc.stop(now + 0.14);
     return { node: g, stopAt: now + 0.14 };
+  });
+}
+// BOUNDARY WALL BOING (Alex: "bouncing off the wall should have a fun
+// boing sound effect"). A classic cartoon boing is a pitch that bends
+// down then springs back up a couple of times with decaying amplitude --
+// built here as one sine oscillator with several chained
+// exponentialRampToValueAtTime frequency points (down-up-down-up,
+// shrinking each bounce) rather than a single sweep, so it actually reads
+// as springy/bouncy instead of just a falling or rising tone.
+function sfxBoing(pos) {
+  playSpatialAt(pos, (ctx, now) => {
+    const osc = ctx.createOscillator(); osc.type = 'sine';
+    osc.frequency.setValueAtTime(500, now);
+    osc.frequency.exponentialRampToValueAtTime(180, now + 0.09);
+    osc.frequency.exponentialRampToValueAtTime(420, now + 0.16);
+    osc.frequency.exponentialRampToValueAtTime(240, now + 0.24);
+    osc.frequency.exponentialRampToValueAtTime(320, now + 0.30);
+    osc.frequency.exponentialRampToValueAtTime(260, now + 0.36);
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0.0001, now);
+    g.gain.exponentialRampToValueAtTime(0.5, now + 0.02);
+    g.gain.exponentialRampToValueAtTime(0.0001, now + 0.4);
+    osc.connect(g);
+    osc.start(now); osc.stop(now + 0.42);
+    return { node: g, stopAt: now + 0.42 };
   });
 }
 function sfxKnock(pos) {
@@ -2636,9 +2714,18 @@ function findQueuedCar() {
 function stepHonks(dt, p) {
   honkTimer -= dt;
   if (honkTimer > 0) return;
-  honkTimer = uniform(4, 9);
+  honkTimer = uniform(3, 6);
+  // Re-verified this round (Alex: "make sure the cars are honking when
+  // relevant") -- the congestion detection itself is genuinely working
+  // now (real gap distribution measured 4-256 units, ~59% of random
+  // samples currently queued behind another car), so the mechanism
+  // wasn't dead again. Most play happens well above street level while
+  // swinging, though, so the audible range (55 -> 90) and the timer
+  // (4-9s -> 3-6s) both got widened/shortened -- more chances for a honk
+  // to actually reach the player instead of firing unheard down on a
+  // street they're not currently near.
   const c = findQueuedCar();
-  if (c && p.pos.distanceTo(c.obj.position) < 55) sfxHonkTiny(c.obj.position);
+  if (c && p.pos.distanceTo(c.obj.position) < 90) sfxHonkTiny(c.obj.position);
 }
 
 // ------------------------------------------------------------ CHIPTUNE FX --
@@ -2850,6 +2937,29 @@ function scheduleHype() {
     g.gain.exponentialRampToValueAtTime(0.0001, t + HYPE_BEAT * 0.45);
     o.connect(filt); filt.connect(g); g.connect(hypeBus);
     o.start(t); o.stop(t + HYPE_BEAT * 0.45);
+    // DRIVING BASS + HAT (Alex, round 2: "make the initial falling music
+    // more high energy and exciting" -- kick/snare/riff alone still had a
+    // gap where the low end should be; a real bassline under the beat is
+    // what actually reads as "driving," not just louder drums). One
+    // sawtooth bass note per beat (root of whatever the riff's currently
+    // on), plus an eighth-note hat for extra forward motion.
+    if (beatInBar % 2 === 0) {
+      const bass = audioCtx.createOscillator(); bass.type = 'sawtooth';
+      bass.frequency.value = HYPE_SCALE[HYPE_RIFF[beatInBar]] * 0.5;
+      const bf = audioCtx.createBiquadFilter(); bf.type = 'lowpass'; bf.frequency.value = 600;
+      const bg = audioCtx.createGain();
+      bg.gain.setValueAtTime(0.28, t);
+      bg.gain.exponentialRampToValueAtTime(0.001, t + HYPE_BEAT * 0.9);
+      bass.connect(bf); bf.connect(bg); bg.connect(hypeBus);
+      bass.start(t); bass.stop(t + HYPE_BEAT * 0.9);
+    }
+    const hat = audioCtx.createBufferSource(); hat.buffer = noiseBuffer;
+    const hf = audioCtx.createBiquadFilter(); hf.type = 'highpass'; hf.frequency.value = 7500;
+    const hg = audioCtx.createGain();
+    hg.gain.setValueAtTime(0.08, t);
+    hg.gain.exponentialRampToValueAtTime(0.001, t + 0.04);
+    hat.connect(hf); hf.connect(hg); hg.connect(hypeBus);
+    hat.start(t); hat.stop(t + 0.05);
     hypeNext += HYPE_BEAT / 2;
     hypeStep++;
   }
@@ -2864,7 +2974,7 @@ function startHype() {
 let fallMusicPhase = 'hype';   // 'hype' while dropping -> 'settled' once landed/low
 function updateFallMusic(playerY, onGround) {
   if (fallMusicPhase !== 'hype') return;
-  hypeBus.gain.setTargetAtTime(0.6, audioCtx.currentTime, 0.4);
+  hypeBus.gain.setTargetAtTime(0.78, audioCtx.currentTime, 0.4);   // 0.6 -> 0.78, alongside the new bass+hat layer above
   // Was ALSO crossfading to the pensive noir loop once below y=45, even
   // still mid-air -- Alex: keep it "energy energy energy" through the
   // WHOLE fall, only settle once actually landed on a horizontal surface
@@ -2880,6 +2990,7 @@ function updateFallMusic(playerY, onGround) {
 // ------------------------------------------------------- GAMEPLAY SYSTEMS --
 let knockedCount = 0, score = 0, playerKillCount = 0;
 const knockedEl = document.getElementById('knocked'), orbsEl = document.getElementById('orbs');
+const roofBonusEl = document.getElementById('roofbonus');
 const scoreEl = document.getElementById('scoretotal');
 const powerupsEl = document.getElementById('powerups');
 function addScore(n) { score += n; scoreEl.textContent = score; if (MULTIPLAYER_URL) updateLeaderboard(); }
@@ -3090,6 +3201,33 @@ function checkKnocks(p, speed) {
     }
   }
 }
+// STICK POKE vs CARS (Alex: "I'm swinging my sword at cars and it doesn't
+// seem to make a difference -- do they respond to collision and physics
+// from it"). The stick-poke jab (see the STICK POKE block in
+// stepMultiplayer) only ever checked remotePlayers -- there was no
+// equivalent check against cars at all, so a deliberate jab connecting
+// with a car did nothing regardless of speed/facing. Same tip-reach
+// geometry as the player version, reusing the EXISTING knockCar()
+// physics (identical launch/spin/combo path as a full-speed sprint-knock)
+// so a poke-connect feels like the same kind of hit, just aimed and
+// precise instead of a body-width collision. No separate cooldown map
+// needed -- knockCar() already no-ops on an already-`knocked` car.
+function checkStickPokeCars(p) {
+  const spHoriz = Math.hypot(p.vel.x, p.vel.z);
+  if (spHoriz <= STICK_POKE_MIN_SPEED) return;
+  const fwdX = Math.sin(spidey.rotation.y), fwdZ = Math.cos(spidey.rotation.y);
+  const reach = STICK_POKE_REACH * (myEffectActive('longlance') ? 5 : 1);
+  const tipX = p.pos.x + fwdX * reach, tipZ = p.pos.z + fwdZ * reach;
+  const dir = p.vel.clone().normalize();
+  for (const list of [cars, parkedCars]) {
+    for (const entry of list) {
+      if (entry.knocked) continue;
+      if (Math.abs(p.pos.y - (entry.obj.position.y + 0.4)) > 1.7) continue;   // same rough car-height gate as resolveCarCollisions
+      const tipDist = Math.hypot(tipX - entry.obj.position.x, tipZ - entry.obj.position.z);
+      if (tipDist < STICK_POKE_RADIUS) knockCar(entry, dir, list === parkedCars, Math.max(spHoriz, KNOCK_SPEED));
+    }
+  }
+}
 
 // PICKUP SPARKLE BURST (Alex: "let's have nice explosions when we get the
 // orb pickups") -- a small, snappy particle pop in the pickup's OWN color,
@@ -3132,7 +3270,19 @@ function stepPickups(t, p) {
     pk.mesh.rotation.y = t * 1.2 + pk.phase;
     pk.mesh.rotation.x = t * 0.7 + pk.phase;
     if (pk.ring) pk.ring.rotation.z = t * 2.4 + pk.phase;   // halo spins faster/independent of the orb
-    if (p.pos.distanceTo(pk.mesh.position) < 1.6) {
+    // GENEROUS HITBOX (Alex: "let's have the hitbox for the orbs be
+    // invisible [i.e. bigger than the visible mesh], especially the ones
+    // floating out in space that are harder to fly into"). The collect
+    // radius used to be a flat 1.6 regardless of the pickup's visual
+    // scale -- airborne orbs got a 1.5x visual bump a couple rounds ago
+    // but kept the SAME small hitbox, so a bigger-looking target got
+    // proportionally harder to actually connect with while flying past
+    // at swing speed. Scale the radius with the mesh's own scale (so
+    // bigger orbs get a bigger hitbox to match) plus a flat forgiveness
+    // multiplier on top, since a moving 3D target benefits from more
+    // slop than a stationary one would.
+    const hitRadius = 1.6 * (pk.mesh.scale.x || 1) * 1.35;
+    if (p.pos.distanceTo(pk.mesh.position) < hitRadius) {
       pk.got = true; pk.mesh.visible = false; collectedNow++;
       orbCategoryCollected[orbCategoryFor(pk.type)]++;
       sfxPing(pk.mesh.position);
@@ -3617,7 +3767,7 @@ function triggerGameOver(force) {
 function resetGame() {
   gameOver = false;
   goEl.style.display = 'none';
-  knockedCount = 0; knockedEl.textContent = 0; orbsEl.textContent = 0;
+  knockedCount = 0; knockedEl.textContent = 0; orbsEl.textContent = 0; roofBonusEl.textContent = 0;
   score = 0; scoreEl.textContent = 0;
   orbCategoryCollected.points = orbCategoryCollected.powerup = orbCategoryCollected.special = 0;
   renderOrbBreakdown();
@@ -4047,8 +4197,22 @@ function fireWeb(boosted) {
     player.vel.addScaledVector(f2, 3.5);
   }
   sfxThwip(player.pos);
-  phantomGrappleT = 0.22;
-  phantomGrappleTarget.copy(player.pos).addScaledVector(f2, 3).add(new THREE.Vector3(0, 4.2, 0));
+  // WEB SHOULD ALWAYS NEED SOMETHING TO ATTACH TO (Alex: "unless you're in
+  // a special mode, your web should always need to attach to something --
+  // if I'm really high up it seems to attach to just air"). Root cause:
+  // this phantom-grapple flourish used to draw a brief line toward a
+  // point in space on EVERY miss, regardless of mode -- visually
+  // identical to a REAL attach (also just a brief line toward a point),
+  // so a genuine whiff (nothing in range, especially high up with little
+  // else in view for scale) was indistinguishable from "it worked."
+  // NOTE: by the time execution reaches this point, webanywhere can no
+  // longer be active -- tryAttach() above ALWAYS manufactures a phantom
+  // anchor and returns true when webanywhere is on (see its own
+  // `if (!a && myEffectActive('webanywhere'))` branch), so `found` would
+  // already have been true and this function would have returned before
+  // here. This IS the "unless in a special mode" branch already -- a true
+  // miss outside webanywhere now shows no line at all, reading honestly
+  // as "missed" instead of "attached to nothing."
   return false;
 }
 
@@ -4068,13 +4232,19 @@ let webHeld = false, prevWebHeld = false, yaw = 0, pitch = -0.15;
 // sessionstart/sessionend below regardless of the last desktop KeyV toggle,
 // so VR always opens in first person and desktop always returns to third.
 let cameraMode = 'third';
-// Grapple-flourish state for the no-anchor-found self-zip (see stepPlayer):
-// a brief visible web line toward an aimed virtual point, purely cosmetic,
-// so a ground-tap with nothing to grab still READS as a grapple pull
-// (Alex: "I was imagining we'd have a little pull that happens like a
-// grappling hook when we're on the ground") instead of an invisible hop.
-let phantomGrappleT = 0;
-const phantomGrappleTarget = new THREE.Vector3();
+// REMOVED (Alex, round 2: "unless you're in a special mode, your web
+// should always need to attach to something -- if I'm really high up it
+// seems to attach to just air"). This used to be a "phantom grapple"
+// flourish -- a brief visible web line toward an aimed virtual point on
+// EVERY miss, so a whiff still read as a satisfying pull instead of an
+// invisible hop (Alex, originally: "I was imagining we'd have a little
+// pull that happens like a grappling hook"). The two asks directly
+// conflict: a flourish that LOOKS like a successful attach on every miss
+// is indistinguishable from actually attaching to nothing, which is
+// exactly what the new report describes. The new request wins -- see
+// fireWeb()'s miss branch, which now does nothing extra on a real miss
+// (webanywhere already attaches for real via tryAttach(), so it never
+// reaches that branch at all).
 // Armed the instant a grounded press turns into a real jump; consumed on
 // the very next airborne frame (while still held) to fire the web-thwip
 // flourish/attach -- see stepPlayer. Makes "jump" and "web thwip" read as
@@ -4751,10 +4921,24 @@ function stepXR(dt) {
   }
   xrLeftPinchPrev = leftPinchNow;
   xrWebHeld = held;
-  xrKeys.KeyW = moveY < -GAMEPAD_DEADZONE;
-  xrKeys.KeyS = moveY > GAMEPAD_DEADZONE;
-  xrKeys.KeyA = moveX < -GAMEPAD_DEADZONE;
-  xrKeys.KeyD = moveX > GAMEPAD_DEADZONE;
+  // THIRD-PERSON-ONLY LEFT-STICK SWAP (Alex: "I just noticed in third
+  // person mode the entire left joystick is inverted. It's great in every
+  // other case. So ONLY when in third person mode, up/down need to swap
+  // and left/right need to swap"). Confirmed the camera-facing math itself
+  // is correct in third person (re-tested with a non-zero yaw specifically
+  // -- an earlier round's verification used yaw=0, which can't distinguish
+  // a sign error since sin/cos of 0 and its negation coincide), so this
+  // isn't a camera bug. Same shape as the reel-sound VR-ONLY REVERSAL fix
+  // elsewhere in this file: trust the precise, mode-scoped hardware report
+  // over the fact that the math checks out on paper, and swap ONLY at the
+  // single point third-person movement is derived -- first person, desktop,
+  // and gamepad all keep reading moveX/moveY exactly as before.
+  const thirdPersonVR = renderer.xr.isPresenting && cameraMode === 'third';
+  const moveYEff = thirdPersonVR ? -moveY : moveY, moveXEff = thirdPersonVR ? -moveX : moveX;
+  xrKeys.KeyW = moveYEff < -GAMEPAD_DEADZONE;
+  xrKeys.KeyS = moveYEff > GAMEPAD_DEADZONE;
+  xrKeys.KeyA = moveXEff < -GAMEPAD_DEADZONE;
+  xrKeys.KeyD = moveXEff > GAMEPAD_DEADZONE;
   // Threshold lowered from 0.88 (Alex: "how do I run faster in VR?" --
   // full-deflection thresholds tuned against a desktop gamepad's analog
   // curve may simply be harder to physically reach on a VR thumbstick).
@@ -4787,14 +4971,18 @@ function stepXR(dt) {
     if (Math.abs(lookX) > GAMEPAD_DEADZONE) yaw -= lookX * 2.2 * dt;
     if (Math.abs(lookY) > GAMEPAD_DEADZONE) pitch = Math.max(-1.35, Math.min(0.9, pitch - lookY * 2.2 * dt));
   } else {
-    // FIRST PERSON -- confirmed correct on hardware, LEAVE AS IS:
-    // physical X (lookX) smooth-yaws, physical Y (lookY) snap-turns.
-    // "A lot of deadzone, and really only respond to directions (not NW
-    // or SE or anything like that which should be deadzone)" -- a
-    // diagonal push (both axes significant at once) is explicitly
-    // deadzone, not a blend. STICK_DIR_PURITY is how small the OTHER
-    // axis must stay for a push to count as clean.
-    const STICK_DIR_THRESHOLD = 0.5, STICK_DIR_PURITY = 0.3;
+    // FIRST PERSON -- axis IDENTITY/sign confirmed correct on hardware,
+    // LEAVE THAT AS IS. Only the TOLERANCE below was loosened this round
+    // (Alex: "we need to be more generous detecting up/down/left/right --
+    // a clear NW or SE diagonal should still be a deadzone, but if I'm
+    // just a few degrees off pushing fully West, that should still
+    // register as left"). PURITY 0.3->0.4: at full deflection a genuine
+    // 45-degree diagonal still fails clean (both components equal at
+    // ~0.707, comfortably above 0.4), but a push within ~23.6 degrees of
+    // a cardinal now passes where it used to need ~17.5 degrees --
+    // meaningfully more forgiving for "I meant West but my thumb wasn't
+    // perfectly on-axis" without opening the door to true diagonals.
+    const STICK_DIR_THRESHOLD = 0.45, STICK_DIR_PURITY = 0.4;
     const xIsClean = Math.abs(lookX) > STICK_DIR_THRESHOLD && Math.abs(lookY) < STICK_DIR_PURITY;
     const yIsClean = Math.abs(lookY) > STICK_DIR_THRESHOLD && Math.abs(lookX) < STICK_DIR_PURITY;
     if (xIsClean) yaw -= lookX * 2.2 * dt;
@@ -5014,12 +5202,6 @@ function stepPlayer(dt) {
     }
     webLine.visible = true;
     webLineGeo.setPositions([p.pos.x, p.pos.y, p.pos.z, p.anchor.x, p.anchor.y, p.anchor.z]);
-  } else if (phantomGrappleT > 0) {
-    phantomGrappleT -= dt;
-    webLine.visible = true;
-    webLineGeo.setPositions([p.pos.x, p.pos.y, p.pos.z,
-      phantomGrappleTarget.x, phantomGrappleTarget.y, phantomGrappleTarget.z]);
-    stepReelSound(false, false);   // not attached -- silence reel sound if it was still ramping down from a release mid-reel
   } else { webLine.visible = false; stepReelSound(false, false); }
 
   // ground + building AABB collisions
@@ -5044,7 +5226,18 @@ function stepPlayer(dt) {
   // off normally -- no separate "let go of wall" logic needed.
   // `let`, not `const` -- see the SEAMLESS SWING -> WALL-CLIMB comment
   // below, which flips this mid-loop the instant a swing smacks a wall.
-  let wallCrawling = webHeld && !p.anchor && !flying;
+  //
+  // FORWARD REQUIRED (Alex: "I will climb a building if I swing into it
+  // even if I'm only holding the swing button -- I should only climb if
+  // I'm pushing forward toward the building. Otherwise, holding the web
+  // button and nothing else should just maintain my hold/web and smack
+  // into the building"). `webHeld` alone used to be sufficient -- holding
+  // the button while merely TOUCHING a wall (no intent to climb it)
+  // triggered climbing regardless. Requiring `keys.KeyW` too means
+  // "smack into a wall with the button held, not pushing toward it" now
+  // correctly just collides (push-out below) and, if swinging, keeps the
+  // rope intact instead of hijacking it into a climb.
+  let wallCrawling = webHeld && keys.KeyW && !p.anchor && !flying;
   let buildingHit = false;
   let wallFaceAxis = null;   // which wall face we're pressed against this frame, for pawn rotation
   let wallCollider = null;   // the actual collider hit (carries .cyl for round buildings) -- see the pose code below
@@ -5080,7 +5273,11 @@ function stepPlayer(dt) {
       // first contact, so the very next check (same iteration, same
       // frame) already treats this as a fresh wall-crawl -- no one-frame
       // gap where you'd visibly bounce off before climbing kicks in.
-      if (p.anchor && webHeld && !flying) { p.anchor = null; wallCrawling = true; }
+      // Requires keys.KeyW too now (see FORWARD REQUIRED above) -- just
+      // holding the web button with no forward push should keep the
+      // swing intact and let the collision below simply stop you against
+      // the wall, not yank you into a climb.
+      if (p.anchor && webHeld && keys.KeyW && !flying) { p.anchor = null; wallCrawling = true; }
     }
     if ((axis === 0 || axis === 1 || axis === 4 || axis === 5) && wallCrawling &&
         p.pos.y < c.max[1] + 0.9) {   // don't climb past the roofline -- just walk onto it instead
@@ -5158,6 +5355,7 @@ function stepPlayer(dt) {
     if (Math.abs(p.pos.x) > WORLD_BOUND) p.pos.x = Math.sign(p.pos.x) * (WORLD_BOUND - 0.5);
     if (Math.abs(p.pos.z) > WORLD_BOUND) p.pos.z = Math.sign(p.pos.z) * (WORLD_BOUND - 0.5);
     oobTimer = BOUNCE_FLASH_DURATION;
+    sfxBoing(p.pos);
   }
   if (oobTimer > 0) {
     oobTimer = Math.max(0, oobTimer - dt);
@@ -5167,6 +5365,7 @@ function stepPlayer(dt) {
   }
 
   checkKnocks(p, p.vel.length());
+  checkStickPokeCars(p);
   if (comboTimer > 0) { comboTimer -= dt; if (comboTimer <= 0) comboCount = 0; }
 
   // visuals: lean the body into the velocity (scaled by giant/tiny/shrunk),
@@ -5957,6 +6156,7 @@ function loop(now) {
     }
   }
   updatePowerupHud();
+  updateVRModeIndicator();
   updatePowerupAppearance();
   updateLanceLength();
   updatePowerupMusicReactivity();   // was defined but never wired up -- music never actually reacted to power-ups until now
@@ -6040,8 +6240,6 @@ window.__sw = { THREE, player, cars, parkedCars, pickups, colliders, EDGE, WORLD
                 get webHeld() { return webHeld; },
                 set webHeld(v) { webHeld = v; },
                 webLine, webLineGeo, camera,
-                get phantomGrappleT() { return phantomGrappleT; },
-                phantomGrappleTarget,
                 get oobTimer() { return oobTimer; },
                 stepSparkles, pickupBurst, sparkleParts,
                 get carBumpCooldown() { return carBumpCooldown; },
@@ -6088,7 +6286,7 @@ window.__sw = { THREE, player, cars, parkedCars, pickups, colliders, EDGE, WORLD
                 kbKeyDown, aimDir, fpStick,
                 stepXR, xrKeys, get xrWebHeld() { return xrWebHeld; }, set xrWebHeld(v) { xrWebHeld = v; },
                 cameraRig, renderer, enterGame, recenterVR, stepReelSound, stepArmSwingPhysics, updateLanceLength,
-                get GIANT_SCALE() { return GIANT_SCALE; },
+                get GIANT_SCALE() { return GIANT_SCALE; }, checkStickPokeCars, updateVRModeIndicator, vrModePanel,
                 remotePlayers, stepMultiplayer, makeRemotePlayerMesh, connectMultiplayer,
                 get mpSocket() { return mpSocket; }, set mpSocket(v) { mpSocket = v; },
                 get myId() { return myId; }, set myId(v) { myId = v; },
