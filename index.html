@@ -262,7 +262,7 @@
        in-headset without needing devtools. If it EVER doesn't match what
        you expect after a hard reload, that's real signal of a caching
        problem, not a hunch. -->
-  <div id="versionLine">by ibrews &nbsp;·&nbsp; v0.2.2 built 2026-07-06 14:22 (round 23: wind visible again, magnet range fixed, zombies now knockable)</div><br>
+  <div id="versionLine">by ibrews &nbsp;·&nbsp; v0.2.3 built 2026-07-06 14:28 (round 24: global 100mph hard speed cap)</div><br>
   A living neon city at night. Sling a web, swing between skyscrapers, and see how much
   trouble you can cause before the night's over.<br><br>
   <span id="initialsRow">callsign (optional, 3 letters): <input id="initialsInput" maxlength="3"
@@ -5301,6 +5301,22 @@ function stepXR(dt) {
 
 // ----------------------------------------------------------- PLAYER STEP --
 const GRAV = 26, RUN = 11, AIR_CTRL = 11;
+// GLOBAL HARD SPEED CAP (Alex: "something is still sometimes causing my
+// velocity to get wayyy too high... a hard cap to stop someone from
+// zipping from one side of the map to the other in 2 seconds... 100mph
+// should be max speed"). Several independent systems can each inject real
+// speed on top of whatever's already there -- swing pumping (round 15,
+// SWING_PUMP_GAIN), the wind boost (round 20/22), knockback, jump boosts,
+// the speed power-up -- and any ONE of them stacking with existing
+// momentum at the wrong moment can produce a runaway velocity that then
+// carries across many following frames once nothing is constraining it
+// (e.g. releasing an over-pumped swing). Rather than chase and cap each
+// mechanism individually (fragile -- the next new mechanic would just
+// reopen the same hole), this is a single unconditional ceiling on total
+// 3D velocity magnitude, applied once per frame after every other system
+// has had its say. This project's scale is ~1 unit = 1 meter (see the
+// round-23 magnet-radius fix), so 100 mph = ~44.7 m/s -- rounded to 45.
+const MAX_PLAYER_SPEED = 45;
 // WIND BOOST (Alex: "little new mechanic... if you are in the air and NOT
 // holding down the web button, pressing in a direction creates some wind
 // lines (kind of like the rain particles) and you speed along in the
@@ -5603,6 +5619,16 @@ function stepPlayer(dt) {
     webLine.visible = true;
     webLineGeo.setPositions([p.pos.x, p.pos.y, p.pos.z, p.anchor.x, p.anchor.y, p.anchor.z]);
   } else { webLine.visible = false; stepReelSound(false, false); }
+
+  // GLOBAL HARD SPEED CAP (see MAX_PLAYER_SPEED declaration above) --
+  // placed here, after every velocity-modifying system for this frame
+  // (movement, jump/reel/pump, knockback applied earlier via checkKnocks)
+  // has already run, so whatever the largest LEGITIMATE velocity any one
+  // mechanism produced still gets the final word capped. Unconditional --
+  // applies regardless of which power-up or mechanic is active, since the
+  // whole point is an exploit-proof ceiling, not a per-mechanic tune.
+  const totalSpeed = p.vel.length();
+  if (totalSpeed > MAX_PLAYER_SPEED) p.vel.multiplyScalar(MAX_PLAYER_SPEED / totalSpeed);
 
   // ground + building AABB collisions
   const wasOnWallLastFrame = p.onWall;   // see the wall-climb momentum-preservation comment below
@@ -6749,6 +6775,7 @@ window.__sw = { THREE, player, cars, parkedCars, pickups, colliders, EDGE, WORLD
                 rainBus, audioCtx, findQueuedCar, stepHonks, sfxWhoosh, playerWhooshCooldowns,
                 WHOOSH_RADIUS, WHOOSH_MIN_SPEED,
                 get CLIMB_SPEED() { return CLIMB_SPEED; }, get currentClimbSpeed() { return currentClimbSpeed; }, KNOCK_SPEED,
+                MAX_PLAYER_SPEED,
                 MAX_CLIMB_SPEED, ROOF_CREST_LANDING_SPEED, get roofLandingSlowTimer() { return roofLandingSlowTimer; },
                 set roofLandingSlowTimer(v) { roofLandingSlowTimer = v; }, ROOF_LANDING_SLOW_DURATION, ROOF_LANDING_SLOW_MULT,
                 get moveMag() { return moveMag; }, set moveMag(v) { moveMag = v; },
