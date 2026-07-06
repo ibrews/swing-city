@@ -262,7 +262,7 @@
        in-headset without needing devtools. If it EVER doesn't match what
        you expect after a hard reload, that's real signal of a caching
        problem, not a hunch. -->
-  <div id="versionLine">by ibrews &nbsp;·&nbsp; v0.1.8 built 2026-07-06 12:16 (round 19: mid-air facing now identical to grounded, WASD-driven)</div><br>
+  <div id="versionLine">by ibrews &nbsp;·&nbsp; v0.1.9 built 2026-07-06 13:09 (round 20: climb speed cap, direction-honest web aim, wind boost, analog stick speed)</div><br>
   A living neon city at night. Sling a web, swing between skyscrapers, and see how much
   trouble you can cause before the night's over.<br><br>
   <span id="initialsRow">callsign (optional, 3 letters): <input id="initialsInput" maxlength="3"
@@ -437,9 +437,35 @@ const COMBO_WINDOW = 1.6;   // seconds since the last knock that still counts as
 // rather than duplicating a new tunable in three spots.
 const JUMP_VEL_NORMAL = 15, JUMP_VEL_BOOSTED = 20, JUMP_BOOST_DURATION = 9;
 const CLIMB_SPEED = 7.0;   // wall-crawl vertical speed while holding the web button against a building
+// MAX CLIMB SPEED CAP (Alex: "running up the wall seems a little too crazy
+// fast and I end up launching into the air when I'm actually trying to
+// climb onto the top of the building"). Round 18's momentum-preservation
+// fix carried a fast swing's FULL speed straight into the climb with no
+// ceiling -- a 30+ u/s swing produced an equally fast climb, and that
+// speed was still in effect the instant the player crested the roofline,
+// launching them skyward instead of landing. CLIMB_SPEED is still the
+// floor (a standstill climb feels exactly as before); this is the new
+// ceiling -- fast swings still climb noticeably faster than a standstill
+// one, just not arbitrarily fast.
+const MAX_CLIMB_SPEED = 16.0;
+// How fast vertical climb speed decays to near-zero as the player enters
+// the ROOF-CREST zone (see MANTLE_ZONE below) -- this is what actually
+// stops the launch: without it, vel.y stayed at currentClimbSpeed right up
+// to (and one frame past) the roofline, so a fast climb could carry the
+// player clean over the roof's collision plane in a single frame instead
+// of ever being caught by it.
+const ROOF_CREST_LANDING_SPEED = 1.0;
 // Set once per wall-crawl excursion (see the momentum-preservation comment
 // at the wall-climb pose code) -- CLIMB_SPEED is just its starting value.
 let currentClimbSpeed = CLIMB_SPEED;
+// LAND-AND-WALK (Alex: "when we reach the top of a building, land on top
+// and walk, drastically slow down movement speed"). A short window after
+// cresting a climb where ground movement speed is heavily damped, so
+// reaching the top of a fast climb reads as "landing and catching your
+// footing," not "still sprinting at climb speed." Counts down like any
+// other timer state in this file (see ROOF_LANDING_SLOW_DURATION below).
+let roofLandingSlowTimer = 0;
+const ROOF_LANDING_SLOW_DURATION = 0.6, ROOF_LANDING_SLOW_MULT = 0.25;
 // SWING REEL (Alex: "forward... basically retract the web so you're pulled
 // directly to that spot" + "backward... let out more web and rappel down"
 // + "web by default with no other input should default toward pulling me
@@ -2388,9 +2414,14 @@ const windLines = new THREE.LineSegments(windGeo, windMat);
 windLines.frustumCulled = false;
 scene.add(windLines);
 const windDirTmp = new THREE.Vector3();
-function stepWind(pos, vel, flying, t) {
-  windMat.opacity = flying ? 0.5 : 0;
-  if (!flying) return;
+function stepWind(pos, vel, flying, t, boosting) {
+  // WIND BOOST reuses this exact same recycled-streak visual flight
+  // already had (see WIND_BOOST_ACCEL/windBoostActive in stepPlayer) --
+  // same streaks, same travel-along-velocity math, just a second trigger
+  // condition alongside `flying`.
+  const active = flying || boosting;
+  windMat.opacity = active ? 0.5 : 0;
+  if (!active) return;
   const speed = vel.length();
   if (speed > 0.5) windDirTmp.copy(vel).normalize(); else windDirTmp.set(0, 0, 1);
   const rate = 6 + speed;
@@ -4159,9 +4190,30 @@ function findAnchor() {
   if (keys.KeyA) aimBiased.addScaledVector(right, -0.55);
   if (keys.KeyS) aimBiased.addScaledVector(fwd, -0.35);
   if (aimBiased.lengthSq() > 0.0001) aimBiased.normalize(); else aimBiased.copy(fwd);
-  let best = null;
-  for (const [u, r] of [[0.9, 0], [1.4, 0], [0.6, 0], [0.9, 0.35], [0.9, -0.35],
-                        [1.4, 0.5], [1.4, -0.5], [2.2, 0], [0.9, 0.7], [0.9, -0.7]]) {
+  // DIRECTION FIDELITY OVER HEIGHT (Alex: "when I direct a web to a
+  // particular direction, it seems like if it can't find a web hold in
+  // that direction it would rather grab a web in the wrong direction,
+  // which pulls me in a direction I don't want to go. I think it's ok to
+  // fail to fire a web if there's nothing in the direction the avatar is
+  // facing"). Two changes from the old cone: (1) narrowed ONLY the
+  // sideways spread (r up to +/-0.7 down to +/-0.22) -- that's what let a
+  // real anchor meaningfully off to one side get picked, which reads as
+  // "wrong direction." Vertical reach (u) is UNCHANGED from the original
+  // cone -- a first attempt at this fix also narrowed u, which broke
+  // ordinary "aim up at a tall/close building dead ahead" (verified via
+  // the debug hook: an unambiguous straight-into-a-wall test that worked
+  // before the change started returning null after it, purely because the
+  // narrower u range could no longer reach it) -- aiming stright ahead but
+  // needing to look UP for a tall target is not the "wrong direction" that
+  // was reported. (2) offsets are now listed in PRIORITY order (dead-
+  // center first, widening outward) and the loop takes the FIRST hit
+  // found instead of scanning the whole cone for the globally TALLEST
+  // one -- a modest building dead ahead now wins over a taller one off to
+  // the side, matching "prefer failing over grabbing something in the
+  // wrong direction" instead of "always find SOME anchor if one exists
+  // anywhere in a wide cone."
+  for (const [u, r] of [[0.9, 0], [1.4, 0], [0.6, 0], [2.2, 0],
+                        [0.9, 0.22], [0.9, -0.22], [1.4, 0.22], [1.4, -0.22]]) {
     const dir = aimBiased.clone().addScaledVector(up, u).addScaledVector(right, r).normalize();
     raycaster.set(player.pos, dir);
     raycaster.far = 80;
@@ -4169,11 +4221,9 @@ function findAnchor() {
     // side walls surrounding the city") -- see anchorRayTargets, built
     // right after wallMeshes below the boundary-wall block.
     const hit = raycaster.intersectObjects(anchorRayTargets, false)[0];   // chunked -- see buildingChunkMeshes
-    if (hit && hit.point.y > player.pos.y + 1.5 && (!best || hit.point.y > best.y)) {
-      best = hit.point.clone();
-    }
+    if (hit && hit.point.y > player.pos.y + 1.5) return hit.point.clone();
   }
-  return best;
+  return null;
 }
 function tryAttach() {
   let a = findAnchor();
@@ -4266,6 +4316,11 @@ function fireWeb(boosted) {
 
 // ----------------------------------------------------------------- INPUT --
 const keys = {};
+// Merged analog move magnitude (0-1), same OR-combine shape as `keys` but
+// taking the max instead of a boolean-or -- see the gpMoveMag/tMoveMag/
+// xrMoveMag declaration comment for why this exists. Computed once per
+// frame in the main loop, read by stepPlayer.
+let moveMag = 1;
 // webHeld is now a per-frame OR of every input device that can fire the
 // web/jump action (keyboard+mouse, gamepad, touch) -- combined once per
 // frame in the main loop, right before stepPlayer. Each device sets ONLY
@@ -4335,6 +4390,22 @@ const SWING_ASSIST_DELAY = 0.16, SWING_ASSIST_BOOST = 15;
 // currently-held keyboard key back to false the instant a gamepad happens
 // to be connected (even idle) or a touch joystick is momentarily centered.
 const kbKeys = {}, gpKeys = {}, tKeys = {};
+// ANALOG MOVE MAGNITUDE (Alex: "when we use joysticks of any kind, anything
+// movement or rotation based with a speed component, the speed should be
+// relative to how far forward the joystick is pushed, not a boolean").
+// Camera ROTATION already worked this way (yaw/pitch scale directly off the
+// raw stick axis value, e.g. `yaw -= lookX * 2.2 * dt` in stepXR/stepGamepad)
+// -- but ground/air MOVEMENT speed never did: every stick got flattened to
+// a boolean KeyW/A/S/D via a deadzone threshold, so a barely-nudged stick
+// and a fully-deflected one produced the exact same movement speed. Each
+// device now also reports a 0-1 "how far past the deadzone is this pushed"
+// magnitude (deadzone-rescaled, not just raw hypot, so movement doesn't
+// start at full speed the instant you clear the deadzone); stepPlayer
+// blends these into a single per-frame moveMag the same way `keys` already
+// OR-combines booleans across devices (see the merge loop in the main
+// loop). Keyboard has no analog concept -- holding a key always means 1.0,
+// same as today; this only adds nuance for real sticks.
+let gpMoveMag = 0, tMoveMag = 0, xrMoveMag = 0;
 // Arrow keys drive the same movement as WASD (Alex: "arrow keys should work
 // the same as WASD") -- each logical direction is true if EITHER its WASD
 // code or its arrow code is down, checked at read time (not written into
@@ -4612,6 +4683,14 @@ addEventListener('mousemove', e => {
 // keeps stepPlayer completely untouched, only feeding it the same booleans
 // it always read.
 const GAMEPAD_DEADZONE = 0.22;
+// Rescales a raw 0..1 stick magnitude so movement speed starts at 0 right
+// at the deadzone edge and reaches 1 at full deflection, instead of
+// jumping straight to "however far past the deadzone you happen to be"
+// (which would make the first few % past the deadzone feel identical to
+// a full push). Shared by gamepad/VR; touch's joystick already reports
+// 0..1 pre-scaled by its own radius, rescaled the same way against its
+// own 0.28 threshold at the call site.
+function deadzoneRescale(mag, dz) { return mag <= dz ? 0 : Math.min(1, (mag - dz) / (1 - dz)); }
 let gpRespawnPrev = false, gpHudPrev = false;
 function stepGamepad(dt) {
   const pads = navigator.getGamepads ? navigator.getGamepads() : null;
@@ -4619,6 +4698,7 @@ function stepGamepad(dt) {
   if (!gp || !gp.connected || !entered) {
     gamepadWebHeld = false;
     gpKeys.KeyW = gpKeys.KeyS = gpKeys.KeyA = gpKeys.KeyD = gpKeys.ShiftLeft = false;
+    gpMoveMag = 0;
     return;
   }
   const lx = gp.axes[0] || 0, ly = gp.axes[1] || 0;
@@ -4628,6 +4708,7 @@ function stepGamepad(dt) {
   gpKeys.KeyA = lx < -GAMEPAD_DEADZONE;
   gpKeys.KeyD = lx > GAMEPAD_DEADZONE;
   const stickMag = Math.hypot(lx, ly);
+  gpMoveMag = deadzoneRescale(stickMag, GAMEPAD_DEADZONE);
   gpKeys.ShiftLeft = stickMag > 0.88 || !!(gp.buttons[7] && gp.buttons[7].pressed);   // full deflection or RT
   if (Math.abs(rx) > GAMEPAD_DEADZONE) yaw -= rx * 2.6 * dt;
   if (Math.abs(ry) > GAMEPAD_DEADZONE) pitch = Math.max(-1.35, Math.min(0.9, pitch - ry * 2.2 * dt));
@@ -4766,11 +4847,16 @@ addEventListener('pointerup', touchEnd);
 addEventListener('pointercancel', touchEnd);
 
 function stepTouch(dt) {
-  if (!touchCapable) { tKeys.KeyW = tKeys.KeyS = tKeys.KeyA = tKeys.KeyD = tKeys.ShiftLeft = false; return; }
+  if (!touchCapable) { tKeys.KeyW = tKeys.KeyS = tKeys.KeyA = tKeys.KeyD = tKeys.ShiftLeft = false; tMoveMag = 0; return; }
   tKeys.KeyW = touchJoyVec.y < -0.28;
   tKeys.KeyS = touchJoyVec.y > 0.28;
   tKeys.KeyA = touchJoyVec.x < -0.28;
   tKeys.KeyD = touchJoyVec.x > 0.28;
+  // The dedicated SPRINT button is a real physical toggle (like keyboard
+  // Shift), not a stick -- forces full analog magnitude regardless of how
+  // gently the joystick itself is pushed, same as it always forced
+  // tKeys.ShiftLeft before.
+  tMoveMag = touchSprintHeld ? 1 : deadzoneRescale(Math.hypot(touchJoyVec.x, touchJoyVec.y), 0.28);
   // Full joystick deflection still sprints too (mirrors gamepad/VR), in
   // addition to the dedicated SPRINT button below.
   tKeys.ShiftLeft = Math.hypot(touchJoyVec.x, touchJoyVec.y) > 0.88 || touchSprintHeld;
@@ -4877,6 +4963,7 @@ function stepXR(dt) {
   if (!session) {
     xrWebHeld = false;
     xrKeys.KeyW = xrKeys.KeyS = xrKeys.KeyA = xrKeys.KeyD = xrKeys.ShiftLeft = false;
+    xrMoveMag = 0;
     return;
   }
   let held = false, moveX = 0, moveY = 0, lookX = 0, lookY = 0;
@@ -5002,6 +5089,7 @@ function stepXR(dt) {
   xrKeys.KeyS = moveYEff > GAMEPAD_DEADZONE;
   xrKeys.KeyA = moveXEff < -GAMEPAD_DEADZONE;
   xrKeys.KeyD = moveXEff > GAMEPAD_DEADZONE;
+  xrMoveMag = deadzoneRescale(Math.hypot(moveX, moveY), GAMEPAD_DEADZONE);
   // Threshold lowered from 0.88 (Alex: "how do I run faster in VR?" --
   // full-deflection thresholds tuned against a desktop gamepad's analog
   // curve may simply be harder to physically reach on a VR thumbstick).
@@ -5063,6 +5151,22 @@ function stepXR(dt) {
 
 // ----------------------------------------------------------- PLAYER STEP --
 const GRAV = 26, RUN = 11, AIR_CTRL = 11;
+// WIND BOOST (Alex: "little new mechanic... if you are in the air and NOT
+// holding down the web button, pressing in a direction creates some wind
+// lines (kind of like the rain particles) and you speed along in the
+// direction you're pushing"). Deliberately stronger than the passive
+// AIR_CTRL drift above (and layered ON TOP of it, not replacing it) --
+// this reads as its own intentional move, not just a slightly-more-
+// noticeable version of the existing weak air steering. Gated on NOT
+// holding the web button specifically so it never competes with aiming/
+// swinging -- once you're holding web to fire or reel, this mechanic gets
+// out of the way entirely and swinging is still the primary way to cover
+// ground in the air, per the existing "mostly rely on swinging" design.
+// `windBoostActive` is read by stepWind() (see the FLIGHT WIND section)
+// to reuse the exact same recycled-streak visual flight already has,
+// rather than building a second parallel particle system.
+const WIND_BOOST_ACCEL = 24;
+let windBoostActive = false;
 let reticleClock = 0;
 const wallClimbFwd = new THREE.Vector3(), wallClimbSide = new THREE.Vector3(), wallClimbMatrix = new THREE.Matrix4();
 const wallClimbRadial = new THREE.Vector3();
@@ -5245,13 +5349,30 @@ function stepPlayer(dt) {
                                          // controllable and stops single-frame tunneling
                                          // through thin colliders at extreme fall speed
     if (p.onGround) {
-      const target = inDir.multiplyScalar((keys.ShiftLeft ? RUN * 1.7 : RUN) * speedMult);
+      // ANALOG SPEED (see moveMag declaration comment): keyboard holds
+      // moveMag at a flat 1 (unchanged, binary as always), but a real
+      // stick's partial push now yields proportionally less target speed
+      // instead of snapping straight to full RUN the instant it clears
+      // the deadzone.
+      // LAND-AND-WALK slowdown (see roofLandingSlowTimer declaration) --
+      // multiplies target speed down right after cresting a climb, so
+      // reaching the top reads as landing and catching your footing, not
+      // an uninterrupted sprint at climb speed.
+      const roofSlowMult = roofLandingSlowTimer > 0 ? ROOF_LANDING_SLOW_MULT : 1;
+      const target = inDir.multiplyScalar((keys.ShiftLeft ? RUN * 1.7 : RUN) * speedMult * moveMag * roofSlowMult);
       p.vel.x += (target.x - p.vel.x) * Math.min(1, dt * 8);
       p.vel.z += (target.z - p.vel.z) * Math.min(1, dt * 8);
     } else {
-      p.vel.addScaledVector(inDir, AIR_CTRL * dt * speedMult);
+      p.vel.addScaledVector(inDir, AIR_CTRL * dt * speedMult * moveMag);
+      // WIND BOOST (see WIND_BOOST_ACCEL declaration) -- an intentional,
+      // stronger push layered on top of the passive AIR_CTRL drift above,
+      // but ONLY while not holding the web button (never fights aiming or
+      // swinging) and only while a direction is actually held.
+      windBoostActive = !webHeld && inDir.lengthSq() > 0.0001;
+      if (windBoostActive) p.vel.addScaledVector(inDir, WIND_BOOST_ACCEL * dt * speedMult * moveMag);
     }
   }
+  if (p.onGround || p.onWall || webHeld) windBoostActive = false;
   p.pos.addScaledVector(p.vel, dt);
 
   // rope constraint => pendulum
@@ -5418,7 +5539,7 @@ function stepPlayer(dt) {
       // being discarded. Held constant for the REST of the climb (not
       // re-measured every frame) so it doesn't self-reinforce off its
       // own previous value.
-      if (!wasOnWallLastFrame) currentClimbSpeed = Math.max(CLIMB_SPEED, enteringSpeedThisHit);
+      if (!wasOnWallLastFrame) currentClimbSpeed = Math.min(MAX_CLIMB_SPEED, Math.max(CLIMB_SPEED, enteringSpeedThisHit));
       p.vel.y = currentClimbSpeed;
       wallFaceAxis = axis;
       wallCollider = c;
@@ -5431,6 +5552,19 @@ function stepPlayer(dt) {
       const distToTop = (c.max[1] + 0.9) - p.pos.y;
       if (distToTop < MANTLE_ZONE) {
         const t = 1 - distToTop / MANTLE_ZONE;   // 0 at zone entry -> 1 at roofline
+        // LAND, DON'T LAUNCH (Alex: "running up the wall seems a little
+        // too crazy fast and I end up launching into the air when I'm
+        // actually trying to climb onto the top of the building"). Before
+        // this, vel.y stayed at the FULL (now-capped) climb speed all the
+        // way through the roofline -- a fast climb could cross the roof's
+        // collision plane in a single frame at high speed, skipping right
+        // past the axis-3 landing check entirely and launching the player
+        // into open air above the building instead of ever being caught.
+        // Actively decelerating vel.y as the player nears the top (not
+        // just nudging position) means they arrive at the roofline slow
+        // enough for the very next frame's ground collision to catch
+        // them cleanly.
+        p.vel.y = THREE.MathUtils.lerp(currentClimbSpeed, ROOF_CREST_LANDING_SPEED, t);
         if (axis === 0) p.pos.x += MANTLE_SPEED * t * dt;
         if (axis === 1) p.pos.x -= MANTLE_SPEED * t * dt;
         if (axis === 4) p.pos.z += MANTLE_SPEED * t * dt;
@@ -5439,6 +5573,14 @@ function stepPlayer(dt) {
     }
   }
   if (buildingHit && buildingBumpCooldown <= 0) { sfxBuildingBump(p.pos); buildingBumpCooldown = 0.4; }
+  // LAND-AND-WALK (Alex: "when we reach the top of a building, land on top
+  // and walk, drastically slow down movement speed"). Fires exactly once,
+  // on the frame a wall-crawl (last frame) transitions into standing on
+  // ground/roof (this frame) -- NOT on every ordinary landing (falling out
+  // of a swing onto a roof already has its own feel and isn't what was
+  // reported), so this only ever arms right after cresting a climb.
+  if (wasOnWallLastFrame && p.onGround) roofLandingSlowTimer = ROOF_LANDING_SLOW_DURATION;
+  if (roofLandingSlowTimer > 0) roofLandingSlowTimer -= dt;
 
   // CAR COLLISION (Alex: "is there any collision or physics on the cars?"
   // -- there wasn't; you passed straight through). Cars now block you like
@@ -6359,6 +6501,12 @@ function loop(now) {
   for (const k of ['KeyW', 'KeyA', 'KeyS', 'KeyD', 'ShiftLeft']) {
     keys[k] = !!(kbKeyDown(k) || gpKeys[k] || tKeys[k] || xrKeys[k]);
   }
+  // Keyboard has no analog value -- any held movement key means "full
+  // speed," same as it always has. Real sticks (gamepad/touch/VR) instead
+  // contribute their own continuously-scaled magnitude; take the max
+  // across every device the same way `keys` above takes the OR.
+  const kbAnyMove = kbKeyDown('KeyW') || kbKeyDown('KeyA') || kbKeyDown('KeyS') || kbKeyDown('KeyD');
+  moveMag = Math.max(kbAnyMove ? 1 : 0, gpMoveMag, tMoveMag, xrMoveMag);
   stepPlayer(playerDt);
   updateXRArms();
   windowMat.uniforms.playerPos.value.copy(player.pos);
@@ -6368,7 +6516,7 @@ function loop(now) {
   stepSparkles(dt);
   stepWeather(worldDt);
   stepRain(player.pos, simT);
-  stepWind(player.pos, player.vel, myEffectActive('fly'), simT);
+  stepWind(player.pos, player.vel, myEffectActive('fly'), simT, windBoostActive);
   stepRooftopCoins(simT, player);
   stepSpotlights(dt);
   stepScorePopups(dt);
@@ -6433,6 +6581,11 @@ window.__sw = { THREE, player, cars, parkedCars, pickups, colliders, EDGE, WORLD
                 rainBus, audioCtx, findQueuedCar, stepHonks, sfxWhoosh, playerWhooshCooldowns,
                 WHOOSH_RADIUS, WHOOSH_MIN_SPEED,
                 get CLIMB_SPEED() { return CLIMB_SPEED; }, get currentClimbSpeed() { return currentClimbSpeed; }, KNOCK_SPEED,
+                MAX_CLIMB_SPEED, ROOF_CREST_LANDING_SPEED, get roofLandingSlowTimer() { return roofLandingSlowTimer; },
+                set roofLandingSlowTimer(v) { roofLandingSlowTimer = v; }, ROOF_LANDING_SLOW_DURATION, ROOF_LANDING_SLOW_MULT,
+                get moveMag() { return moveMag; }, set moveMag(v) { moveMag = v; },
+                get gpMoveMag() { return gpMoveMag; }, get tMoveMag() { return tMoveMag; }, get xrMoveMag() { return xrMoveMag; },
+                get windBoostActive() { return windBoostActive; }, WIND_BOOST_ACCEL,
                 keys, kbKeys, gpKeys, tKeys,
                 get kbMouseWebHeld() { return kbMouseWebHeld; },
                 get gamepadWebHeld() { return gamepadWebHeld; },
