@@ -262,7 +262,7 @@
        in-headset without needing devtools. If it EVER doesn't match what
        you expect after a hard reload, that's real signal of a caching
        problem, not a hunch. -->
-  <div id="versionLine">by ibrews &nbsp;·&nbsp; v0.2.3 built 2026-07-06 14:28 (round 24: global 100mph hard speed cap)</div><br>
+  <div id="versionLine">by ibrews &nbsp;·&nbsp; v0.2.4 built 2026-07-06 23:22 (round 25: VR first-person camera 180 fix, true analog stick direction)</div><br>
   A living neon city at night. Sling a web, swing between skyscrapers, and see how much
   trouble you can cause before the night's over.<br><br>
   <span id="initialsRow">callsign (optional, 3 letters): <input id="initialsInput" maxlength="3"
@@ -4556,6 +4556,21 @@ const kbKeys = {}, gpKeys = {}, tKeys = {};
 // loop). Keyboard has no analog concept -- holding a key always means 1.0,
 // same as today; this only adds nuance for real sticks.
 let gpMoveMag = 0, tMoveMag = 0, xrMoveMag = 0;
+// ANALOG MOVE DIRECTION (Alex: "left controller in all circumstances
+// should be able to move in all directions, not just forward backward
+// left right -- any angle is valid"). moveMag above only fixed SPEED;
+// DIRECTION was still quantized to the 8 combinations reachable from
+// KeyW/A/S/D booleans (a stick held at, say, 20 degrees off forward-right
+// still registered as pure forward or pure diagonal, never the true
+// angle). Each analog device now also reports its raw camera-relative
+// x/y (right/forward) component pair, continuous, not thresholded --
+// merged into analogMoveX/Y in the main loop and consumed directly by
+// stepPlayer's inDir instead of the boolean add/sub chain whenever a
+// real analog device is actually contributing. Keyboard has no angle
+// concept -- it keeps using the boolean 8-direction path exactly as
+// before, this only adds true full-angle movement for gamepad/touch/VR.
+let gpAnalogX = 0, gpAnalogY = 0, xrAnalogX = 0, xrAnalogY = 0;
+let analogMoveX = 0, analogMoveY = 0;
 // Arrow keys drive the same movement as WASD (Alex: "arrow keys should work
 // the same as WASD") -- each logical direction is true if EITHER its WASD
 // code or its arrow code is down, checked at read time (not written into
@@ -4849,6 +4864,7 @@ function stepGamepad(dt) {
     gamepadWebHeld = false;
     gpKeys.KeyW = gpKeys.KeyS = gpKeys.KeyA = gpKeys.KeyD = gpKeys.ShiftLeft = false;
     gpMoveMag = 0;
+    gpAnalogX = 0; gpAnalogY = 0;
     return;
   }
   const lx = gp.axes[0] || 0, ly = gp.axes[1] || 0;
@@ -4857,6 +4873,7 @@ function stepGamepad(dt) {
   gpKeys.KeyS = ly > GAMEPAD_DEADZONE;
   gpKeys.KeyA = lx < -GAMEPAD_DEADZONE;
   gpKeys.KeyD = lx > GAMEPAD_DEADZONE;
+  gpAnalogX = lx; gpAnalogY = ly;   // raw, continuous -- see ANALOG MOVE DIRECTION comment
   const stickMag = Math.hypot(lx, ly);
   gpMoveMag = deadzoneRescale(stickMag, GAMEPAD_DEADZONE);
   gpKeys.ShiftLeft = stickMag > 0.88 || !!(gp.buttons[7] && gp.buttons[7].pressed);   // full deflection or RT
@@ -5114,6 +5131,7 @@ function stepXR(dt) {
     xrWebHeld = false;
     xrKeys.KeyW = xrKeys.KeyS = xrKeys.KeyA = xrKeys.KeyD = xrKeys.ShiftLeft = false;
     xrMoveMag = 0;
+    xrAnalogX = 0; xrAnalogY = 0;
     return;
   }
   let held = false, moveX = 0, moveY = 0, lookX = 0, lookY = 0;
@@ -5239,6 +5257,11 @@ function stepXR(dt) {
   xrKeys.KeyS = moveYEff > GAMEPAD_DEADZONE;
   xrKeys.KeyA = moveXEff < -GAMEPAD_DEADZONE;
   xrKeys.KeyD = moveXEff > GAMEPAD_DEADZONE;
+  // Raw, continuous -- see ANALOG MOVE DIRECTION comment. Uses the SAME
+  // post-swap Eff values the booleans above do, so full-angle movement
+  // still respects the existing third-person-only left-stick correction
+  // (round 14) rather than reintroducing that bug for diagonal pushes.
+  xrAnalogX = moveXEff; xrAnalogY = moveYEff;
   xrMoveMag = deadzoneRescale(Math.hypot(moveX, moveY), GAMEPAD_DEADZONE);
   // Threshold lowered from 0.88 (Alex: "how do I run faster in VR?" --
   // full-deflection thresholds tuned against a desktop gamepad's analog
@@ -5377,11 +5400,29 @@ function stepPlayer(dt) {
   // rope in/out (see the rope-constraint block below) instead of air-
   // steering -- otherwise they'd do both at once, fighting each other.
   // Left/right keep steering the swing normally.
-  if (keys.KeyW && !p.anchor) inDir.add(f);
-  if (keys.KeyS && !p.anchor) inDir.sub(f);
-  if (keys.KeyD) inDir.add(r);
-  if (keys.KeyA) inDir.sub(r);
-  if (inDir.lengthSq() > 0) inDir.normalize();
+  const analogMag = Math.hypot(analogMoveX, analogMoveY);
+  if (analogMag > 0.001) {
+    // TRUE ANALOG DIRECTION (Alex: "left controller in all circumstances
+    // should be able to move in all directions, not just forward
+    // backward left right -- any angle is valid"). Built directly from
+    // the continuous stick vector instead of the boolean W/A/S/D
+    // combination below, so a push at any angle moves at that EXACT
+    // angle instead of snapping to one of 8 reachable combinations.
+    // Normalized to a pure direction (magnitude is `moveMag`'s job,
+    // applied separately wherever inDir is consumed) -- same division of
+    // labor the boolean path already uses. Same reel-repurposing rule:
+    // forward/back is zeroed while attached to a swing, left/right still
+    // steers it.
+    if (!p.anchor) inDir.addScaledVector(f, -analogMoveY);
+    inDir.addScaledVector(r, analogMoveX);
+    if (inDir.lengthSq() > 0.0001) inDir.normalize();
+  } else {
+    if (keys.KeyW && !p.anchor) inDir.add(f);
+    if (keys.KeyS && !p.anchor) inDir.sub(f);
+    if (keys.KeyD) inDir.add(r);
+    if (keys.KeyA) inDir.sub(r);
+    if (inDir.lengthSq() > 0) inDir.normalize();
+  }
 
   // WEB ATTACH / JUMP / RELEASE (Alex, this round: "let's bring jump back
   // but holding spacebar doesn't make you continuously jump, it's a jump
@@ -6002,15 +6043,29 @@ function stepPlayer(dt) {
       // rotation except yaw" -- turntable only; anything else while a
       // headset is on is a comfort violation). The rig's orientation is a
       // pure Y rotation; the headset's own head pose supplies all pitch.
-      // yaw + PI, NOT yaw: cameraRig is a Group, and Object3D.lookAt on a
-      // non-camera points +Z at the target (cameras point -Z), so the old
-      // lookAt call here had the rig facing 180deg AWAY from lookDir.
-      // First person is position-exact so nothing ever looked wrong, and
-      // the right-stick calibration (see stepXR) was anchored on real
-      // hardware against that flipped facing -- bake the same PI in here
-      // to keep the confirmed-correct heading byte-equivalent. Do NOT
-      // "fix" this to plain yaw without re-calibrating the stick.
-      camTarget.rotation.set(0, yaw + Math.PI, 0);
+      // FIXED (Alex: "I appear to be looking out of the back of my
+      // character's head in first person mode... still something needs
+      // to be rotated 180 degrees. Hopefully the fix here will also help
+      // my left controller go back to feeling normal instead of
+      // inverted"). This used to bake in a "+ PI" here, on the theory
+      // that the OLD `cameraRig.lookAt(...)` code (Object3D.lookAt on a
+      // non-camera points +Z at the target, not -Z) had already flipped
+      // the rig 180 degrees when the right-stick was originally
+      // calibrated, so the +PI preserved that "confirmed-correct" heading
+      // byte-for-byte once lookAt was replaced with an explicit
+      // rotation.set(). Verified geometrically via the debug hook: with
+      // the SAME `yaw`, third-person's plain `rotation.set(0, yaw, 0)`
+      // (below, and long since independently validated) produces a rig
+      // forward that matches `lookDir` EXACTLY; first-person's `yaw + PI`
+      // produced the EXACT OPPOSITE of `lookDir`. Since round 16/20 made
+      // VR movement direction come from `aimDir()` (the real camera
+      // world direction) rather than raw key state, this stopped being a
+      // merely-cosmetic view-flip and started ALSO flipping movement/
+      // strafe direction in first person -- explaining both symptoms
+      // (backward view AND "inverted" left stick) as the same bug. Plain
+      // `yaw`, matching third person exactly, both geometrically and per
+      // this fix.
+      camTarget.rotation.set(0, yaw, 0);
     } else {
       camTarget.lookAt(camTarget.position.x + lookDir.x, camTarget.position.y + lookDir.y, camTarget.position.z + lookDir.z);
     }
@@ -6701,6 +6756,17 @@ function loop(now) {
   // across every device the same way `keys` above takes the OR.
   const kbAnyMove = kbKeyDown('KeyW') || kbKeyDown('KeyA') || kbKeyDown('KeyS') || kbKeyDown('KeyD');
   moveMag = Math.max(kbAnyMove ? 1 : 0, gpMoveMag, tMoveMag, xrMoveMag);
+  // ANALOG MOVE DIRECTION merge (see declaration comment): whichever
+  // analog device is contributing the MOST magnitude this frame gets to
+  // supply the continuous direction -- same "one device wins, no
+  // stacking" shape as the rest of this per-frame device merge. Keyboard
+  // has no vector to contribute; if no analog device is active this
+  // frame, analogMoveX/Y just stay at 0 and stepPlayer falls back to the
+  // boolean-key path (see inDir below).
+  if (xrMoveMag >= gpMoveMag && xrMoveMag >= tMoveMag && xrMoveMag > 0) { analogMoveX = xrAnalogX; analogMoveY = xrAnalogY; }
+  else if (gpMoveMag >= tMoveMag && gpMoveMag > 0) { analogMoveX = gpAnalogX; analogMoveY = gpAnalogY; }
+  else if (tMoveMag > 0) { analogMoveX = touchJoyVec.x; analogMoveY = touchJoyVec.y; }
+  else { analogMoveX = 0; analogMoveY = 0; }
   stepPlayer(playerDt);
   updateXRArms();
   windowMat.uniforms.playerPos.value.copy(player.pos);
@@ -6780,6 +6846,10 @@ window.__sw = { THREE, player, cars, parkedCars, pickups, colliders, EDGE, WORLD
                 set roofLandingSlowTimer(v) { roofLandingSlowTimer = v; }, ROOF_LANDING_SLOW_DURATION, ROOF_LANDING_SLOW_MULT,
                 get moveMag() { return moveMag; }, set moveMag(v) { moveMag = v; },
                 get gpMoveMag() { return gpMoveMag; }, get tMoveMag() { return tMoveMag; }, get xrMoveMag() { return xrMoveMag; },
+                get analogMoveX() { return analogMoveX; }, get analogMoveY() { return analogMoveY; },
+                set analogMoveX(v) { analogMoveX = v; }, set analogMoveY(v) { analogMoveY = v; },
+                get gpAnalogX() { return gpAnalogX; }, get gpAnalogY() { return gpAnalogY; },
+                get xrAnalogX() { return xrAnalogX; }, get xrAnalogY() { return xrAnalogY; },
                 get windBoostActive() { return windBoostActive; }, WIND_BOOST_ACCEL,
                 WIND_BOOST_DENSITY_FRAC, WIND_BOOST_MAX_OPACITY, WIND_BOOST_SPEED_REF, WIND_COUNT,
                 get cameraPunchFov() { return cameraPunchFov; }, CAMERA_PUNCH_MAX_FOV, BASE_FOV, windGeo, windLines,
