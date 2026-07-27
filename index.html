@@ -385,6 +385,7 @@ import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
+import { BokehPass } from 'three/addons/postprocessing/BokehPass.js';
 import { Line2 } from 'three/addons/lines/Line2.js';
 import { LineGeometry } from 'three/addons/lines/LineGeometry.js';
 import { LineMaterial } from 'three/addons/lines/LineMaterial.js';
@@ -1005,6 +1006,37 @@ function updateBloom(playerY, onGround) {
   const baseStrength = THREE.MathUtils.lerp(BLOOM_STRENGTH_FALL, BLOOM_STRENGTH_BASE, fallProgress);
   bloom.strength = (onGround && playerY > ROOFTOP_Y) ? Math.min(baseStrength, BLOOM_STRENGTH_ROOFTOP) : baseStrength;
 }
+
+// DEPTH OF FIELD / BOKEH (inspired by threejspunk.vercel.app -- Alex:
+// "heavy depth-of-field/bokeh on distant lights... turns distant neon
+// signage into soft glowing bokeh circles, very cinematic"). Runs AFTER
+// bloom so it blurs the already-bloomed glow halos into soft discs, not
+// just the sharp geometry underneath them. `focus` is a real WORLD-SPACE
+// distance (not 0-1), so it needs to roughly match how far away things
+// actually get treated as "background" in this city -- picked to keep
+// normal swinging-distance gameplay (close buildings, nearby pickups,
+// other players) sharp, only blurring genuinely distant skyline the same
+// way fog already fades it, not fighting the fog falloff. `aperture` is
+// deliberately mild -- BokehPass is very sensitive to this value, and a
+// game (unlike a static art piece) needs the blur to read as atmosphere,
+// not as a rendering glitch when the player is actively looking around.
+// First attempt (aperture 0.00028) verified via the debug hook at a
+// normal street-level first-person framing -- WAY too strong, blurred
+// nearby foreground buildings along with distant ones instead of just
+// the skyline. Re-tuned down to 0.00008, verified at the same framing:
+// close buildings on both sides of the street stay crisp, only the
+// street continuing into the distance softens.
+// COMPOSER-ONLY, SAME AS BLOOM/NOIR -- already automatically skipped
+// entirely in VR (see the `renderer.xr.isPresenting ? renderer.render
+// (...) : composer.render()` branch in the main loop), so this carries
+// ZERO VR performance or comfort risk by construction; no separate XR
+// gate needed.
+const bokeh = new BokehPass(scene, camera, {
+  focus: 45,
+  aperture: 0.00008,
+  maxblur: 0.008,
+});
+composer.addPass(bokeh);
 
 // NOIR pickup: full desaturation, driven by uSat (1 = normal, 0 = grayscale).
 // Lerped toward its target each frame in the main loop -- see noirTimer.
@@ -6929,6 +6961,7 @@ window.__sw = { THREE, player, cars, parkedCars, pickups, colliders, EDGE, WORLD
                 stepXR, xrKeys, get xrWebHeld() { return xrWebHeld; }, set xrWebHeld(v) { xrWebHeld = v; },
                 cameraRig, renderer, enterGame, recenterVR, stepReelSound, stepArmSwingPhysics, updateLanceLength,
                 get GIANT_SCALE() { return GIANT_SCALE; }, checkStickPokeCars, checkStickPokeZombies, knockZombie,
+                bokeh,
                 ZOMBIE_KNOCK_TIME, updateVRModeIndicator, vrModePanel,
                 remotePlayers, stepMultiplayer, makeRemotePlayerMesh, connectMultiplayer,
                 get mpSocket() { return mpSocket; }, set mpSocket(v) { mpSocket = v; },
