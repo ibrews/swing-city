@@ -248,9 +248,25 @@
   body.hudHidden #hud, body.hudHidden #score, body.hudHidden #playercount,
   body.hudHidden #powerups, body.hudHidden #leaderboard, body.hudHidden #dailyboard,
   body.hudHidden #menubtn { display: none !important; }
+  /* PORTHOLE REVEAL (Alex, inspired by threejspunk.vercel.app's "through
+     the glass" intro): entering the game used to just instantly hide
+     #start, cutting straight to the HUD with no transition. This sits
+     ABOVE the game canvas but BELOW #start (z-index 19 vs #start's 20)
+     -- while #start is visible it's invisible (fully opaque, radius 0),
+     then once #start hides, a JS rAF loop (playPortholeReveal, see
+     enterGame()) grows a soft-edged circular hole in it, revealing the
+     ALREADY-RENDERING game world underneath (the composer keeps drawing
+     every frame regardless of `entered`, so there's a real live scene to
+     reveal, not a static frame). Background is set entirely from JS, not
+     CSS, since animating a radial-gradient's stop percentages needs a
+     per-frame value, not something a plain CSS transition can ease.
+     pointer-events:none throughout -- purely decorative, never blocks
+     input to the game or the start overlay's own click-to-enter. */
+  #portholeReveal { position: fixed; inset: 0; z-index: 19; pointer-events: none; display: none; }
 </style>
 </head>
 <body>
+<div id="portholeReveal"></div>
 <div id="start"><div>
   <h1>SWING CITY</h1>
   <!-- Alex: "the version I'm looking at in VR says v0.0.6 built 2026-07-03
@@ -4626,10 +4642,38 @@ addEventListener('error', e => {
 addEventListener('unhandledrejection', e => {
   analyticsErrors.push(String(e.reason).slice(0, 200));
 });
+// PORTHOLE REVEAL (see #portholeReveal CSS comment) -- grows a soft-
+// edged circular hole from nothing to fully covering the viewport,
+// revealing the already-rendering game world. Pure JS/DOM, no WebGL
+// shader needed for this one (that's the separate rain-on-glass effect).
+const portholeEl = document.getElementById('portholeReveal');
+function playPortholeReveal() {
+  portholeEl.style.display = 'block';
+  const duration = 1300;
+  const t0 = performance.now();
+  function frame(now) {
+    const t = Math.min(1, (now - t0) / duration);
+    // ease-in-out cubic, NOT ease-out -- verified via the debug hook that
+    // a pure ease-out curve already had the porthole ~22% open only 8%
+    // into the duration, skipping right past the "tiny peephole" moment
+    // that actually reads as a porthole/iris opening. In-out lingers on
+    // the small-circle stage before accelerating through the middle.
+    const eased = t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+    const innerPct = eased * 145;            // overshoots 100 so corners fully clear
+    const edgePct = innerPct + 16;           // soft blurred-glass edge width
+    portholeEl.style.background =
+      `radial-gradient(circle at 50% 50%, transparent ${innerPct}%, #010208 ${edgePct}%)`;
+    if (t < 1) requestAnimationFrame(frame);
+    else portholeEl.style.display = 'none';
+  }
+  portholeEl.style.background = 'radial-gradient(circle at 50% 50%, transparent 0%, #010208 16%)';
+  requestAnimationFrame(frame);
+}
 function enterGame() {
   if (entered) return;
   entered = true;
   startEl.style.display = 'none';
+  playPortholeReveal();
   if (audioCtx.state === 'suspended') audioCtx.resume();
   startMusic();
   startHype();
@@ -6869,7 +6913,7 @@ window.__sw = { THREE, player, cars, parkedCars, pickups, colliders, EDGE, WORLD
                 get yaw() { return yaw; }, set yaw(v) { yaw = v; }, get pitch() { return pitch; },
                 get cameraMode() { return cameraMode; }, set cameraMode(v) { cameraMode = v; },
                 VR_AUTO_RESTART_DELAY,
-                get entered() { return entered; },
+                get entered() { return entered; }, playPortholeReveal, portholeEl,
                 set entered(v) { entered = v; },
                 openMenu, closeMenu, get paused() { return paused; }, wallMat, WALL_CYCLE_SECONDS, windowMat,
                 xrArms, xrGrips, updateXRArms, announceEffect, announceRemoteEffect,
