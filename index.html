@@ -1053,6 +1053,46 @@ const noirPass = new ShaderPass({
 });
 composer.addPass(noirPass);
 
+// RAIN-ON-GLASS: screen-space refracting droplets over the final graded
+// image, inspired by threejspunk.vercel.app. Three layered procedural
+// droplet fields (different scale/speed/seed) each nudge the sample UV
+// toward their droplet center, producing a lensing/streaking look without
+// a droplet texture asset. uIntensity is driven from the existing
+// rainIntensity weather variable each frame (see stepWeather/rainIntensity
+// above) so it fades in/out with the rain itself instead of being
+// binary. Desktop-only by construction, same as bokeh above: composer
+// (and every pass in it) is skipped entirely while renderer.xr.isPresenting,
+// so this never runs in VR -- required per this project's "never distort
+// the VR view" comfort rule, since a continuous screen-space warp would be
+// a real comfort violation if it ever reached the headset.
+const rainGlassPass = new ShaderPass({
+  uniforms: { tDiffuse: { value: null }, uTime: { value: 0 }, uIntensity: { value: 0 } },
+  vertexShader: `varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+  fragmentShader: /* glsl */`
+    uniform sampler2D tDiffuse; uniform float uTime; uniform float uIntensity; varying vec2 vUv;
+    float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123); }
+    vec2 dropLayer(vec2 uv, float seed, float speed, float scale) {
+      vec2 cellUv = uv * scale;
+      cellUv.y += uTime * speed;
+      vec2 cellId = floor(cellUv);
+      vec2 cellFrac = fract(cellUv) - 0.5;
+      float rx = hash(cellId + seed) - 0.5;
+      float ry = hash(cellId + seed + 7.0) - 0.5;
+      vec2 dropCenter = vec2(rx, ry) * 0.6;
+      float radius = 0.15 + 0.1 * hash(cellId + seed + 13.0);
+      float d = length(cellFrac - dropCenter);
+      float mask = smoothstep(radius, radius * 0.3, d);
+      return (cellFrac - dropCenter) * mask * 0.05;
+    }
+    void main() {
+      vec2 offset = dropLayer(vUv, 0.0, 0.10, 7.0)
+                  + dropLayer(vUv, 5.0, 0.18, 4.5) * 0.7
+                  + dropLayer(vUv, 11.0, 0.06, 11.0) * 0.5;
+      gl_FragColor = texture2D(tDiffuse, vUv + offset * uIntensity);
+    }`,
+});
+composer.addPass(rainGlassPass);
+
 addEventListener('resize', () => {
   camera.aspect = innerWidth / innerHeight;
   camera.updateProjectionMatrix();
@@ -6792,6 +6832,8 @@ function loop(now) {
   if (jumpBoostTimer > 0) { jumpBoostTimer -= dt; if (jumpBoostTimer < 0) jumpBoostTimer = 0; }
   noirPass.uniforms.uSat.value = THREE.MathUtils.lerp(
     noirPass.uniforms.uSat.value, noirTimer > 0 ? 0.0 : 1.0, Math.min(1, dt * 3));
+  rainGlassPass.uniforms.uTime.value += dt;
+  rainGlassPass.uniforms.uIntensity.value = rainIntensity;
   // Power-up effect timers: plain countdown, stacking is just "still >0"
   // (see triggerSoloEffect/triggerWorldEffect/extendActiveEffects).
   for (const map of [activeEffects, worldEffects]) {
@@ -6961,7 +7003,7 @@ window.__sw = { THREE, player, cars, parkedCars, pickups, colliders, EDGE, WORLD
                 stepXR, xrKeys, get xrWebHeld() { return xrWebHeld; }, set xrWebHeld(v) { xrWebHeld = v; },
                 cameraRig, renderer, enterGame, recenterVR, stepReelSound, stepArmSwingPhysics, updateLanceLength,
                 get GIANT_SCALE() { return GIANT_SCALE; }, checkStickPokeCars, checkStickPokeZombies, knockZombie,
-                bokeh,
+                bokeh, rainGlassPass, set rainIntensity(v) { rainIntensity = rainTarget = v; },
                 ZOMBIE_KNOCK_TIME, updateVRModeIndicator, vrModePanel,
                 remotePlayers, stepMultiplayer, makeRemotePlayerMesh, connectMultiplayer,
                 get mpSocket() { return mpSocket; }, set mpSocket(v) { mpSocket = v; },
