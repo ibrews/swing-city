@@ -72,6 +72,27 @@ check('right pinch → fires web (xrWebHeld)', s4.held === true && s4.W === fals
 await page.evaluate(() => window.xrDevice.hands.right.updatePinchValue(0));
 await page.waitForTimeout(400);
 
+// Round 28: two right-pinch STARTS within 400 ms = 180° about-face.
+const yaw0 = await page.evaluate(() => window.__sw.yaw);
+await page.evaluate(() => window.xrDevice.hands.right.updatePinchValue(1));
+await page.waitForTimeout(120);
+await page.evaluate(() => window.xrDevice.hands.right.updatePinchValue(0));
+await page.waitForTimeout(120);
+await page.evaluate(() => window.xrDevice.hands.right.updatePinchValue(1));
+await page.waitForTimeout(200);
+await page.evaluate(() => window.xrDevice.hands.right.updatePinchValue(0));
+await page.waitForTimeout(200);
+const yaw1 = await page.evaluate(() => window.__sw.yaw);
+const turned = Math.abs(Math.abs(yaw1 - yaw0) - Math.PI);
+check('double-pinch right → 180° about-face', turned < 0.01, `yaw ${yaw0.toFixed(3)} → ${yaw1.toFixed(3)}`);
+await page.waitForTimeout(600);
+await page.evaluate(() => window.xrDevice.hands.right.updatePinchValue(1));
+await page.waitForTimeout(300);
+await page.evaluate(() => window.xrDevice.hands.right.updatePinchValue(0));
+await page.waitForTimeout(200);
+const yaw2 = await page.evaluate(() => window.__sw.yaw);
+check('single right pinch does NOT turn', Math.abs(yaw2 - yaw1) < 1e-6, `yaw ${yaw1.toFixed(3)} → ${yaw2.toFixed(3)}`);
+
 // Regression: controllers still drive movement via the thumbstick.
 await page.evaluate(() => { window.xrDevice.primaryInputMode = 'controller'; });
 await page.waitForTimeout(800);

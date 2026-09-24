@@ -278,7 +278,7 @@
        in-headset without needing devtools. If it EVER doesn't match what
        you expect after a hard reload, that's real signal of a caching
        problem, not a hunch. -->
-  <div id="versionLine">by ibrews &nbsp;·&nbsp; v0.2.6 built 2026-09-24 (round 27: tracked-hand pinch on Quest/Meta Browser -- left pinch walks, right pinch fires)</div><br>
+  <div id="versionLine">by ibrews &nbsp;·&nbsp; v0.2.7 built 2026-09-24 (round 28: double-pinch right hand = 180° about-face)</div><br>
   A living neon city at night. Sling a web, swing between skyscrapers, and see how much
   trouble you can cause before the night's over.<br><br>
   <span id="initialsRow">callsign (optional, 3 letters): <input id="initialsInput" maxlength="3"
@@ -5163,6 +5163,11 @@ let xrWebHeld = false, xrLeftXPrev = false, xrLeftYPrev = false, xrRightBPrev = 
 // 400ms. A single held pinch still just walks (see the transient-pointer
 // branch in stepXR); the double-tap only costs one brief walk-stutter.
 let xrLeftPinchPrev = false, xrLeftPinchLastStart = -1e9;
+// Round 28 (Alex, on Quest hands: "double pinch right for snap turn 180").
+// Same two-starts-within-400ms shape as the left hand; each pinch still
+// fires its web tap, the about-face rides on the second start.
+let xrRightPinchPrev = false, xrRightPinchLastStart = -1e9;
+const ABOUT_FACE_ANGLE = Math.PI;
 const xrKeys = {};
 // Right-stick scheme: see the ROUND 9 CALIBRATION ANCHOR comment further
 // down (right before the cameraMode==='third' branch) for the actual,
@@ -5255,7 +5260,7 @@ function stepXR(dt) {
     return;
   }
   let held = false, moveX = 0, moveY = 0, lookX = 0, lookY = 0;
-  let leftX = false, leftY = false, rightB = false, leftStickClick = false, leftPinchNow = false, rightStickClick = false;
+  let leftX = false, leftY = false, rightB = false, leftStickClick = false, leftPinchNow = false, rightStickClick = false, rightPinchNow = false;
   for (const src of session.inputSources) {
     const gp = src.gamepad;
     if (!gp) continue;
@@ -5289,6 +5294,7 @@ function stepXR(dt) {
       if (gp.buttons[0] && gp.buttons[0].pressed) { moveY = -1; leftPinchNow = true; }   // walk forward -- see xrKeys.KeyW below
       continue;
     }
+    if (isPinchDevice && rightHand && gp.buttons[0] && gp.buttons[0].pressed) rightPinchNow = true;   // round 28: double-pinch about-face, edge-detected below
     if (gp.buttons[0] && gp.buttons[0].pressed) held = true;   // either trigger fires web/jump
     // Right A (buttons[4] on the right controller) does the same thing as
     // the right trigger (Alex: "Make the Right A button do the same thing
@@ -5371,6 +5377,12 @@ function stepXR(dt) {
     xrLeftPinchLastStart = nowMs;
   }
   xrLeftPinchPrev = leftPinchNow;
+  if (rightPinchNow && !xrRightPinchPrev) {
+    const nowMs = performance.now();
+    if (nowMs - xrRightPinchLastStart < 400) yaw -= ABOUT_FACE_ANGLE;   // 180° about-face; one comfort turn, not a spin
+    xrRightPinchLastStart = nowMs;
+  }
+  xrRightPinchPrev = rightPinchNow;
   xrWebHeld = held;
   // THIRD-PERSON-ONLY LEFT-STICK SWAP (Alex: "I just noticed in third
   // person mode the entire left joystick is inverted. It's great in every
