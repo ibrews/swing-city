@@ -278,7 +278,7 @@
        in-headset without needing devtools. If it EVER doesn't match what
        you expect after a hard reload, that's real signal of a caching
        problem, not a hunch. -->
-  <div id="versionLine">by ibrews &nbsp;·&nbsp; v0.2.5 built 2026-07-26 (round 26: threejspunk-inspired FX -- porthole intro reveal, DOF/bokeh, rain-on-glass shader)</div><br>
+  <div id="versionLine">by ibrews &nbsp;·&nbsp; v0.2.6 built 2026-09-24 (round 27: tracked-hand pinch on Quest/Meta Browser -- left pinch walks, right pinch fires)</div><br>
   A living neon city at night. Sling a web, swing between skyscrapers, and see how much
   trouble you can cause before the night's over.<br><br>
   <span id="initialsRow">callsign (optional, 3 letters): <input id="initialsInput" maxlength="3"
@@ -776,7 +776,11 @@ document.body.appendChild(renderer.domElement);
 if (navigator.xr && navigator.xr.isSessionSupported) {
   navigator.xr.isSessionSupported('immersive-vr').then(supported => {
     if (supported) {
-      const vrBtn = VRButton.createButton(renderer);
+      // Round 27: ask for hand-tracking so tracked hands expose XRHand
+      // (joints) on Meta Browser; three merges this with its own
+      // local-floor/bounded-floor/layers list. Optional -- a runtime
+      // without it (or with it off) still starts the session.
+      const vrBtn = VRButton.createButton(renderer, { optionalFeatures: ['hand-tracking'] });
       // Alex, round 1: "move it up toward the top and make it a little
       // bigger" -- moving it all the way to the top felt wrong once seen
       // ("put it back where it was but a little higher"). VRButton.
@@ -5267,7 +5271,20 @@ function stepXR(dt) {
     // web/swing (that already worked and reads naturally). Real
     // controllers (Quest etc.) report 'tracked-pointer', so this doesn't
     // touch their existing either-trigger-fires-web behavior at all.
-    const isPinchDevice = src.targetRayMode === 'transient-pointer';
+    // Round 27 (2026-09-24, Meta VR Glasses demo prep): Quest-style
+    // TRACKED hands (Meta Browser hand tracking) are not transient
+    // pointers -- they report 'tracked-pointer' exactly like a controller,
+    // with a synthesized gamepad whose button[0] is the pinch and NO
+    // thumbstick axes. So they fell into the controller branch below:
+    // either pinch fired a web, but there was never a way to walk. Treat
+    // any hand source (XRHand present, a *hand* input profile, or a
+    // gamepad with no stick) the same as an AVP pinch: left pinch walks,
+    // right pinch fires. Covers the Meta VR Glasses' gaze+pinch whichever
+    // way its browser surfaces it (transient-pointer or tracked hands).
+    const isHandSource = !!src.hand
+      || (src.profiles || []).some(p => /hand/i.test(p))
+      || (gp.axes && gp.axes.length < 2);
+    const isPinchDevice = src.targetRayMode === 'transient-pointer' || isHandSource;
     if (isPinchDevice && !rightHand) {
       if (gp.buttons[0] && gp.buttons[0].pressed) { moveY = -1; leftPinchNow = true; }   // walk forward -- see xrKeys.KeyW below
       continue;

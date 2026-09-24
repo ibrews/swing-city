@@ -58,13 +58,23 @@ Off by default — the game only connects if loaded with `?mp=<websocket-url>` p
 
 Click **Enter VR** (bottom-center, only shown if your browser/headset supports it). Starts in **first-person** — arms and a jousting-rod view-model stand in for your body; **right controller B** (or double-pinch the left hand on pinch-only devices like Vision Pro, which has no physical buttons) toggles to third-person, where your full pawn is visible and the camera orbits behind you. The camera only ever turns on yaw (a flat turntable) in either mode — swinging, falling, or looking around never tilts the view, for comfort.
 
-Right stick: **X always smooth-turns yaw**; **Y snap-turns in first-person, smoothly pitches the camera in third-person** (real head tilt already covers first-person pitch, so the stick doesn't fight it there). Left stick moves and, once attached to a swing, reels the rope in/out exactly like W/S on desktop. Either trigger fires a web/jump; left controller X exits VR, Y respawns, left stick click toggles the HUD. On Vision Pro's pinch-only input, left-hand pinch walks forward and right-hand pinch fires the web.
+Right stick: **X always smooth-turns yaw**; **Y snap-turns in first-person, smoothly pitches the camera in third-person** (real head tilt already covers first-person pitch, so the stick doesn't fight it there). Left stick moves and, once attached to a swing, reels the rope in/out exactly like W/S on desktop. Either trigger fires a web/jump; left controller X exits VR, Y respawns, left stick click toggles the HUD. With tracked hands instead of controllers (Quest / Meta Browser hand tracking, or Vision Pro's gaze-and-pinch), **left-hand pinch walks forward in the direction you're looking** and **right-hand pinch fires the web**; double-pinch the left hand to toggle first/third person. Hand support is verified in Meta's IWER emulator (`tests/iwer-hands.mjs`, see below) and on a physical Vision Pro; a physical Quest hand-tracking pass is still pending.
 
 A sun/moon arcs across the sky, cycling through the same day-drift color palette as the boundary wall. Remote players' active power-ups (glow + cape recolor) are visible to everyone in multiplayer, not just the player using them.
 
 ---
 
 Built by [Alex Coulombe Presents](https://www.alexcoulombepresents.com).
+
+### Testing hand tracking without a headset
+
+`tests/iwer-hands.mjs` drives the page in headless Chrome with [IWER](https://github.com/meta-quest/immersive-web-emulator-runtime) (Meta's WebXR emulator) as an emulated Quest 3 in hand mode, then asserts through the `window.__sw` debug hook that a left pinch walks, a right pinch fires the web, and controller thumbsticks/triggers still work. It needs `playwright` and `iwer` resolvable from some checkout:
+
+```bash
+cd ~/GH/swing-city && python3 -m http.server 8791 --bind 127.0.0.1 &
+NODE_MODULES=~/GH/isle-webxr/node_modules IWER_JS=~/GH/isle-webxr/node_modules/iwer/build/iwer.min.js \
+  node tests/iwer-hands.mjs http://127.0.0.1:8791/
+```
 
 ## Support
 
