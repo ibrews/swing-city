@@ -780,7 +780,10 @@ if (navigator.xr && navigator.xr.isSessionSupported) {
       // (joints) on Meta Browser; three merges this with its own
       // local-floor/bounded-floor/layers list. Optional -- a runtime
       // without it (or with it off) still starts the session.
-      const vrBtn = VRButton.createButton(renderer, { optionalFeatures: ['hand-tracking'] });
+      // Round 29 (2026-09-29): 'gaze-tracking'/'eye-tracking' too. Alex's
+      // Meta VR Glasses hands-on: input is tracked hands, a gaze ray, or
+      // both. A gaze ray is only granted when asked for; see webAimDir().
+      const vrBtn = VRButton.createButton(renderer, { optionalFeatures: ['hand-tracking', 'gaze-tracking', 'eye-tracking'] });
       // Alex, round 1: "move it up toward the top and make it a little
       // bigger" -- moving it all the way to the top felt wrong once seen
       // ("put it back where it was but a little higher"). VRButton.
@@ -3747,6 +3750,46 @@ function aimDir() {
   return d;
 }
 
+// Where the EYES are pointing, if the headset offers a continuous gaze ray
+// (targetRayMode 'gaze' -- Meta VR Glasses; Alex, round 29: "the input is
+// tracked hands, gaze ray, and both... like Apple Vision Pro"). Null when
+// there isn't one, which is every device this game was tuned on: Quest has no
+// gaze source, and Vision Pro's gaze arrives as a transient pointer instead.
+// Pose is in the XR reference space; cameraRig carries yaw/position on top.
+// Sampled once per XR frame by stepXR() (sampleGaze), because
+// renderer.xr.getFrame() only exists inside the frame callback -- reading the
+// pose on demand returned null from anywhere else. The rig's yaw is applied at
+// READ time, so a snap turn or about-face moves the gaze immediately.
+const _gazeQ = new THREE.Quaternion(), _rigQ = new THREE.Quaternion();
+let xrGazeLive = false;
+function sampleGaze(session) {
+  xrGazeLive = false;
+  const frame = renderer.xr.getFrame(), ref = renderer.xr.getReferenceSpace();
+  if (!session || !frame || !ref) return;
+  for (const src of session.inputSources) {
+    if (src.targetRayMode !== 'gaze') continue;
+    let pose = null;
+    try { pose = frame.getPose(src.targetRaySpace, ref); } catch (_) {}
+    if (!pose) return;
+    const o = pose.transform.orientation;
+    _gazeQ.set(o.x, o.y, o.z, o.w);
+    xrGazeLive = true;
+    return;
+  }
+}
+function gazeDir() {
+  if (!renderer.xr.isPresenting || !xrGazeLive) return null;
+  cameraRig.getWorldQuaternion(_rigQ);
+  return new THREE.Vector3(0, 0, -1).applyQuaternion(_gazeQ).applyQuaternion(_rigQ).normalize();
+}
+// The web goes where you LOOK, not where your head happens to face: "look at a
+// building, pinch right" is the whole gaze+pinch contract. Only the web anchor
+// search uses this. Walking, flight and avatar facing stay on the head
+// (aimDir), because steering by eye would follow every glance.
+function webAimDir() {
+  return gazeDir() || aimDir();
+}
+
 // ENERGY BLAST: auto-fires forward every ~0.6s while active (no new input
 // binding introduced -- the manifest didn't specify a trigger key, so this
 // reuses the existing "jousting stick" idea as a passive turret instead).
@@ -4409,7 +4452,7 @@ function touchingWallNow() {
 // rope so the BOTTOM of the swing arc clears the street — an unclamped rope
 // longer than your altitude slams you into the pavement mid-swing.
 function findAnchor() {
-  const fwd = aimDir();
+  const fwd = webAimDir();
   const up = new THREE.Vector3(0, 1, 0);
   const right = fwd.clone().cross(up).normalize();
   // MID-AIR STICK-BIASED AIMING (Alex: "the direction I'm pointing my left
@@ -5252,6 +5295,7 @@ function stepArmSwingPhysics(dt) {
 }
 function stepXR(dt) {
   const session = renderer.xr.getSession && renderer.xr.getSession();
+  sampleGaze(session);
   if (!session) {
     xrWebHeld = false;
     xrKeys.KeyW = xrKeys.KeyS = xrKeys.KeyA = xrKeys.KeyD = xrKeys.ShiftLeft = false;
@@ -6948,7 +6992,7 @@ renderer.setAnimationLoop(loop);
 
 // Debug hook -- lets anyone poke at live state from devtools without
 // needing a build step (e.g. `__sw.player.pos.set(x,y,z)` to teleport).
-window.__sw = { THREE, player, cars, parkedCars, pickups, colliders, EDGE, WORLD_BOUND, touchingWallNow,
+window.__sw = { THREE, aimDir, gazeDir, webAimDir, cameraRig, player, cars, parkedCars, pickups, colliders, EDGE, WORLD_BOUND, touchingWallNow,
                 GRID_N, VEHICLE_TYPES, buildingLabels, buildingLabelSprites, segs, cylSegs,
                 buildingChunkMeshes, celestialBody, stepCelestial, celestialMat, wallMeshes, anchorRayTargets,
                 get powerupMusicFamily() { return powerupMusicFamily; },
