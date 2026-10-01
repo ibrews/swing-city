@@ -72,26 +72,65 @@ check('right pinch → fires web (xrWebHeld)', s4.held === true && s4.W === fals
 await page.evaluate(() => window.xrDevice.hands.right.updatePinchValue(0));
 await page.waitForTimeout(400);
 
-// Round 28: two right-pinch STARTS within 400 ms = 180° about-face.
-const yaw0 = await page.evaluate(() => window.__sw.yaw);
-await page.evaluate(() => window.xrDevice.hands.right.updatePinchValue(1));
-await page.waitForTimeout(120);
-await page.evaluate(() => window.xrDevice.hands.right.updatePinchValue(0));
-await page.waitForTimeout(120);
-await page.evaluate(() => window.xrDevice.hands.right.updatePinchValue(1));
-await page.waitForTimeout(200);
-await page.evaluate(() => window.xrDevice.hands.right.updatePinchValue(0));
-await page.waitForTimeout(200);
-const yaw1 = await page.evaluate(() => window.__sw.yaw);
-const turned = Math.abs(Math.abs(yaw1 - yaw0) - Math.PI);
-check('double-pinch right → 180° about-face', turned < 0.01, `yaw ${yaw0.toFixed(3)} → ${yaw1.toFixed(3)}`);
-await page.waitForTimeout(600);
-await page.evaluate(() => window.xrDevice.hands.right.updatePinchValue(1));
-await page.waitForTimeout(300);
-await page.evaluate(() => window.xrDevice.hands.right.updatePinchValue(0));
-await page.waitForTimeout(200);
-const yaw2 = await page.evaluate(() => window.__sw.yaw);
-check('single right pinch does NOT turn', Math.abs(yaw2 - yaw1) < 1e-6, `yaw ${yaw1.toFixed(3)} → ${yaw2.toFixed(3)}`);
+// Round 28: two right-pinch STARTS within 400 ms = 180 degree about-face.
+// WHY the whole gesture is driven INSIDE one page.evaluate, on in-page
+// timers: the app's window is only 400 ms wide, and this used to be four
+// separate page.evaluate calls separated by page.waitForTimeout(120). Each
+// Playwright round trip (CDP latency) plus frame granularity ate the 160 ms
+// of margin, so under host load the test lied in BOTH directions -- a
+// working app could fail and a broken one could pass. Driven in-page, the
+// only jitter left is a single animation frame.
+//
+// Runs a timed pinch plan on the emulated right hand and, every frame,
+// counts rising edges of that hand's gamepad buttons[0].pressed -- the exact
+// signal index.html edge-detects (nothing on window.__sw exposes the
+// pinch-start itself). The sample is taken BEFORE the frame's plan step, so
+// an edge only counts once the pressed state has survived into a frame the
+// app's own loop could see too.
+const drivePinches = async ({ plan, endAt }) => {
+  const hand = window.xrDevice.hands.right;
+  // Drive on the XR SESSION's frame loop, not window.requestAnimationFrame:
+  // while presenting, the window loop is throttled and ticks far slower than
+  // the frames the app's own stepXR actually reads input on.
+  const session = window.__sw.renderer.xr.getSession();
+  const rightSrc = () => [...window.__sw.renderer.xr.getSession().inputSources].find(s => s.handedness === 'right');
+  const yaw0 = window.__sw.yaw;
+  let starts = 0, prev = false, next = 0, frames = 0, t = 0;
+  const startTimes = [];
+  const t0 = performance.now();
+  await new Promise(resolve => {
+    const tick = () => {
+      t = performance.now() - t0;
+      frames++;
+      const src = rightSrc();
+      const pressed = !!(src && src.gamepad && src.gamepad.buttons[0] && src.gamepad.buttons[0].pressed);
+      if (pressed && !prev) { starts++; startTimes.push(Math.round(t)); }
+      prev = pressed;
+      // At most ONE plan step per frame. A press and its release applied in
+      // the same frame would be invisible to this sampler AND to the app's
+      // own edge detector -- this scene renders on swiftshader, where a
+      // frame can be longer than the 120 ms hold.
+      if (next < plan.length && t >= plan[next][0]) hand.updatePinchValue(plan[next++][1]);
+      if (next >= plan.length && t >= endAt) { hand.updatePinchValue(0); resolve(); return; }
+      session.requestAnimationFrame(tick);
+    };
+    session.requestAnimationFrame(tick);
+  });
+  return { yaw0, yaw1: window.__sw.yaw, starts, startTimes, frames, ms: Math.round(t) };
+};
+
+// Gap between the two pinch STARTS. 240 ms sits inside the app's 400 ms
+// window; ABOUT_FACE_GAP_MS=500 widens it past the window, which is the
+// control run that proves the yaw assertion can actually go red.
+const gapMs = Number(process.env.ABOUT_FACE_GAP_MS || 240);
+const dbl = await page.evaluate(drivePinches, { plan: [[0, 1], [120, 0], [gapMs, 1], [gapMs + 200, 0]], endAt: gapMs + 560 });
+check('double-pinch right: gesture seen (2 pinch starts)', dbl.starts === 2, `rising edges ${dbl.starts} at ${JSON.stringify(dbl.startTimes)}ms, requested gap ${gapMs}ms, ${dbl.frames} frames in ${dbl.ms}ms`);
+const turned = Math.abs(Math.abs(dbl.yaw1 - dbl.yaw0) - Math.PI);
+check('double-pinch right -> 180 degree about-face', turned < 0.01, `yaw ${dbl.yaw0.toFixed(3)} -> ${dbl.yaw1.toFixed(3)}, gap ${gapMs}ms`);
+
+await page.waitForTimeout(600);   // let the app's 400 ms double-tap window lapse
+const sgl = await page.evaluate(drivePinches, { plan: [[0, 1], [300, 0]], endAt: 800 });
+check('single right pinch does NOT turn', sgl.starts === 1 && Math.abs(sgl.yaw1 - sgl.yaw0) < 1e-6, `starts ${sgl.starts} at ${JSON.stringify(sgl.startTimes)}ms, yaw ${sgl.yaw0.toFixed(3)} -> ${sgl.yaw1.toFixed(3)}`);
 
 // Regression: controllers still drive movement via the thumbstick.
 await page.evaluate(() => { window.xrDevice.primaryInputMode = 'controller'; });
