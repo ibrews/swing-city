@@ -1,0 +1,16 @@
+inputSources (hand mode): [{"handedness":"left","targetRayMode":"tracked-pointer","profiles":["oculus-hand","generic-hand","generic-hand-select","generic-trigger"],"hasHand":true,"buttons":1,"axes":0},{"handedness":"right","targetRayMode":"tracked-pointer","profiles":["oculus-hand","generic-hand","generic-hand-select","generic-trigger"],"hasHand":true,"buttons":1,"axes":0}]
+PASS  two tracked hands present  — ["tracked-pointer","tracked-pointer"]
+PASS  idle: no walk, no web  — {"W":false,"held":false,"x":-4.557943460531533,"z":6.984311169944704}
+PASS  left pinch → walks (xrKeys.KeyW)  — {"W":true,"held":false,"x":-4.557943460531533,"z":6.603161169944704}
+PASS  left pinch → player displaced  — moved 2.13 in 1.2s
+PASS  left pinch does NOT fire web  — {"W":true,"held":false,"x":-4.557943460531533,"z":6.603161169944704}
+PASS  release left → stops walking  — {"W":false,"held":false,"x":-4.557943460531533,"z":-2.4300938300552954}
+PASS  right pinch → fires web (xrWebHeld)  — {"W":false,"held":true,"x":-4.557943460531533,"z":-5.673333830055296}
+PASS  double-pinch right: gesture seen (2 pinch starts)  — rising edges 2 at [323,645]ms, requested gap 240ms, 5 frames in 843ms
+PASS  double-pinch right -> 180 degree about-face  — yaw 0.000 -> -3.142, gap 240ms
+PASS  single right pinch does NOT turn  — starts 1 at [363]ms, yaw -3.142 -> -3.142
+inputSources (controller mode): [{"h":"left","m":"tracked-pointer","axes":4},{"h":"right","m":"tracked-pointer","axes":4}]
+PASS  controller: left stick forward → walks  — {"W":true,"held":false,"x":-4.557943460531533,"z":-28.955823830055284}
+PASS  controller: right trigger → fires web  — {"W":false,"held":true,"x":-4.557943460531533,"z":-32.39194883005529}
+
+ALL PASSED
