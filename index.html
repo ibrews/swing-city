@@ -5206,7 +5206,7 @@ let xrWebHeld = false, xrLeftXPrev = false, xrLeftYPrev = false, xrRightBPrev = 
 // 400ms. A single held pinch still just walks (see the transient-pointer
 // branch in stepXR); the double-tap only costs one brief walk-stutter.
 let xrLeftPinchPrev = false, xrLeftPinchLastStart = -1e9;
-// Round 28 (Alex, on Quest hands: "double pinch right for snap turn 180").
+// Round 28 (Alex, 2026-09-24: "double pinch right for snap turn 180"; device not recorded).
 // Same two-starts-within-400ms shape as the left hand; each pinch still
 // fires its web tap, the about-face rides on the second start.
 let xrRightPinchPrev = false, xrRightPinchLastStart = -1e9;
